@@ -1,7 +1,7 @@
-export type AgentStatus = 'idle' | 'running' | 'thinking' | 'done'
+export type AgentStatus = 'idle' | 'running' | 'thinking' | 'done' | 'waiting'
 
 export interface AgentMsg {
-  type: 'thinking' | 'action' | 'output' | 'question'
+  type: 'thinking' | 'action' | 'output' | 'question' | 'prompt'
   text: string
 }
 
@@ -10,11 +10,13 @@ export class Agent {
   name: string
   status: AgentStatus
   messages: AgentMsg[]
+  cwd: string
   private listeners: (() => void)[] = []
 
-  constructor(name: string) {
+  constructor(name: string, cwd = '~/project') {
     this.id = Math.random().toString(36).slice(2)
     this.name = name
+    this.cwd = cwd
     this.status = 'idle'
     this.messages = []
   }
@@ -25,23 +27,49 @@ export class Agent {
   push(msg: AgentMsg) { this.messages.push(msg); this.notify() }
 
   async simulate(task: string) {
-    this.status = 'running'; this.messages = []; this.notify()
+    const keyword = task.split(' ').at(-1) ?? task
+
+    this.status = 'running'
+    this.messages = []
+    this.push({ type: 'prompt', text: `(base) user@codespace:${this.cwd} %` })
+    this.notify()
+
     await delay(600)
     this.status = 'thinking'
     this.push({ type: 'thinking', text: 'Thinking...' })
+
     await delay(900)
-    this.push({ type: 'action', text: `> Grepped codebase for "${task.split(' ').slice(-1)[0]}"` })
+    this.push({ type: 'action', text: `> Grepped codebase for "${keyword}"` })
+
     await delay(700)
-    this.push({ type: 'action', text: '> Reading src/modules/Module.ts' })
+    this.push({ type: 'action', text: `> Reading src/modules/Module.ts` })
+
     await delay(500)
     this.status = 'running'
     this.push({ type: 'output', text: `Found 3 matches. Analyzing context...` })
+
     await delay(1000)
+    this.status = 'waiting'
     this.push({
       type: 'question',
-      text: `I've searched the codebase and found relevant code. Would you like me to apply the changes automatically?`
+      text: `I searched the codebase for "${keyword}" and found relevant code. Nothing on the internet yet — want me to search there too?`,
     })
-    this.status = 'done'; this.notify()
+    this.notify()
+  }
+
+  answer(yes: boolean) {
+    if (this.status !== 'waiting') return
+    if (yes) {
+      this.status = 'running'
+      this.push({ type: 'thinking', text: 'Searching the internet...' })
+      delay(1500).then(() => {
+        this.push({ type: 'output', text: 'Found 2 relevant results. Applying changes...' })
+        delay(1000).then(() => { this.status = 'done'; this.notify() })
+      })
+    } else {
+      this.status = 'done'
+      this.notify()
+    }
   }
 }
 
