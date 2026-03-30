@@ -10,10 +10,15 @@ const USER_KEY = 'mouse_gh_user'
 /** Shipped default; public, not secret. Override with `VITE_GITHUB_CLIENT_ID` in `.env` when needed. */
 const EMBEDDED_GITHUB_CLIENT_ID = 'Iv23liFfOa5cNvXvatNB'
 
+/** Optional; used for https://github.com/apps/&lt;slug&gt;/installations/new when not in .env */
+const EMBEDDED_GITHUB_APP_SLUG = ''
+
 const CLIENT_PLACEHOLDERS = new Set([
   'your_github_oauth_app_client_id',
   'your_github_app_client_id',
 ])
+
+const SLUG_PLACEHOLDERS = new Set(['', 'your_github_app_slug'])
 
 export interface DeviceCodeResponse {
   device_code: string
@@ -51,6 +56,29 @@ function effectiveClientId(): string {
     : ''
   if (raw && !isPlaceholderClientId(raw)) return raw
   return EMBEDDED_GITHUB_CLIENT_ID.trim()
+}
+
+function effectiveAppSlug(): string {
+  const raw = typeof import.meta.env.VITE_GITHUB_APP_SLUG === 'string'
+    ? import.meta.env.VITE_GITHUB_APP_SLUG.trim()
+    : ''
+  if (raw && !SLUG_PLACEHOLDERS.has(raw)) return raw
+  return EMBEDDED_GITHUB_APP_SLUG.trim()
+}
+
+/** OAuth App / GitHub App Client ID used in API responses (e.g. matching `/user/installations`). */
+export function publicGithubClientId(): string {
+  return effectiveClientId()
+}
+
+/**
+ * Public install URL for this GitHub App. Requires `VITE_GITHUB_APP_SLUG` (or embedded slug) so we can
+ * link to `https://github.com/apps/&lt;slug&gt;/installations/new` before any installation exists.
+ */
+export function githubAppInstallPageUrl(): string | null {
+  const slug = effectiveAppSlug()
+  if (!slug) return null
+  return `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`
 }
 
 /** True when a Client ID is available (embedded default or non-placeholder `VITE_GITHUB_CLIENT_ID`). */

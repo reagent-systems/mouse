@@ -1,5 +1,13 @@
+import { authKind } from '../auth/GitHubAuth.ts'
 import type { Codespace } from './CodespacesApi.ts'
-import { listCodespaces, waitUntilAvailable, isRelayRunning, relayWssUrl } from './CodespacesApi.ts'
+import {
+  listCodespaces,
+  waitUntilAvailable,
+  isRelayRunning,
+  relayWssUrl,
+  getRepositoryMetadata,
+  createUserCodespace,
+} from './CodespacesApi.ts'
 
 export interface PickResult {
   codespace: Codespace
@@ -35,10 +43,7 @@ export class CodespacePicker {
 
   private renderLoading() {
     this.el.innerHTML = `
-      <div class="picker-header">
-        <span class="picker-title">Your Codespaces</span>
-      </div>
-      <div class="picker-loading">
+      <div class="picker-loading picker-loading-full">
         <span class="auth-spinner"></span>
         Loading…
       </div>
@@ -46,39 +51,89 @@ export class CodespacePicker {
   }
 
   private renderEmpty() {
+    const appHint = authKind() === 'github_app'
+      ? `<p class="picker-empty-hint">Signed in with a GitHub App? You only see Codespaces for repos that installation can use (needs <strong>Codespaces: Read and write</strong>).</p>`
+      : ''
     this.el.innerHTML = `
-      <div class="picker-header">
-        <span class="picker-title">Your Codespaces</span>
-      </div>
       <div class="picker-empty">
         <div class="picker-empty-icon">⬡</div>
-        <p>No Codespaces found.</p>
-        <p style="color:var(--text-faint);font-size:12px;margin-top:6px">
-          Create one at github.com/codespaces
-        </p>
-        <button class="auth-btn" style="margin-top:20px" id="refresh-btn">Refresh</button>
+        <p>No Codespaces yet.</p>
+        ${appHint}
+        <button type="button" class="auth-btn picker-empty-cta" id="create-btn">
+          Create Codespace
+        </button>
       </div>
     `
-    this.el.querySelector('#refresh-btn')!.addEventListener('click', () => this.load())
+    this.el.querySelector('#create-btn')!.addEventListener('click', () => this.renderCreateForm())
   }
 
   private renderList(spaces: Codespace[]) {
     this.el.innerHTML = `
-      <div class="picker-header">
-        <span class="picker-title">Your Codespaces</span>
-        <button class="picker-refresh" id="refresh-btn">↺</button>
+      <div class="picker-header picker-header-row">
+        <button type="button" class="auth-btn picker-header-btn" id="create-btn">
+          Create Codespace
+        </button>
       </div>
       <div class="picker-list" id="picker-list"></div>
       <div class="picker-footer">
-        <p class="picker-footer-note">
-          First time? Run the Mouse relay in your Codespace:
-        </p>
-        <div class="picker-setup-cmd">npx @mouse-app/relay</div>
+        <div class="picker-setup-cmd" title="Run inside the Codespace terminal">npx @mouse-app/relay</div>
       </div>
     `
-    this.el.querySelector('#refresh-btn')!.addEventListener('click', () => this.load())
+    this.el.querySelector('#create-btn')!.addEventListener('click', () => this.renderCreateForm())
     const list = this.el.querySelector('#picker-list')!
     spaces.forEach(cs => list.appendChild(this.makeCard(cs)))
+  }
+
+  private renderCreateForm() {
+    this.el.innerHTML = `
+      <div class="picker-header">
+        <button type="button" class="picker-back" id="back-btn">‹ Back</button>
+      </div>
+      <div class="picker-create-form">
+        <input type="text" class="picker-create-input" id="repo-input"
+          placeholder="owner/repo" autocomplete="off" />
+        <input type="text" class="picker-create-input" id="branch-input"
+          placeholder="branch (optional)" autocomplete="off" />
+        <p class="auth-error" id="create-err" hidden></p>
+        <button type="button" class="auth-btn" id="submit-create">Create</button>
+      </div>
+    `
+    const errEl = this.el.querySelector('#create-err') as HTMLElement
+    const repoInput = this.el.querySelector('#repo-input') as HTMLInputElement
+    const branchInput = this.el.querySelector('#branch-input') as HTMLInputElement
+
+    this.el.querySelector('#back-btn')!.addEventListener('click', () => this.load())
+    this.el.querySelector('#submit-create')!.addEventListener('click', async () => {
+      errEl.hidden = true
+      const raw = repoInput.value.trim()
+      const parts = raw.split('/').map(s => s.trim()).filter(Boolean)
+      if (parts.length !== 2) {
+        errEl.textContent = 'Enter repository as owner/repo.'
+        errEl.hidden = false
+        return
+      }
+      const [owner, repo] = parts
+      const refBranch = branchInput.value.trim()
+
+      const btn = this.el.querySelector('#submit-create') as HTMLButtonElement
+      btn.disabled = true
+      btn.textContent = 'Creating…'
+      try {
+        const meta = await getRepositoryMetadata(this.token, owner, repo)
+        const ref = refBranch || meta.default_branch
+        const cs = await createUserCodespace(this.token, meta.id, ref)
+        const live = await waitUntilAvailable(this.token, cs.name, (state) => {
+          btn.textContent = state === 'Shutdown' ? 'Starting…' : `${state}…`
+        })
+        await this.connect(live)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        errEl.textContent = msg
+        errEl.hidden = false
+        btn.disabled = false
+        btn.textContent = 'Create'
+      }
+    })
   }
 
   private makeCard(cs: Codespace): HTMLElement {

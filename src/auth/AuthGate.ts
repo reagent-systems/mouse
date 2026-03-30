@@ -1,7 +1,8 @@
+import { openExternalUrl } from '../platform/openExternalUrl.ts'
 import { requestDeviceCode, pollForToken, isGitHubOAuthConfigured } from './GitHubAuth.ts'
 import { authLog, getAuthDebugLog } from './authLog.ts'
 
-type DoneCallback = (token: string) => void
+type DoneCallback = (token: string) => void | Promise<void>
 
 function escapeHtml(s: string): string {
   return s
@@ -31,7 +32,7 @@ export class AuthGate {
           <strong>One-time setup</strong>
           <p>Use a <strong>GitHub App</strong> (required for Marketplace) with <strong>Device flow</strong> enabled, or a classic <strong>OAuth App</strong> for local-only experiments.</p>
           <ol class="auth-setup-steps">
-            <li>Copy <code>.env.example</code> → <code>.env</code>. Set <code>VITE_GITHUB_CLIENT_ID</code> to the app&apos;s Client ID.</li>
+            <li>Copy <code>.env.example</code> → <code>.env</code>. Set <code>VITE_GITHUB_CLIENT_ID</code> and <code>VITE_GITHUB_APP_SLUG</code> (from your app URL <code>github.com/apps/your-slug</code>).</li>
             <li>Default <code>VITE_GITHUB_AUTH_KIND=github_app</code> omits OAuth scopes (permissions come from the GitHub App). For legacy OAuth Apps, set <code>VITE_GITHUB_AUTH_KIND=oauth_app</code>.</li>
             <li>Restart <code>npm run dev</code> or rebuild native: <code>npm run build && npm run cap:sync</code>.</li>
           </ol>
@@ -99,17 +100,24 @@ export class AuthGate {
       setTimeout(() => { hint.textContent = 'Tap to copy' }, 2000)
     })
 
-    // Open the URL on desktop via Electron
     const link = this.el.querySelector('a')!
     link.addEventListener('click', (e) => {
-      if ((window as any).__electron__) {
+      if ((window as Window & { __electron__?: unknown }).__electron__) {
         e.preventDefault()
-        ;(window as any).__electron__.openExternal(uri)
+        openExternalUrl(uri)
       }
     })
 
     pollForToken(deviceCode, interval)
-      .then(token => this.onDone(token))
+      .then(async (token) => {
+        try {
+          await Promise.resolve(this.onDone(token))
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err)
+          authLog('error', 'post_sign_in_failed', { message })
+          this.renderError(message)
+        }
+      })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
         authLog('error', 'poll_failed', { message })

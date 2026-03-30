@@ -1,3 +1,5 @@
+import { authKind } from '../auth/GitHubAuth.ts'
+
 const BASE = 'https://api.github.com'
 const RELAY_PORT = 2222
 
@@ -20,11 +22,97 @@ export interface Codespace {
   last_used_at: string | null
 }
 
+/** Explains GitHub’s integration / permission errors for Codespaces (GitHub App vs OAuth). */
+export function codespacesAccessHint(apiMessage: string): string {
+  const lower = apiMessage.toLowerCase()
+  const integrationBlocked =
+    lower.includes('not accessible by integration')
+    || lower.includes('not accessibly by integration')
+
+  if (!integrationBlocked) return apiMessage
+
+  if (authKind() === 'github_app') {
+    return `${apiMessage}
+
+GitHub App sign-in only lists and creates Codespaces for repositories your app installation can access, and only if the app has Repository → Codespaces set to Read and write. Open GitHub → Settings → Developer settings → GitHub Apps → your app, update that permission, then open Install App and ensure the installation includes every user/org and repo you use (accept any new permission prompts).
+
+If you are testing for yourself only, you can switch to a classic OAuth App: set VITE_GITHUB_AUTH_KIND=oauth_app and the codespace scope (see .env.example).`
+  }
+
+  return `${apiMessage}
+
+Use an OAuth App that requests the codespace scope, then sign out in Mouse and authorize again so the token includes it.`
+}
+
+async function readApiErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const j = await res.json() as { message?: string }
+    if (typeof j.message === 'string' && j.message.trim()) return j.message.trim()
+  } catch { /* ignore */ }
+  return fallback
+}
+
 export async function listCodespaces(token: string): Promise<Codespace[]> {
   const res = await fetch(`${BASE}/user/codespaces`, { headers: headers(token) })
-  if (!res.ok) throw new Error(`Failed to list Codespaces: ${res.status}`)
+  if (!res.ok) {
+    const msg = await readApiErrorMessage(res, `Failed to list Codespaces (HTTP ${res.status})`)
+    throw new Error(codespacesAccessHint(msg))
+  }
   const data = await res.json()
   return data.codespaces ?? []
+}
+
+export interface RepoMetadata {
+  id: number
+  full_name: string
+  default_branch: string
+}
+
+/** Resolve `owner/name` to numeric repo id for Codespace create API. */
+export async function getRepositoryMetadata(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<RepoMetadata> {
+  const res = await fetch(
+    `${BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+    { headers: headers(token) },
+  )
+  if (!res.ok) {
+    const detail = await readApiErrorMessage(res, `HTTP ${res.status}`)
+    throw new Error(codespacesAccessHint(`Repository unavailable: ${detail}`))
+  }
+  const data = await res.json() as {
+    id: number
+    full_name: string
+    default_branch?: string
+  }
+  return {
+    id: data.id,
+    full_name: data.full_name,
+    default_branch: data.default_branch ?? 'main',
+  }
+}
+
+/** Create a new Codespace for the authenticated user (POST /user/codespaces). */
+export async function createUserCodespace(
+  token: string,
+  repositoryId: number,
+  ref: string,
+): Promise<Codespace> {
+  const res = await fetch(`${BASE}/user/codespaces`, {
+    method: 'POST',
+    headers: {
+      ...headers(token),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ repository_id: repositoryId, ref }),
+  })
+  if (res.status !== 201 && res.status !== 202) {
+    const msg = await readApiErrorMessage(res, `Could not create Codespace (HTTP ${res.status})`)
+    throw new Error(codespacesAccessHint(msg))
+  }
+  return res.json() as Promise<Codespace>
 }
 
 export async function getCodespace(token: string, name: string): Promise<Codespace> {
