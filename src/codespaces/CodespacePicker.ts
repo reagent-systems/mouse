@@ -1,4 +1,5 @@
 import { authKind } from '../auth/GitHubAuth.ts'
+import { openExternalUrl } from '../platform/openExternalUrl.ts'
 import type { Codespace } from './CodespacesApi.ts'
 import {
   listCodespaces,
@@ -8,6 +9,7 @@ import {
   getRepositoryMetadata,
   createUserCodespace,
 } from './CodespacesApi.ts'
+import { RELAY_DEVCONTAINER_MERGE_JSON } from './relayAutoStartSnippet.ts'
 
 export interface PickResult {
   codespace: Codespace
@@ -207,34 +209,53 @@ export class CodespacePicker {
   }
 
   private renderRelaySetup(cs: Codespace, live = cs) {
+    const web = live.web_url ?? ''
     this.el.innerHTML = `
       <div class="picker-header">
         <button class="picker-back" id="back-btn">‹ Back</button>
-        <span class="picker-title">Setup Required</span>
+        <span class="picker-title">Relay</span>
       </div>
       <div class="relay-setup glass">
         <div class="relay-setup-icon">🔌</div>
-        <h3 class="relay-setup-title">Start the Mouse relay</h3>
+        <h3 class="relay-setup-title">Bridge to your Codespace</h3>
         <p class="relay-setup-desc">
-          Open your Codespace terminal and run this once:
+          GitHub does not expose a terminal stream to third-party apps. Mouse talks to a small
+          <strong>relay</strong> on port ${2222} inside the Codespace. Add the devcontainer snippet
+          to your repo so it starts automatically; otherwise run the command once in any terminal.
         </p>
+        ${web ? `
+        <button type="button" class="auth-btn relay-setup-btn" id="open-web-cs">Open Codespace in browser</button>
+        <p class="relay-copy-hint relay-setup-hint">Run the command in the browser&apos;s terminal, then tap Connect here.</p>
+        ` : ''}
+        <button type="button" class="auth-btn auth-btn-outline relay-setup-btn" id="copy-devcontainer-merge">Copy devcontainer snippet</button>
+        <p class="relay-copy-hint" id="copy-merge-hint" hidden></p>
+        <p class="relay-copy-hint relay-setup-hint">Merge into <code class="auth-inline-code">.devcontainer/devcontainer.json</code>
+        so the relay starts whenever this Codespace resumes.</p>
         <div class="picker-setup-cmd" id="copy-cmd">npx @mouse-app/relay</div>
-        <p class="relay-copy-hint" id="copy-hint">Tap to copy</p>
-        <p class="relay-setup-desc" style="margin-top:12px;color:var(--text-faint)">
-          The relay starts a terminal bridge on port ${2222} inside your Codespace.
-          After running it, tap Connect.
-        </p>
-        <button class="auth-btn" id="connect-btn" style="margin-top:16px">
+        <p class="relay-copy-hint" id="copy-hint">Tap to copy command</p>
+        <button type="button" class="auth-btn relay-setup-btn" id="connect-btn">
           Connect
         </button>
       </div>
     `
     this.el.querySelector('#back-btn')!.addEventListener('click', () => this.load())
+    if (web) {
+      this.el.querySelector('#open-web-cs')!.addEventListener('click', () => openExternalUrl(web))
+    }
+    this.el.querySelector('#copy-devcontainer-merge')!.addEventListener('click', async () => {
+      const status = this.el.querySelector('#copy-merge-hint') as HTMLElement
+      try {
+        await navigator.clipboard?.writeText(RELAY_DEVCONTAINER_MERGE_JSON)
+        status.hidden = false
+        status.textContent = 'Snippet copied — merge into devcontainer.json and rebuild the Codespace once.'
+        setTimeout(() => { status.hidden = true }, 4500)
+      } catch { /* ignore */ }
+    })
     this.el.querySelector('#copy-cmd')!.addEventListener('click', () => {
       navigator.clipboard?.writeText('npx @mouse-app/relay')
       const hint = this.el.querySelector('#copy-hint') as HTMLElement
       hint.textContent = 'Copied!'
-      setTimeout(() => { hint.textContent = 'Tap to copy' }, 2000)
+      setTimeout(() => { hint.textContent = 'Tap to copy command' }, 2000)
     })
     this.el.querySelector('#connect-btn')!.addEventListener('click', () => this.connect(live))
   }

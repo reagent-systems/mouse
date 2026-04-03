@@ -615,6 +615,8 @@ html, body {
 .relay-setup-title { font-size: 16px; font-weight: 600; color: var(--text); }
 .relay-setup-desc { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
 .relay-copy-hint { font-size: 11px; color: var(--text-faint); }
+.relay-setup-btn { margin-top: 10px; width: 100%; }
+.relay-setup-hint { margin-top: 6px; line-height: 1.4; }
 
 /* ── Toast ─────────────────────────────────────────── */
 .toast {
