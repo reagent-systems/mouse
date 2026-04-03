@@ -4,7 +4,8 @@
   "description": "WebSocket PTY relay for Mouse — runs inside a GitHub Codespace",
   "type": "module",
   "files": [
-    "mouse-relay.mjs"
+    "mouse-relay.mjs",
+    "README.md"
   ],
   "bin": {
     "relay": "mouse-relay.mjs",
