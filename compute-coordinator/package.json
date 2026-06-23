@@ -1,0 +1,19 @@
+{
+  "name": "mouse-compute-coordinator",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Signaling/membership broker for the Mouse decentralized WebGPU compute pool (beta)",
+  "type": "module",
+  "bin": {
+    "mouse-compute-coordinator": "coordinator.mjs"
+  },
+  "scripts": {
+    "start": "node coordinator.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
