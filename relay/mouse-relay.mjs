@@ -18,6 +18,9 @@
  *   C→S  { type:"kill_session",  id }
  *   S→C  { type:"session_exit",  id, code }
  *
+ *   C→S  { type:"exec",          id, command, cwd? }
+ *   S→C  { type:"exec_result",   id, stdout, stderr, code }
+ *
  *   S→C  { type:"error",         message }
  *
  * Health check: GET /health → 200 { ok:true }
@@ -25,16 +28,33 @@
 
 import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
+import { exec as cpExec } from 'child_process'
+import { readdirSync, statSync } from 'fs'
 import pty from 'node-pty'
 
 const PORT  = parseInt(process.env.MOUSE_RELAY_PORT ?? '2222', 10)
 const SHELL = process.env.SHELL ?? '/bin/bash'
+const VERSION = '0.3.0'
+
+/** Best-effort repository working directory for one-shot `exec` commands. */
+let cachedCwd = null
+function defaultCwd() {
+  if (cachedCwd) return cachedCwd
+  try {
+    for (const entry of readdirSync('/workspaces')) {
+      const full = `/workspaces/${entry}`
+      try { if (statSync(full).isDirectory()) { cachedCwd = full; return cachedCwd } } catch { /* skip */ }
+    }
+  } catch { /* /workspaces missing (non-Codespace) */ }
+  cachedCwd = process.env.HOME ?? process.cwd()
+  return cachedCwd
+}
 
 // ── HTTP server (health check + WS upgrade) ────────────
 const server = createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, version: '0.2.0' }))
+    res.end(JSON.stringify({ ok: true, version: VERSION }))
     return
   }
   res.writeHead(404); res.end()
@@ -106,9 +126,38 @@ wss.on('connection', (ws) => {
         case 'input':         handleInput(msg);    break
         case 'resize':        handleResize(msg);   break
         case 'kill_session':  killSession(msg.id); break
+        case 'exec':          handleExec(msg);     break
       }
     })
   })
+
+  // ── One-shot command execution (powers file/git panels) ──
+  function handleExec({ id, command, cwd }) {
+    if (typeof command !== 'string' || !command) {
+      send({ type: 'exec_result', id, stdout: '', stderr: 'missing command', code: 1 })
+      return
+    }
+    cpExec(
+      command,
+      {
+        cwd: cwd || defaultCwd(),
+        env: { ...process.env },
+        shell: SHELL,
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 20000,
+      },
+      (err, stdout, stderr) => {
+        const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0
+        send({
+          type: 'exec_result',
+          id,
+          stdout: stdout?.toString() ?? '',
+          stderr: (stderr?.toString() ?? '') || (err && code !== 0 ? String(err.message ?? '') : ''),
+          code,
+        })
+      },
+    )
+  }
 
   // ── Session management ──────────────────────────────
   function startSession({ id, command, task }) {
@@ -185,7 +234,7 @@ wss.on('connection', (ws) => {
 })
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mouse-relay] v0.2.0 — port ${PORT}`)
+  console.log(`[mouse-relay] v${VERSION} — port ${PORT}`)
   console.log(`[mouse-relay] GitHub Codespaces forwards to:`)
   console.log(`[mouse-relay]   wss://{codespace-name}-${PORT}.app.github.dev`)
 })
