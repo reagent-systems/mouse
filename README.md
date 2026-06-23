@@ -93,7 +93,8 @@ ios/ / android/       # Capacitor native projects (generated/synced)
 
 ## Contributing
 
-Issues and pull requests are welcome in this repository.
+Issues and pull requests are welcome in this repository. For UI work, follow the
+design system in [`STYLEGUIDE.md`](STYLEGUIDE.md).
 
 ## License
 
