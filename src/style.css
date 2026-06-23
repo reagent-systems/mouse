@@ -275,6 +275,51 @@ html, body {
 }
 .git-tag-main { background: rgba(240, 113, 120, 0.18); color: var(--red); border: 1px solid rgba(240, 113, 120, 0.35); }
 .git-tag-origin { background: rgba(210, 166, 255, 0.15); color: var(--pink); border: 1px solid rgba(210, 166, 255, 0.35); }
+.graph-hash {
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 10px; color: var(--text-faint);
+}
+
+/* ── Shared panel states ───────────────────────────── */
+.panel-msg {
+  padding: 18px 16px; font-size: 12px; color: var(--text-faint);
+  line-height: 1.5; text-align: center;
+}
+.panel-error { color: var(--red); white-space: pre-wrap; text-align: left; }
+
+/* Code view gutter */
+.code-gutter {
+  display: inline-block; width: 2.5em; margin-right: 12px;
+  text-align: right; color: var(--text-faint); user-select: none;
+}
+
+/* File tree caret */
+.fi-caret { display: inline-flex; align-items: center; justify-content: center; }
+
+/* Commit message input */
+.commit-input {
+  width: 100%; resize: none; margin-bottom: 10px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 8px 10px; font-size: 13px; line-height: 1.4;
+  font-family: inherit; outline: none;
+}
+.commit-input:focus { border-color: var(--border-bright); }
+.commit-input::placeholder { color: var(--text-faint); }
+.commit-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.changes-note { margin-left: auto; font-size: 10px; color: var(--green); }
+
+/* Git status code badges */
+.git-code {
+  width: 14px; height: 14px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; border-radius: 3px;
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+}
+.git-code-add { background: rgba(184, 204, 82, 0.18); color: var(--green); }
+.git-code-mod { background: rgba(89, 194, 255, 0.18); color: var(--blue); }
+.git-code-del { background: rgba(240, 113, 120, 0.18); color: var(--red); }
+.git-code-new { background: rgba(210, 166, 255, 0.18); color: var(--pink); }
 
 /* ── View: Terminal ────────────────────────────────── */
 .view-terminal {
