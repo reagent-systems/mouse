@@ -5,6 +5,7 @@ import { AuthGate } from './auth/AuthGate.ts'
 import { GitHubAppInstallGate } from './auth/GitHubAppInstallGate.ts'
 import { CodespacePicker } from './codespaces/CodespacePicker.ts'
 import { RelaySocket } from './terminal/RelaySocket.ts'
+import { RepoService } from './codespaces/RepoService.ts'
 import {
   authKind,
   clearAuth,
@@ -160,6 +161,7 @@ export class App {
         this.relay!.onSessionStarted('terminal', () => {
           stack.connectTerminal(this.relay!, 'terminal', 'Terminal')
         })
+        stack.connectRepo(new RepoService(this.relay!))
         this.toast(`Connected to ${codespaceName}`)
       }
       if (status === 'disconnected') this.toast('Terminal disconnected')
