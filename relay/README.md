@@ -62,6 +62,10 @@ GitHub `/user` is used to validate the token. On success the server sends `{ "ty
 - `kill_session` — end a session
 - `session_exit` — server notifies exit code
 
+**One-shot exec** (powers Mouse's file/git panels)
+
+- `exec` — `{ "type": "exec", "id": "…", "command": "git status --porcelain", "cwd": "…" }` runs a single command (no PTY) and replies with `{ "type": "exec_result", "id": "…", "stdout": "…", "stderr": "…", "code": 0 }`. `cwd` defaults to the repository checked out under `/workspaces`.
+
 Full message shapes are documented in the source header of `mouse-relay.mjs` in the repo.
 
 ## Port already in use (`EADDRINUSE`)

@@ -6,6 +6,7 @@ import { GitGraphView } from './views/GitGraph.ts'
 import { AgentView } from './views/AgentView.ts'
 import { XTermView } from '../terminal/XTermView.ts'
 import type { RelaySocket } from '../terminal/RelaySocket.ts'
+import type { RepoService } from '../codespaces/RepoService.ts'
 import type { Agent } from '../agents/Agent.ts'
 
 export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'terminal' | 'agent'
@@ -19,6 +20,7 @@ export class Module {
   private instances: Partial<Record<ViewType, { el: HTMLElement }>> = {}
   private xtermView: XTermView | null = null
   private agentView: AgentView | null = null
+  private repo: RepoService | null = null
   private cleanup: (() => void) | null = null
 
   constructor(initialView: ViewType = 'code') {
@@ -70,6 +72,34 @@ export class Module {
       this.agentView = view
       view.mount()
     }
+    if (v === 'files' && view instanceof FileTreeView) {
+      view.onOpenFile((path) => this.openFileInCode(path))
+    }
+    if (this.repo) this.applyRepo(v)
+  }
+
+  /** Pass the live repo to a repo-aware view if it supports it. */
+  private applyRepo(v: ViewType) {
+    if (!this.repo) return
+    const view = this.instances[v] as { connectRepo?: (r: RepoService) => void } | undefined
+    view?.connectRepo?.(this.repo)
+  }
+
+  /** Provide a live Codespace repo to all current and future repo-aware views. */
+  connectRepo(repo: RepoService) {
+    this.repo = repo
+    ;(['code', 'files', 'changes', 'graph'] as ViewType[]).forEach(v => {
+      if (this.instances[v]) this.applyRepo(v)
+    })
+  }
+
+  /** Open a file (from the Files panel) in this module's Code view and navigate to it. */
+  private openFileInCode(path: string) {
+    const idx = VIEWS.indexOf('code')
+    this.mountView(idx)
+    const code = this.instances['code'] as CodeEditorView | undefined
+    code?.openFile(path)
+    this.goTo(idx)
   }
 
   private createView(v: ViewType) {

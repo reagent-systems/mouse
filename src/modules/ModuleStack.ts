@@ -2,6 +2,7 @@ import { Module } from './Module.ts'
 import type { ViewType } from './Module.ts'
 import type { Agent } from '../agents/Agent.ts'
 import type { RelaySocket } from '../terminal/RelaySocket.ts'
+import type { RepoService } from '../codespaces/RepoService.ts'
 import type { XTermView } from '../terminal/XTermView.ts'
 import { onDragY, onPinchSpread } from '../gestures/index.ts'
 
@@ -14,6 +15,7 @@ export class ModuleStack {
   private modules: Module[] = []
   private flexes: number[] = []
   private cleanups: (() => void)[] = []
+  private repo: RepoService | null = null
 
   constructor() {
     this.el = document.createElement('div')
@@ -24,6 +26,12 @@ export class ModuleStack {
 
   connectTerminal(relay: RelaySocket, sessionId: string, label = 'Terminal') {
     this.modules.forEach(m => m.connectTerminal(relay, sessionId, label))
+  }
+
+  /** Provide a live Codespace repo to every module's file/git panels. */
+  connectRepo(repo: RepoService) {
+    this.repo = repo
+    this.modules.forEach(m => m.connectRepo(repo))
   }
 
   /**
@@ -55,6 +63,7 @@ export class ModuleStack {
 
   private addModule(view: ViewType, animate = true) {
     const mod = new Module(view)
+    if (this.repo) mod.connectRepo(this.repo)
     if (animate) {
       mod.el.style.transition = `flex ${ANIM_MS}ms cubic-bezier(0.34,1.56,0.64,1), opacity ${ANIM_MS}ms`
       mod.el.style.opacity = '0'
