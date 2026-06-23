@@ -16,6 +16,7 @@ import {
 import { userHasGithubAppInstallation } from './auth/githubAppInstallation.ts'
 import { authLog } from './auth/authLog.ts'
 import { openExternalUrl } from './platform/openExternalUrl.ts'
+import { ComputePoolView } from './compute/ComputePoolView.ts'
 import type { PickResult } from './codespaces/CodespacePicker.ts'
 
 export class App {
@@ -189,6 +190,31 @@ export class App {
       this.el.innerHTML = ''
       this.boot()
     })
+
+    this.maybeMountComputePool()
+  }
+
+  /** Optional beta: decentralized sharded WebGPU compute pool (flagged off by default). */
+  private maybeMountComputePool() {
+    const flag = String(import.meta.env.VITE_ENABLE_COMPUTE_POOL ?? '').toLowerCase()
+    if (flag !== 'true' && flag !== '1') return
+
+    const btn = document.createElement('button')
+    btn.className = 'compute-fab'
+    btn.textContent = '⚡'
+    btn.title = 'Compute Pool (beta)'
+    btn.addEventListener('click', () => {
+      if (this.el.querySelector('.compute-overlay')) return
+      const view = new ComputePoolView(
+        {
+          coordinatorUrl: (import.meta.env.VITE_COMPUTE_COORDINATOR_URL as string) || undefined,
+          poolId: (import.meta.env.VITE_COMPUTE_POOL_ID as string) || undefined,
+        },
+        () => { /* overlay self-removes on close */ },
+      )
+      this.el.appendChild(view.el)
+    })
+    this.el.appendChild(btn)
   }
 
   private toast(msg: string) {
