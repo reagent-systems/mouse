@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "electron:dist": "npm run build && electron-builder",
@@ -42,6 +45,7 @@
     "electron-builder": "^26.8.1",
     "typescript": "~5.9.3",
     "vite": "^8.0.1",
+    "vitest": "^3.2.6",
     "wait-on": "^9.0.4"
   },
   "dependencies": {
