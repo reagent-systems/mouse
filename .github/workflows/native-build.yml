@@ -1,8 +1,10 @@
 name: Native build
 
-# Builds the Capacitor iOS and Android apps across several toolchain / OS
-# versions. iOS simulator builds and Android debug/release builds need no
-# signing secrets, so they run unsigned purely to verify the apps compile.
+# Builds the Capacitor iOS and Android apps unsigned (no secrets) to verify
+# they compile. Capacitor 8 fixes the supported build toolchain (JDK 21 for the
+# Android library; Xcode 16 / Swift for iOS), so the matrix uses those. The
+# produced apps still target a wide range of OS versions: Android minSdk 24 →
+# compile/target 36 (API 24–36) and iOS deployment target 15.0+.
 on:
   push:
     branches: [main]
@@ -20,8 +22,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Cover the JDKs Capacitor 8 / AGP support. minSdk 24, target/compile 36.
-        java: ['17', '21']
+        # Capacitor 8's Android library is compiled at Java 21, so JDK 21 is
+        # required (JDK 17 fails with "invalid source release: 21").
+        java: ['21']
     steps:
       - uses: actions/checkout@v4
 
@@ -70,9 +73,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each macOS image ships a different Xcode / iOS SDK, so this matrix
-        # compiles the app against multiple iOS SDK versions.
-        runner: [macos-14, macos-15]
+        # Capacitor 8's Swift requires Xcode 16+. macos-15 ships it; macos-14
+        # (Xcode 15.4) fails to compile @capacitor/app, so it is excluded.
+        runner: [macos-15]
     steps:
       - uses: actions/checkout@v4
 
