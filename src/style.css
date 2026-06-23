@@ -65,6 +65,16 @@ html, body {
   }
 }
 
+/* ── Liquid-glass surface utility ──────────────────────
+   Shared "frosted" surface used by cards and panels. Markup applies this
+   alongside a component class (e.g. `auth-card glass`). See STYLEGUIDE.md. */
+.glass {
+  background: rgba(21, 26, 30, 0.92);
+  backdrop-filter: blur(40px) saturate(140%);
+  -webkit-backdrop-filter: blur(40px) saturate(140%);
+  border: 1px solid var(--border);
+}
+
 /* ── Module Stack ──────────────────────────────────── */
 .module-stack {
   flex: 1; display: flex; flex-direction: column;
