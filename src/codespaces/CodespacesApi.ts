@@ -1,4 +1,5 @@
 import { authKind } from '../auth/GitHubAuth.ts'
+import { ghFetch } from '../platform/githubHttp.ts'
 
 const BASE = 'https://api.github.com'
 const RELAY_PORT = 2222
@@ -53,7 +54,7 @@ async function readApiErrorMessage(res: Response, fallback: string): Promise<str
 }
 
 export async function listCodespaces(token: string): Promise<Codespace[]> {
-  const res = await fetch(`${BASE}/user/codespaces`, { headers: headers(token) })
+  const res = await ghFetch(`${BASE}/user/codespaces`, { headers: headers(token) })
   if (!res.ok) {
     const msg = await readApiErrorMessage(res, `Failed to list Codespaces (HTTP ${res.status})`)
     throw new Error(codespacesAccessHint(msg))
@@ -74,7 +75,7 @@ export async function getRepositoryMetadata(
   owner: string,
   repo: string,
 ): Promise<RepoMetadata> {
-  const res = await fetch(
+  const res = await ghFetch(
     `${BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
     { headers: headers(token) },
   )
@@ -100,7 +101,7 @@ export async function createUserCodespace(
   repositoryId: number,
   ref: string,
 ): Promise<Codespace> {
-  const res = await fetch(`${BASE}/user/codespaces`, {
+  const res = await ghFetch(`${BASE}/user/codespaces`, {
     method: 'POST',
     headers: {
       ...headers(token),
@@ -116,13 +117,13 @@ export async function createUserCodespace(
 }
 
 export async function getCodespace(token: string, name: string): Promise<Codespace> {
-  const res = await fetch(`${BASE}/user/codespaces/${name}`, { headers: headers(token) })
+  const res = await ghFetch(`${BASE}/user/codespaces/${name}`, { headers: headers(token) })
   if (!res.ok) throw new Error(`Failed to get Codespace: ${res.status}`)
   return res.json()
 }
 
 export async function startCodespace(token: string, name: string): Promise<void> {
-  const res = await fetch(`${BASE}/user/codespaces/${name}/start`, {
+  const res = await ghFetch(`${BASE}/user/codespaces/${name}/start`, {
     method: 'POST',
     headers: headers(token),
   })
@@ -151,7 +152,7 @@ export interface ForwardedPort {
 }
 
 export async function listPorts(token: string, name: string): Promise<ForwardedPort[]> {
-  const res = await fetch(`${BASE}/user/codespaces/${name}/ports`, { headers: headers(token) })
+  const res = await ghFetch(`${BASE}/user/codespaces/${name}/ports`, { headers: headers(token) })
   if (!res.ok) return []
   const data = await res.json()
   return data.ports ?? []

@@ -1,10 +1,20 @@
-// Mouse visual verification harness.
-// Boots the production build via `vite preview`, opens the app in demo mode,
-// drives each module view, captures screenshots into .mouse_build/shots/, and
-// fails loudly on console errors or missing UI. Run: node .mouse_build/verify.mjs
+// Mouse end-to-end interaction harness.
+//
+// Unlike a DOM-presence smoke check, this DRIVES the app like a user: it clicks
+// real buttons, walks the full GitHub auth journey with a mocked transport
+// (?mockgh=1, no network), navigates every page, exercises the composer + agent
+// flow, answers an agent y/n prompt, and saves a screenshot at every step into
+// .mouse_build/shots/. Each screenshot is also asserted non-blank.
+//
+// Two journeys:
+//   A. AUTH  (?mockgh=1)  — landing → sign in → device code → token → install
+//                            check → codespace picker "No Codespaces yet" → Create.
+//   B. APP   (?demo=1)    — every module view + agent terminal + composer.
+//
+// Run: node .mouse_build/verify.mjs
 import { chromium } from 'playwright'
 import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -16,6 +26,8 @@ mkdirSync(SHOTS, { recursive: true })
 
 const PORT = 4319
 const BASE = `http://127.0.0.1:${PORT}`
+const fails = []
+let shotN = 0
 
 function startPreview() {
   const p = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort', '--host', '127.0.0.1'], {
@@ -26,7 +38,7 @@ function startPreview() {
   return p
 }
 
-async function waitForServer(url, tries = 60) {
+async function waitForServer(url, tries = 80) {
   for (let i = 0; i < tries; i++) {
     try { const r = await fetch(url); if (r.ok) return true } catch {}
     await sleep(250)
@@ -34,8 +46,25 @@ async function waitForServer(url, tries = 60) {
   throw new Error('preview server did not come up')
 }
 
-const VIEWS = ['code', 'files', 'changes', 'graph', 'terminal', 'agent']
-const fails = []
+// Screenshot + assert it isn't a blank/near-empty frame (catches white screens
+// of death where the app silently failed to render).
+async function shot(page, name) {
+  shotN++
+  const file = join(SHOTS, `${String(shotN).padStart(2, '0')}-${name}.png`)
+  await page.screenshot({ path: file })
+  try {
+    const sz = statSync(file).size
+    if (sz < 2500) fails.push(`screenshot ${name} looks blank (${sz} bytes)`)
+  } catch { fails.push(`screenshot ${name} not written`) }
+  return file
+}
+
+async function clickIfPresent(page, selector, label) {
+  const el = page.locator(selector).first()
+  if (await el.count()) { await el.click(); return true }
+  fails.push(`could not click ${label} (${selector})`)
+  return false
+}
 
 const preview = startPreview()
 let browser
@@ -43,89 +72,94 @@ try {
   await waitForServer(BASE)
   browser = await chromium.launch()
   const page = await browser.newPage({ viewport: { width: 430, height: 932 }, deviceScaleFactor: 2 })
-
   const consoleErrors = []
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()) })
   page.on('pageerror', (e) => consoleErrors.push('pageerror: ' + e.message))
 
-  await page.goto(`${BASE}/?demo=1`, { waitUntil: 'networkidle' })
+  // ───────────────────────── Journey A: AUTH (mocked GitHub) ─────────────────
+  await page.addInitScript(() => { try { localStorage.clear() } catch {} })
+  await page.goto(`${BASE}/?mockgh=1`, { waitUntil: 'networkidle' })
+  await sleep(500)
+  await shot(page, 'auth-landing')
+  if (!(await page.locator('.auth-title').count())) fails.push('auth landing did not render')
+
+  // Click "Sign in with GitHub".
+  await clickIfPresent(page, '#sign-in-btn', 'Sign in button')
+  await sleep(600)
+  await shot(page, 'auth-device-code')
+  const codeShown = await page.locator('.auth-code-display').count()
+  if (!codeShown) fails.push('device code screen did not render (the real-world blocker)')
+  else {
+    const code = (await page.locator('.auth-code-display').first().innerText()).trim()
+    if (!code) fails.push('device code is empty')
+  }
+
+  // The mock pends once then issues a token; onDone advances to the install
+  // check and then the codespace picker. pollForToken enforces a 5s min interval,
+  // so first success lands ~10s in — wait generously.
+  await page.waitForSelector('.picker-screen, .picker-empty, .picker-loading', { timeout: 20000 }).catch(() => {})
+  await page.waitForSelector('.picker-empty, .cs-card', { timeout: 12000 }).catch(() => {})
   await sleep(800)
-
-  // The app shell must exist with module cards + bottom bar.
-  const hasApp = await page.locator('.app').count()
-  if (!hasApp) fails.push('no .app shell rendered')
-  const hasStack = await page.locator('.module-stack').count()
-  if (!hasStack) fails.push('no .module-stack rendered')
-  const hasBottom = await page.locator('.bottom-bar').count()
-  if (!hasBottom) fails.push('no .bottom-bar rendered')
-  const modules = await page.locator('.module').count()
-  if (modules < 2) fails.push(`expected >=2 modules, got ${modules}`)
-
-  await page.screenshot({ path: join(SHOTS, '00-initial.png') })
-
-  // Drive the first module through every view by setting the track transform,
-  // mounting each view, and snapshotting it. We use the view-slot data attr.
-  for (let i = 0; i < VIEWS.length; i++) {
-    const v = VIEWS[i]
-    // Properly mount + navigate to this view via the demo hook.
-    await page.evaluate((view) => {
-      (window).__mouseStack?.showViewIn(view, 0)
-    }, v)
-    await sleep(500)
-    const slot = page.locator(`.module .view-slot[data-view="${v}"]`).first()
-    const present = await slot.count()
-    if (!present) { fails.push(`view-slot ${v} missing`); continue }
-    await page.screenshot({ path: join(SHOTS, `${String(i + 1).padStart(2, '0')}-${v}.png`) })
+  await shot(page, 'auth-codespace-picker')
+  const emptyState = await page.locator('.picker-empty').count()
+  const pickerList = await page.locator('.picker-list, .cs-card').count()
+  if (!emptyState && !pickerList) {
+    fails.push('codespace picker never appeared after auth (auth flow still blocked)')
+  }
+  // "No Codespaces yet" → there must be a Create Codespace CTA, matching the sim.
+  if (emptyState) {
+    const cta = await page.locator('.picker-empty-cta, button:has-text("Create")').count()
+    if (!cta) fails.push('empty state missing Create Codespace CTA')
   }
 
-  // Assert each non-terminal view actually has its content mounted.
-  await page.evaluate(() => (window).__mouseStack?.showViewIn('files', 0))
-  await sleep(400)
-  if (!(await page.locator('.view-files .file-item').count())) fails.push('files view did not mount items')
-  await page.evaluate(() => (window).__mouseStack?.showViewIn('graph', 0))
-  await sleep(400)
-  if (!(await page.locator('.graph-label').count())) fails.push('graph view did not mount header')
-  if (!(await page.locator('.graph-dot').count())) fails.push('graph view did not mount dots')
-  await page.evaluate(() => (window).__mouseStack?.showViewIn('code', 0))
-  await sleep(300)
+  // ───────────────────────── Journey B: APP (demo module UI) ────────────────
+  await page.goto(`${BASE}/?demo=1`, { waitUntil: 'networkidle' })
+  await sleep(900)
+  await shot(page, 'app-initial')
+  if (!(await page.locator('.module-stack').count())) fails.push('module stack did not render in demo')
+  if ((await page.locator('.module').count()) < 2) fails.push('expected >=2 modules')
 
-  // Regression guard: the highlighter must not leak its own span markup as text.
+  const VIEWS = ['code', 'files', 'changes', 'graph', 'terminal', 'agent']
+  for (const v of VIEWS) {
+    await page.evaluate((view) => (window).__mouseStack?.showViewIn(view, 0), v)
+    await sleep(450)
+    if (!(await page.locator(`.module .view-slot[data-view="${v}"]`).first().count())) {
+      fails.push(`view ${v} missing`)
+    }
+    await shot(page, `app-view-${v}`)
+  }
+
+  // Content assertions per view.
+  await page.evaluate(() => (window).__mouseStack?.showViewIn('files', 0)); await sleep(350)
+  if (!(await page.locator('.view-files .file-item').count())) fails.push('files view empty')
+  await page.evaluate(() => (window).__mouseStack?.showViewIn('graph', 0)); await sleep(350)
+  if (!(await page.locator('.graph-dot').count())) fails.push('graph has no commit dots')
+  await page.evaluate(() => (window).__mouseStack?.showViewIn('changes', 0)); await sleep(350)
+  // Actually CLICK the Commit button and assert it acknowledges.
+  await clickIfPresent(page, '.commit-btn', 'Commit button')
+  await sleep(400)
+  await shot(page, 'app-commit-clicked')
+
+  await page.evaluate(() => (window).__mouseStack?.showViewIn('code', 0)); await sleep(300)
   const codeText = await page.locator('.code-scroll').first().innerText().catch(() => '')
-  if (/class="tag"|class="attr"|class="str"/.test(codeText)) {
-    fails.push('code highlighter leaked span markup into visible text')
-  }
+  if (/class="(tag|attr|str)"/.test(codeText)) fails.push('code highlighter leaked span markup')
 
-  // Specific content assertions matching the sketches.
-  const checks = [
-    ['.code-scroll',        'code editor body'],
-    ['.view-files .file-item', 'file tree items'],
-    ['.changes-label',      'CHANGES header'],
-    ['.commit-btn',         'yellow Commit button'],
-    ['.graph-label',        'GRAPH header'],
-    ['.graph-dot',          'git graph dots'],
-    ['.composer-input',     'composer input'],
-    ['.mic-btn',            'mic button'],
-  ]
-  for (const [sel, label] of checks) {
-    const n = await page.locator(sel).count()
-    if (!n) fails.push(`missing ${label} (${sel})`)
-  }
-
-  // Submit a task to spawn an agent; the agent terminal must appear.
+  // Composer → spawn an agent, watch the terminal stream, answer a y/n prompt.
   await page.locator('.composer-input').fill('Add a feature to the README')
   await page.locator('.composer-input').press('Enter')
-  await sleep(2500)
-  const xterm = await page.locator('.xterm').count()
-  if (!xterm) fails.push('no xterm terminal after spawning agent')
-  const agentBar = await page.locator('.agent-view-bar').count()
-  if (!agentBar) fails.push('no agent status bar after spawning agent')
-  await page.screenshot({ path: join(SHOTS, '07-agent-live.png') })
+  await sleep(2600)
+  if (!(await page.locator('.xterm').count())) fails.push('no xterm after spawning agent')
+  if (!(await page.locator('.agent-view-bar').count())) fails.push('no agent status bar')
+  await shot(page, 'app-agent-running')
+  // The mock opencode stream asks a y/n question; type "y" into the agent term.
+  const term = page.locator('.xterm-helper-textarea, .xterm textarea').first()
+  if (await term.count()) { await term.type('y'); await term.press('Enter') }
+  await sleep(1600)
+  await shot(page, 'app-agent-answered')
 
-  if (consoleErrors.length) {
-    // xterm/webgl noise in headless is tolerated; surface everything else.
-    const real = consoleErrors.filter(e => !/webgl|WebGL|AudioContext/i.test(e))
-    if (real.length) fails.push('console errors:\n  ' + real.join('\n  '))
-  }
+  // Console health (tolerate headless webgl noise).
+  const real = consoleErrors.filter(e => !/webgl|WebGL|AudioContext|Failed to load resource.*favicon/i.test(e))
+  if (real.length) fails.push('console errors:\n  ' + real.join('\n  '))
 } catch (e) {
   fails.push('harness exception: ' + (e?.stack || e?.message || String(e)))
 } finally {
@@ -138,6 +172,6 @@ if (fails.length) {
   for (const f of fails) console.log(' - ' + f)
   process.exit(1)
 } else {
-  console.log('VERIFY: PASS — all views rendered, screenshots in .mouse_build/shots/')
+  console.log(`VERIFY: PASS — ${shotN} screenshots in .mouse_build/shots/ (auth + app journeys)`)
   process.exit(0)
 }

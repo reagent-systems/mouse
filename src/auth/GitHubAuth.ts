@@ -1,4 +1,5 @@
 import { authLog } from './authLog.ts'
+import { ghFetch } from '../platform/githubHttp.ts'
 
 /** Marketplace listings require a GitHub App. OAuth App is for legacy / quick dev only. */
 export type GitHubAuthKind = 'github_app' | 'oauth_app'
@@ -181,7 +182,7 @@ export async function refreshAccessToken(): Promise<string | null> {
 
   let res: Response
   try {
-    res = await fetch('https://github.com/login/oauth/access_token', {
+    res = await ghFetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
@@ -216,7 +217,7 @@ export async function requestDeviceCode(): Promise<DeviceCodeResponse> {
   let res: Response
   try {
     const body = new URLSearchParams(params).toString()
-    res = await fetch('https://github.com/login/device/code', {
+    res = await ghFetch('https://github.com/login/device/code', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
@@ -252,7 +253,7 @@ export async function pollForToken(deviceCode: string, intervalSecs: number): Pr
         device_code: deviceCode,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
       }).toString()
-      res = await fetch('https://github.com/login/oauth/access_token', {
+      res = await ghFetch('https://github.com/login/oauth/access_token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
@@ -317,7 +318,7 @@ export async function pollForToken(deviceCode: string, intervalSecs: number): Pr
 }
 
 export async function fetchUser(token: string): Promise<GitHubUser> {
-  const res = await fetch('https://api.github.com/user', {
+  const res = await ghFetch('https://api.github.com/user', {
     headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
   })
   if (!res.ok) {
@@ -337,7 +338,7 @@ export async function fetchUser(token: string): Promise<GitHubUser> {
 
 export async function validateToken(token: string): Promise<boolean> {
   try {
-    const res = await fetch('https://api.github.com/user', {
+    const res = await ghFetch('https://api.github.com/user', {
       headers: { 'Authorization': `Bearer ${token}` },
     })
     return res.ok

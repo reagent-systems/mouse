@@ -1,4 +1,5 @@
 import { authLog } from './authLog.ts'
+import { ghFetch } from '../platform/githubHttp.ts'
 
 const BASE = 'https://api.github.com'
 
@@ -18,7 +19,7 @@ export async function userHasGithubAppInstallation(token: string, clientId: stri
   let page = 1
   const perPage = 100
   for (;;) {
-    const res = await fetch(
+    const res = await ghFetch(
       `${BASE}/user/installations?per_page=${perPage}&page=${page}`,
       { headers: apiHeaders(token) },
     )

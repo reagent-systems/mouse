@@ -50,12 +50,28 @@ scheduling.
 - **resilience** — relay reconnect, error toasts, empty/loading states, offline handling.
 - **a11y** — focus order, ARIA roles, reduced-motion, contrast, keyboard nav.
 - **performance** — bundle size, lazy view mounting, xterm fit throttling, RAF batching.
-- **tests** — expand `.mouse_build/verify.mjs` assertions; add per-view snapshot diffs.
+- **tests** — expand `.mouse_build/verify.mjs`: click every interactive element, screenshot
+  every screen, assert non-blank; add per-view snapshot diffs; cover error/edge paths.
 - **polish** — micro-animations, transitions, loading skeletons, toast styling.
+- **platform** — the cross-platform traps (CORS, native HTTP, file:// vs http://, preload
+  bridges, deep links). These are the "unknown unknowns": things that pass on one platform
+  (iOS native) but break on another (web/Electron CORS). Every platform task must add or
+  extend a test that would have caught the regression.
+
+## Unknown-unknowns checklist (consult when generating a batch)
+A feature is NOT done just because it works in the demo. Before marking done, ask:
+- Does it work on **web** (CORS! same-origin proxy), **Electron** (preload bridge, file://),
+  and **native** (CapacitorHttp)? Auth was the canonical failure: worked on iOS, broke on web.
+- Is there a **mocked** path so the flow is testable with **no network**? (`?mockgh=1`, `?demo=1`)
+- Does `.mouse_build/verify.mjs` actually **click the thing and screenshot the result**, or
+  does it only check that a DOM node exists? Presence ≠ works. Prefer interaction + pixels.
+- What happens in the **empty / loading / error** state? Screenshot each.
 
 ## Invariants every batch must preserve
 - `npx tsc --noEmit` exits 0.
 - `npm run build` exits 0.
-- `node .mouse_build/verify.mjs` prints `VERIFY: PASS`.
+- `node .mouse_build/verify.mjs` prints `VERIFY: PASS` — and that harness must
+  drive BOTH the auth journey (`?mockgh=1`) and the app journey (`?demo=1`),
+  clicking real controls and saving a non-blank screenshot per screen.
 - Each completed batch is committed to git with a clear message.
 - The final task is executed so BACKLOG.md always has a fresh pending batch.
