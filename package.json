@@ -4,16 +4,23 @@
   "version": "0.0.0",
   "type": "module",
   "main": "electron/main.cjs",
+  "packageManager": "pnpm@11.1.2",
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=10"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "verify": "node .mouse_build/verify.mjs",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
-    "electron:dist": "npm run build && electron-builder",
-    "cap:sync": "npm run build && npx cap sync",
-    "cap:ios:sim": "npm run cap:sync && npx cap run ios --no-sync --target-name \"iPhone 17 Pro\" --target-name-sdk-version 26.2",
-    "cap:open:ios": "npx cap open ios",
-    "cap:open:android": "npx cap open android"
+    "electron:dist": "pnpm run build && electron-builder",
+    "cap:sync": "pnpm run build && pnpm exec cap sync",
+    "cap:ios:sim": "pnpm run cap:sync && pnpm exec cap run ios --no-sync --target-name \"iPhone 17 Pro\" --target-name-sdk-version 26.2",
+    "cap:open:ios": "pnpm exec cap open ios",
+    "cap:open:android": "pnpm exec cap open android",
+    "relay:local": "node relay/mouse-relay.mjs --local"
   },
   "build": {
     "appId": "com.mouse.app",

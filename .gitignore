@@ -26,3 +26,7 @@ release
 
 # Mouse build verification artifacts
 .mouse_build/shots/
+
+# pnpm (supply-chain: lockfile committed, npm/yarn lockfiles forbidden)
+package-lock.json
+yarn.lock

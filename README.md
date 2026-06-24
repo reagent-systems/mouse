@@ -33,13 +33,17 @@ Repository: **[github.com/reagent-systems/mouse](https://github.com/reagent-syst
 
 ## Quick start
 
+This project uses **pnpm** (pinned via `packageManager`; supply-chain hardened —
+dependency build scripts are blocked unless allow-listed in `pnpm-workspace.yaml`).
+
 ```bash
 git clone https://github.com/reagent-systems/mouse.git
 cd mouse
-npm install
+corepack enable           # activates the pinned pnpm version
+pnpm install
 cp .env.example .env
 # Edit .env: VITE_GITHUB_CLIENT_ID, VITE_GITHUB_APP_SLUG (for GitHub App mode), etc.
-npm run dev
+pnpm run dev
 ```
 
 Open the URL Vite prints (typically `http://localhost:5173`).
