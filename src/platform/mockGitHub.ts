@@ -51,6 +51,18 @@ export function maybeInstallMockGitHub(): boolean {
     if (url.includes('/user/codespaces')) {
       return json(200, { codespaces: [] })
     }
+    // Repo list for the synced selector.
+    if (url.includes('/user/repos')) {
+      return json(200, [
+        { full_name: 'octocat/mouse', name: 'mouse', owner: { login: 'octocat' }, default_branch: 'main', private: false, pushed_at: '2026-06-20T10:00:00Z' },
+        { full_name: 'octocat/hello-world', name: 'hello-world', owner: { login: 'octocat' }, default_branch: 'main', private: false, pushed_at: '2026-06-18T10:00:00Z' },
+        { full_name: 'octocat/secret-lab', name: 'secret-lab', owner: { login: 'octocat' }, default_branch: 'develop', private: true, pushed_at: '2026-06-15T10:00:00Z' },
+      ])
+    }
+    // Branches for a repo.
+    if (/\/repos\/[^/]+\/[^/]+\/branches/.test(url)) {
+      return json(200, [{ name: 'main' }, { name: 'develop' }, { name: 'feature/x' }])
+    }
     return json(404, { message: 'mock: unhandled ' + url })
   })
   return true

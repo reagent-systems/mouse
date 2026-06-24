@@ -8,6 +8,11 @@ import { RelaySocket } from './terminal/RelaySocket.ts'
 import { MockRelay } from './terminal/MockRelay.ts'
 import type { RelayLike } from './terminal/MockRelay.ts'
 import { isDemoMode, makeDemoPickResult } from './codespaces/demo.ts'
+import { ModeGate } from './codespaces/ModeGate.ts'
+import { LocalGate } from './codespaces/LocalGate.ts'
+import {
+  getBackendMode, setBackendMode, isLocalModeFlag,
+} from './platform/backendMode.ts'
 import {
   authKind,
   clearAuth,
@@ -40,6 +45,32 @@ export class App {
       this.showMain(makeDemoPickResult(), new MockRelay())
       return
     }
+
+    // Local mode (?local=1 flag, or previously chosen): self-hosted relay, no
+    // GitHub account. Goes straight to the relay-URL gate.
+    if (isLocalModeFlag()) {
+      setBackendMode('local')
+      this.showLocalGate()
+      return
+    }
+
+    // Mock GitHub (?mockgh=1) implies the Codespaces auth journey for testing —
+    // skip the mode chooser and go straight to GitHub sign-in.
+    const forceCodespaces = typeof window !== 'undefined'
+      && new URLSearchParams(window.location.search).has('mockgh')
+
+    // Returning users keep their chosen backend; first-run sees the chooser.
+    const chosen = localStorage.getItem('mouse_backend_mode')
+    if (!forceCodespaces && !chosen) {
+      this.showModeGate()
+      return
+    }
+    if (!forceCodespaces && getBackendMode() === 'local') {
+      this.showLocalGate()
+      return
+    }
+
+    // Codespaces path: require GitHub auth.
     const token = await getValidAccessToken()
     if (!token) {
       if (getStoredToken()) clearAuth()
@@ -47,6 +78,25 @@ export class App {
       return
     }
     await this.continueAfterSignIn(token)
+  }
+
+  private showModeGate() {
+    this.el.innerHTML = ''
+    const gate = new ModeGate((mode) => {
+      setBackendMode(mode)
+      if (mode === 'local') { this.showLocalGate(); return }
+      this.boot()
+    })
+    this.el.appendChild(gate.el)
+  }
+
+  private showLocalGate() {
+    this.el.innerHTML = ''
+    const gate = new LocalGate(
+      (result) => { this.el.innerHTML = ''; this.showMain(result) },
+      () => { this.showModeGate() },
+    )
+    this.el.appendChild(gate.el)
   }
 
   private showAuth() {

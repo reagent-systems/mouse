@@ -38,6 +38,31 @@ function startPreview() {
   return p
 }
 
+const RELAY_PORT = 2299
+// Boot a REAL local relay (not mocked) so the Local journey proves an actual
+// ws:// connection + PTY round-trip — the whole point of Codespace-free mode.
+function startRelay() {
+  const p = spawn('node', ['relay/mouse-relay.mjs', '--local'], {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, MOUSE_RELAY_PORT: String(RELAY_PORT), MOUSE_RELAY_HOST: '127.0.0.1' },
+  })
+  p.stdout.on('data', () => {})
+  p.stderr.on('data', () => {})
+  return p
+}
+
+async function waitForRelay(tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${RELAY_PORT}/health`)
+      if (r.ok) { const j = await r.json(); if (j.ok) return j }
+    } catch {}
+    await sleep(250)
+  }
+  throw new Error('local relay did not come up')
+}
+
 async function waitForServer(url, tries = 80) {
   for (let i = 0; i < tries; i++) {
     try { const r = await fetch(url); if (r.ok) return true } catch {}
@@ -67,6 +92,7 @@ async function clickIfPresent(page, selector, label) {
 }
 
 const preview = startPreview()
+const relay = startRelay()
 let browser
 try {
   await waitForServer(BASE)
@@ -157,6 +183,60 @@ try {
   await sleep(1600)
   await shot(page, 'app-agent-answered')
 
+  // ───────────── Journey A2: synced repo selector (still ?mockgh) ────────────
+  await page.goto(`${BASE}/?mockgh=1`, { waitUntil: 'networkidle' })
+  await sleep(500)
+  await clickIfPresent(page, '#sign-in-btn', 'Sign in button (repo journey)')
+  await page.waitForSelector('.picker-empty, .cs-card', { timeout: 20000 }).catch(() => {})
+  await sleep(800)
+  // Open the create form → must show a SYNCED repo list, not a free-text box.
+  await clickIfPresent(page, '.picker-empty-cta, #create-btn', 'Create Codespace')
+  await page.waitForSelector('.repo-row', { timeout: 8000 }).catch(() => {})
+  const repoRows = await page.locator('.repo-row').count()
+  if (repoRows < 1) fails.push('repo selector did not render a synced repo list')
+  await shot(page, 'repo-selector')
+  // Search filters the list.
+  await page.locator('#repo-search').fill('hello')
+  await sleep(300)
+  const filtered = await page.locator('.repo-row').count()
+  if (filtered < 1) fails.push('repo search filter returned nothing for "hello"')
+  await page.locator('#repo-search').fill('')
+  await sleep(200)
+  // Selecting a repo reveals the branch dropdown.
+  await clickIfPresent(page, '.repo-row', 'first repo row')
+  await sleep(500)
+  if (!(await page.locator('#branch-select').count())) fails.push('branch dropdown did not appear after repo select')
+  const branchOpts = await page.locator('#branch-select option').count()
+  if (branchOpts < 1) fails.push('branch dropdown has no options')
+  await shot(page, 'repo-selected-branches')
+
+  // ───────────────────── Journey C: LOCAL mode (real relay) ──────────────────
+  // Reach the local gate, point it at the real relay we booted, and confirm the
+  // app connects + a real agent terminal streams from a real PTY.
+  const relayHealth = await waitForRelay()
+  if (relayHealth.mode !== 'local') fails.push(`relay mode expected local, got ${relayHealth.mode}`)
+  await page.goto(`${BASE}/?local=1`, { waitUntil: 'networkidle' })
+  await sleep(600)
+  await shot(page, 'local-gate')
+  if (!(await page.locator('#relay-url').count())) fails.push('local relay gate did not render')
+  await page.locator('#relay-url').fill(`127.0.0.1:${RELAY_PORT}`)
+  await clickIfPresent(page, '#connect-local', 'local Test & Connect')
+  // After a healthy probe the app shows the module stack + bottom bar.
+  await page.waitForSelector('.module-stack', { timeout: 12000 }).catch(() => {})
+  await sleep(1200)
+  await shot(page, 'local-connected')
+  if (!(await page.locator('.module-stack').count())) fails.push('local mode did not reach the module UI')
+  // Spawn an agent over the REAL relay and confirm the terminal appears.
+  if (await page.locator('.composer-input').count()) {
+    await page.locator('.composer-input').fill('echo hello-from-local')
+    await page.locator('.composer-input').press('Enter')
+    await sleep(3000)
+    if (!(await page.locator('.xterm').count())) fails.push('local: no xterm after spawning agent over real relay')
+    await shot(page, 'local-agent')
+  } else {
+    fails.push('local: composer input missing — cannot spawn agent')
+  }
+
   // Console health (tolerate headless webgl noise).
   const real = consoleErrors.filter(e => !/webgl|WebGL|AudioContext|Failed to load resource.*favicon/i.test(e))
   if (real.length) fails.push('console errors:\n  ' + real.join('\n  '))
@@ -165,6 +245,7 @@ try {
 } finally {
   if (browser) await browser.close()
   preview.kill('SIGTERM')
+  relay.kill('SIGTERM')
 }
 
 if (fails.length) {
@@ -172,6 +253,6 @@ if (fails.length) {
   for (const f of fails) console.log(' - ' + f)
   process.exit(1)
 } else {
-  console.log(`VERIFY: PASS — ${shotN} screenshots in .mouse_build/shots/ (auth + app journeys)`)
+  console.log(`VERIFY: PASS — ${shotN} screenshots in .mouse_build/shots/ (auth + repo selector + app + local relay journeys)`)
   process.exit(0)
 }

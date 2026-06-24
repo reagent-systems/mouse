@@ -163,20 +163,106 @@ export function relayWssUrl(codespaceName: string): string {
   return `wss://${codespaceName}-${RELAY_PORT}.app.github.dev`
 }
 
+export interface RepoSummary {
+  full_name: string
+  owner: string
+  name: string
+  default_branch: string
+  private: boolean
+  pushed_at: string | null
+}
+
+/**
+ * List repositories the authenticated user can use, most-recently-pushed first.
+ * Paginates GET /user/repos. Used by the synced repo selector so users pick from
+ * a live list instead of typing owner/repo by hand.
+ */
+export async function listUserRepos(token: string, maxPages = 4): Promise<RepoSummary[]> {
+  const out: RepoSummary[] = []
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await ghFetch(
+      `${BASE}/user/repos?per_page=100&page=${page}&sort=pushed&affiliation=owner,collaborator,organization_member`,
+      { headers: headers(token) },
+    )
+    if (!res.ok) {
+      const msg = await readApiErrorMessage(res, `Failed to list repositories (HTTP ${res.status})`)
+      throw new Error(codespacesAccessHint(msg))
+    }
+    const data = await res.json() as Array<{
+      full_name: string
+      name: string
+      owner: { login: string }
+      default_branch?: string
+      private?: boolean
+      pushed_at?: string
+    }>
+    for (const r of data) {
+      out.push({
+        full_name: r.full_name,
+        owner: r.owner?.login ?? r.full_name.split('/')[0],
+        name: r.name,
+        default_branch: r.default_branch ?? 'main',
+        private: Boolean(r.private),
+        pushed_at: r.pushed_at ?? null,
+      })
+    }
+    if (data.length < 100) break
+  }
+  return out
+}
+
+export interface BranchSummary { name: string }
+
+/** List branches for a repo (for the branch dropdown in the create form). */
+export async function listBranches(token: string, owner: string, repo: string): Promise<string[]> {
+  const res = await ghFetch(
+    `${BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`,
+    { headers: headers(token) },
+  )
+  if (!res.ok) return []
+  const data = await res.json() as Array<{ name: string }>
+  return data.map(b => b.name)
+}
+
 /** Returns the HTTPS URL for the mouse relay (used to check if it's up). */
 export function relayHttpUrl(codespaceName: string): string {
   return `https://${codespaceName}-${RELAY_PORT}.app.github.dev/health`
 }
 
-/** Check whether the relay is reachable (relay serves GET /health). */
-export async function isRelayRunning(codespaceName: string, token: string): Promise<boolean> {
+export type RelayProbe = 'up' | 'down' | 'unknown'
+
+/**
+ * Probe the relay's /health. Returns:
+ *   'up'      — reachable and healthy.
+ *   'down'    — reached the forwarded port but no healthy relay (connection
+ *               refused / 5xx / non-relay response).
+ *   'unknown' — could not determine, typically because the Codespace forwards
+ *               the port PRIVATELY and GitHub's proxy rejects token-header auth
+ *               (it wants session cookies). In that case the relay may well be
+ *               running; the app should still try the authenticated WebSocket.
+ *
+ * The previous code returned a bare boolean and treated 'unknown' as 'down',
+ * which made Connect silently re-render the same setup screen — the reported bug.
+ */
+export async function probeRelay(codespaceName: string, token: string): Promise<RelayProbe> {
   try {
     const res = await fetch(relayHttpUrl(codespaceName), {
       headers: { 'X-Github-Token': token },
       signal: AbortSignal.timeout(4000),
     })
-    return res.ok
+    if (res.ok) return 'up'
+    // GitHub's private port-forward proxy answers 401/403 (cookie auth) even when
+    // the relay is up. Treat auth-ish statuses as 'unknown', not 'down'.
+    if (res.status === 401 || res.status === 403) return 'unknown'
+    return 'down'
   } catch {
-    return false
+    // Network/opaque CORS failures are inconclusive for private forwards.
+    return 'unknown'
   }
 }
+
+/** Back-compat boolean wrapper. */
+export async function isRelayRunning(codespaceName: string, token: string): Promise<boolean> {
+  return (await probeRelay(codespaceName, token)) === 'up'
+}
+

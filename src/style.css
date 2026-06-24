@@ -630,3 +630,41 @@ html, body {
   white-space: nowrap;
 }
 .toast-show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ── Synced repo selector ──────────────────────────── */
+.repo-list {
+  flex: 1; min-height: 120px; max-height: 46vh; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); margin-top: 2px;
+}
+.repo-list::-webkit-scrollbar { width: 3px; }
+.repo-list::-webkit-scrollbar-thumb { background: #2d3640; border-radius: 2px; }
+.repo-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px; cursor: pointer;
+  border-bottom: 1px solid rgba(45,54,64,0.4);
+  transition: background 0.12s;
+}
+.repo-row:last-child { border-bottom: none; }
+.repo-row:hover { background: var(--surface-2); }
+.repo-row.selected { background: var(--accent-muted); }
+.repo-row-icon { font-size: 13px; flex-shrink: 0; opacity: 0.85; }
+.repo-row-name {
+  flex: 1; min-width: 0; font-size: 13px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.repo-row.selected .repo-row-name { color: var(--accent); }
+.repo-row-branch {
+  font-size: 10px; color: var(--text-faint); flex-shrink: 0;
+  background: var(--surface-2); padding: 1px 7px; border-radius: 10px;
+}
+.repo-empty {
+  padding: 24px 16px; text-align: center;
+  font-size: 12px; color: var(--text-faint); line-height: 1.5;
+}
+.repo-branch-label {
+  display: block; font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-dim); margin: 4px 2px 4px;
+}
+#branch-select { cursor: pointer; }
+
