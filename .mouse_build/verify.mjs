@@ -102,6 +102,44 @@ try {
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()) })
   page.on('pageerror', (e) => consoleErrors.push('pageerror: ' + e.message))
 
+  // ───────────────── Journey 0: ON-DEVICE (primary, host-free) ───────────────
+  // The default path the user actually wants: no relay, no Codespace. Fork files
+  // locally and land in the interface. We assert the mode chooser offers on-device
+  // FIRST, that forking a starter reaches the module UI, and that the script
+  // terminal (in-app Python runtime) is present.
+  await page.addInitScript(() => { try { localStorage.clear() } catch {} })
+  await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+  await sleep(500)
+  await shot(page, 'mode-chooser')
+  // The chooser must exist and present On-this-device as the primary button.
+  if (!(await page.locator('#mode-ondevice').count())) fails.push('mode chooser missing the On-this-device option')
+  // Buttons order: on-device should be the first .auth-btn in the card.
+  const firstBtnId = await page.evaluate(() => document.querySelector('.auth-card .auth-btn')?.id || '')
+  if (firstBtnId !== 'mode-ondevice') fails.push(`on-device is not the primary option (first button was "${firstBtnId}")`)
+  await clickIfPresent(page, '#mode-ondevice', 'On-this-device mode')
+  // On-device gate: must offer starter workspaces to fork locally.
+  await page.waitForSelector('.starter-row', { timeout: 6000 }).catch(() => {})
+  if (!(await page.locator('.starter-row').count())) fails.push('on-device gate did not offer starter workspaces to fork')
+  await shot(page, 'ondevice-gate')
+  // Fork the first starter → should land in the module interface with the script terminal.
+  await clickIfPresent(page, '.starter-row', 'fork starter workspace')
+  await page.waitForSelector('.module-stack', { timeout: 8000 }).catch(() => {})
+  await sleep(900)
+  if (!(await page.locator('.module-stack').count())) fails.push('on-device: forking did not reach the interface')
+  if (!(await page.locator('.view-scriptterm').count())) fails.push('on-device: in-app script terminal not present')
+  if (!(await page.locator('.scriptterm-chip').count())) fails.push('on-device: bundle launcher chips missing')
+  await shot(page, 'ondevice-interface')
+  // Verify files were genuinely forked into the on-device FS.
+  const fileCount = await page.evaluate(async () => {
+    const fs = (window).__mouseFS
+    if (!fs) return -1
+    return (await fs.list()).length
+  })
+  if (fileCount < 1) fails.push(`on-device: no files forked into the device FS (got ${fileCount})`)
+  // Persistence: the chosen mode must stick so relaunch reopens on-device.
+  const persistedMode = await page.evaluate(() => localStorage.getItem('mouse_backend_mode'))
+  if (persistedMode !== 'ondevice') fails.push(`on-device mode not persisted (got "${persistedMode}")`)
+
   // ───────────────────────── Journey A: AUTH (mocked GitHub) ─────────────────
   await page.addInitScript(() => { try { localStorage.clear() } catch {} })
   await page.goto(`${BASE}/?mockgh=1`, { waitUntil: 'networkidle' })

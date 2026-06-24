@@ -10,8 +10,10 @@ import type { RelayLike } from './terminal/MockRelay.ts'
 import { isDemoMode, makeDemoPickResult } from './codespaces/demo.ts'
 import { ModeGate } from './codespaces/ModeGate.ts'
 import { LocalGate } from './codespaces/LocalGate.ts'
+import { OnDeviceGate } from './codespaces/OnDeviceGate.ts'
+import type { OnDeviceResult } from './codespaces/OnDeviceGate.ts'
 import {
-  getBackendMode, setBackendMode, isLocalModeFlag,
+  getBackendMode, setBackendMode, isLocalModeFlag, isOnDeviceFlag,
 } from './platform/backendMode.ts'
 import {
   authKind,
@@ -46,8 +48,14 @@ export class App {
       return
     }
 
-    // Local mode (?local=1 flag, or previously chosen): self-hosted relay, no
-    // GitHub account. Goes straight to the relay-URL gate.
+    // On-device mode (?ondevice=1 flag): run entirely on this device, no host.
+    if (isOnDeviceFlag()) {
+      setBackendMode('ondevice')
+      this.showOnDeviceGate()
+      return
+    }
+
+    // Local relay mode (?local=1 flag, or previously chosen): self-hosted relay.
     if (isLocalModeFlag()) {
       setBackendMode('local')
       this.showLocalGate()
@@ -63,6 +71,10 @@ export class App {
     const chosen = localStorage.getItem('mouse_backend_mode')
     if (!forceCodespaces && !chosen) {
       this.showModeGate()
+      return
+    }
+    if (!forceCodespaces && getBackendMode() === 'ondevice') {
+      this.showOnDeviceGate()
       return
     }
     if (!forceCodespaces && getBackendMode() === 'local') {
@@ -84,9 +96,19 @@ export class App {
     this.el.innerHTML = ''
     const gate = new ModeGate((mode) => {
       setBackendMode(mode)
+      if (mode === 'ondevice') { this.showOnDeviceGate(); return }
       if (mode === 'local') { this.showLocalGate(); return }
       this.boot()
     })
+    this.el.appendChild(gate.el)
+  }
+
+  private showOnDeviceGate() {
+    this.el.innerHTML = ''
+    const gate = new OnDeviceGate(
+      (result) => { this.el.innerHTML = ''; this.showOnDeviceMain(result) },
+      () => { this.showModeGate() },
+    )
     this.el.appendChild(gate.el)
   }
 
@@ -198,6 +220,38 @@ export class App {
       this.showMain(result)
     })
     this.el.appendChild(picker.el)
+  }
+
+  /**
+   * On-device interface: the module stack + composer, with NO relay. The
+   * composer routes agent tasks to the in-app Python runtime (ScriptTerminal),
+   * and views read/write the on-device filesystem. This is the host-free path.
+   */
+  private showOnDeviceMain(result: OnDeviceResult) {
+    const { fs, workspaceName } = result
+
+    const stack     = new ModuleStack()
+    const bottomBar = new BottomBar(workspaceName)
+
+    this.el.appendChild(stack.el)
+    this.el.appendChild(bottomBar.el)
+    ;(window as any).__mouseStack = stack
+    ;(window as any).__mouseFS = fs
+
+    // Open onto the script terminal so the user lands directly in a usable,
+    // runnable interface — no connection step, no waiting.
+    stack.showViewIn('script', 0)
+    this.toast(`On-device workspace ready (${fs.kind})`)
+
+    // Composer → run the task on the in-app Python runtime.
+    bottomBar.onSubmit(text => {
+      stack.runScriptTask(text)
+    })
+
+    bottomBar.onSignOut(() => {
+      this.el.innerHTML = ''
+      this.boot()
+    })
   }
 
   private showMain(result: PickResult, relayOverride?: RelayLike) {

@@ -1,21 +1,24 @@
 // Backend mode selection + persistence.
 //
-// Mouse can talk to two kinds of relay host:
-//   • 'codespaces' — a relay inside a GitHub Codespace (requires GitHub auth).
+// Mouse can run agents three ways:
+//   • 'ondevice'   — entirely on THIS device (OPFS files + in-app Python runtime).
+//                    No host, no account, no network. The default.
 //   • 'local'      — a self-hosted relay you run on your own machine/server,
 //                    reached directly over ws:// — NO GitHub account needed.
+//   • 'codespaces' — a relay inside a GitHub Codespace (requires GitHub auth).
 //
-// The chosen mode + last local relay URL persist in localStorage so the app
-// reopens straight into the working setup.
+// The chosen mode persists in localStorage so the app reopens straight in.
 
-export type BackendMode = 'codespaces' | 'local'
+export type BackendMode = 'ondevice' | 'codespaces' | 'local'
 
 const MODE_KEY = 'mouse_backend_mode'
 const LOCAL_URL_KEY = 'mouse_local_relay_url'
 
 export function getBackendMode(): BackendMode {
   const v = localStorage.getItem(MODE_KEY)
-  return v === 'local' ? 'local' : 'codespaces'
+  if (v === 'local') return 'local'
+  if (v === 'codespaces') return 'codespaces'
+  return 'ondevice'
 }
 
 export function setBackendMode(mode: BackendMode) {
@@ -56,3 +59,11 @@ export function isLocalModeFlag(): boolean {
   const q = new URLSearchParams(window.location.search)
   return q.get('local') === '1' || q.has('local')
 }
+
+/** On-device launch flag (?ondevice=1). */
+export function isOnDeviceFlag(): boolean {
+  if (typeof window === 'undefined') return false
+  const q = new URLSearchParams(window.location.search)
+  return q.get('ondevice') === '1' || q.has('ondevice')
+}
+
