@@ -237,11 +237,9 @@ export class App {
     this.el.appendChild(bottomBar.el)
     ;(window as any).__mouseStack = stack
     ;(window as any).__mouseFS = fs
-
     // Open onto the script terminal so the user lands directly in a usable,
     // runnable interface — no connection step, no waiting.
     stack.showViewIn('script', 0)
-    this.toast(`On-device workspace ready (${fs.kind})`)
 
     // Composer → run the task on the in-app Python runtime.
     bottomBar.onSubmit(text => {
@@ -280,7 +278,7 @@ export class App {
         this.toast(`Connected to ${codespaceName}`)
       }
       if (status === 'disconnected') this.toast('Terminal disconnected')
-      if (status === 'error')        this.toast('Connection error — is the relay running?')
+      if (status === 'error')        this.toast('Connection error')
     })
 
     this.relay.connect()

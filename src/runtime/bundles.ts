@@ -77,9 +77,9 @@ except Exception as e:
 `.trim()
 
 export const BUNDLES: ScriptBundle[] = [
-  { id: 'agent',  title: 'Run agent',  subtitle: 'Scripted coding agent', icon: '∞', code: AGENT_DEMO },
-  { id: 'repl',   title: 'Python REPL', subtitle: 'On-device Python',     icon: '🐍', code: PY_REPL_HELLO },
-  { id: 'http',   title: 'HTTP agent', subtitle: 'Calls an API, streams', icon: '🌐', code: HTTP_AGENT },
+  { id: 'agent',  title: 'Run agent',  subtitle: 'Agent', icon: '∞', code: AGENT_DEMO },
+  { id: 'repl',   title: 'Python REPL', subtitle: 'Python', icon: '🐍', code: PY_REPL_HELLO },
+  { id: 'http',   title: 'HTTP agent', subtitle: 'HTTP', icon: '🌐', code: HTTP_AGENT },
 ]
 
 export function bundleById(id: string): ScriptBundle | undefined {

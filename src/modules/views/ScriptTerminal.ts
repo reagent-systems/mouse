@@ -51,7 +51,7 @@ export class ScriptTerminalView {
     label.textContent = '>'
     this.inputEl = document.createElement('input')
     this.inputEl.className = 'scriptterm-input'
-    this.inputEl.placeholder = 'Run a bundle above, or type an answer…'
+    this.inputEl.placeholder = 'Answer…'
     this.inputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this.submitInput()
     })
@@ -84,7 +84,7 @@ export class ScriptTerminalView {
       this.term.open(this.termContainer)
       this.fitAddon.fit()
       this.resizeObserver.observe(this.el)
-      this.write('\x1b[2m  In-app Python runtime. Tap a bundle to run.\x1b[0m\r\n')
+      this.write('\x1b[2m  Tap a bundle to run.\x1b[0m\r\n')
     })
   }
 

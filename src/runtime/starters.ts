@@ -14,32 +14,25 @@ export interface Starter {
 const PY_AGENT_FILES: FileEntry[] = [
   {
     path: 'README.md',
-    content: `# My Mouse Workspace
-
-This workspace lives **on your device** — forked locally, no server.
-Edit files in the editor, run agents in the terminal. Everything persists
-between launches via the on-device filesystem (OPFS).
+    content: `# Workspace
 `,
   },
   {
     path: 'agent.py',
-    content: `"""A tiny on-device coding agent. Edit me — I run in the in-app terminal."""
-import asyncio
+    content: `import asyncio
 
 async def main(task: str):
-    print(f"\\x1b[36m> Task:\\x1b[0m {task or '(none)'}")
-    print("\\x1b[2mThinking…\\x1b[0m")
+    print(f"\\\\x1b[36m> Task:\\\\x1b[0m {task or '(none)'}")
+    print("\\\\x1b[2mThinking…\\\\x1b[0m")
     await asyncio.sleep(0.4)
-    print("\\x1b[32m✓ This agent runs entirely on-device.\\x1b[0m")
+    print("\\\\x1b[32m✓ Done.\\\\x1b[0m")
 
-# The runner injects the composer text as TASK.
 await main(TASK if 'TASK' in dir() else "")
 `,
   },
   {
     path: 'main.py',
-    content: `print("Hello from your on-device workspace!")
-print("Files here are stored locally and persist between sessions.")
+    content: `print("Hello")
 `,
   },
 ]
@@ -47,7 +40,7 @@ print("Files here are stored locally and persist between sessions.")
 const EMPTY_FILES: FileEntry[] = [
   {
     path: 'main.py',
-    content: `print("New on-device workspace. Edit me and run.")
+    content: `print("Hello")
 `,
   },
 ]
@@ -56,14 +49,14 @@ export const STARTERS: Starter[] = [
   {
     id: 'agent',
     title: 'Agent starter',
-    subtitle: 'Python agent + README, ready to run',
+    subtitle: 'Python agent + README',
     icon: '∞',
     files: PY_AGENT_FILES,
   },
   {
     id: 'blank',
     title: 'Blank workspace',
-    subtitle: 'Just a main.py to start from',
+    subtitle: 'main.py',
     icon: '◆',
     files: EMPTY_FILES,
   },

@@ -29,20 +29,18 @@ export class LocalGate {
     this.el.innerHTML = `
       <div class="auth-card glass">
         <div class="auth-logo">🖧</div>
-        <h2 class="auth-step-title">Connect to a local relay</h2>
+        <h2 class="auth-step-title">Local relay</h2>
         <p class="auth-step-hint auth-install-body">
-          Run <code class="auth-inline-code">npx @mouse-app/relay --local</code> on your
-          computer or server, then enter its address. No GitHub account needed — agents
-          run on that host, not in a Codespace.
+          Run <code class="auth-inline-code">npx @mouse-app/relay --local</code>, then enter its address.
         </p>
         <input type="text" class="picker-create-input" id="relay-url"
-          placeholder="192.168.1.50:2222  or  ws://host:2222"
+          placeholder="192.168.1.50:2222"
           autocomplete="off" autocapitalize="off" spellcheck="false"
           value="${escAttr(saved)}" />
         <p class="auth-error" id="local-err" hidden></p>
         <p class="auth-copy-hint" id="local-status" hidden></p>
-        <button type="button" class="auth-btn" id="connect-local">Test &amp; Connect</button>
-        <button type="button" class="auth-btn auth-btn-outline" id="local-back">‹ Back</button>
+        <button type="button" class="auth-btn" id="connect-local">Connect</button>
+        <button type="button" class="auth-btn auth-btn-outline" id="local-back">Back</button>
       </div>
     `
     const input = this.el.querySelector('#relay-url') as HTMLInputElement
@@ -59,22 +57,21 @@ export class LocalGate {
       if (!wsUrl) { errEl.textContent = 'Enter the relay address (host:port).'; errEl.hidden = false; return }
 
       btn.disabled = true
-      btn.textContent = 'Testing…'
+      btn.textContent = 'Connecting…'
       statusEl.hidden = false
-      statusEl.textContent = `Probing ${wsUrl}…`
+      statusEl.textContent = ''
 
       try {
         const health = await probeHealth(wsUrl)
-        statusEl.textContent = `Relay OK — mode ${health.mode}, runtime ${health.runtime}.`
         setLocalRelayUrl(input.value)
         this.onDone(makeLocalPickResult(wsUrl, health))
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        errEl.textContent = `Could not reach relay: ${msg}\nIs it running? Try: npx @mouse-app/relay --local`
+        errEl.textContent = msg
         errEl.hidden = false
         statusEl.hidden = true
         btn.disabled = false
-        btn.textContent = 'Test & Connect'
+        btn.textContent = 'Connect'
       }
     })
   }

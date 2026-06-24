@@ -44,21 +44,16 @@ export class OnDeviceGate {
 
   private render(hasExisting: boolean) {
     const continueBlock = hasExisting
-      ? `<button type="button" class="auth-btn" id="continue-ws">Continue my workspace →</button>
-         <p class="auth-copy-hint">Stored on this device (${this.fs?.kind === 'opfs' ? 'persistent' : 'local'}).</p>`
+      ? `<button type="button" class="auth-btn" id="continue-ws">Continue workspace</button>`
       : ''
 
     this.el.innerHTML = `
       <div class="auth-card glass">
         <div class="auth-logo">📱</div>
-        <h2 class="auth-step-title">Run on this device</h2>
-        <p class="auth-step-hint auth-install-body">
-          Fork a starter workspace onto your phone and open the interface. No
-          GitHub, no relay, no server — files live on-device and persist.
-        </p>
+        <h2 class="auth-step-title">On this device</h2>
         ${continueBlock}
         <div class="starter-list" id="starter-list"></div>
-        <button type="button" class="auth-btn auth-btn-outline" id="ondevice-back">‹ Other options</button>
+        <button type="button" class="auth-btn auth-btn-outline" id="ondevice-back">Back</button>
       </div>
     `
 
