@@ -1,5 +1,5 @@
 import { XTermView } from '../../terminal/XTermView.ts'
-import type { RelaySocket } from '../../terminal/RelaySocket.ts'
+import type { IRelay } from '../../terminal/RelaySocket.ts'
 import type { Agent } from '../../agents/Agent.ts'
 
 export class AgentView {
@@ -32,7 +32,7 @@ export class AgentView {
     this.xterm.mount()
   }
 
-  connect(relay: RelaySocket, agent: Agent) {
+  connect(relay: IRelay, agent: Agent) {
     this.agent = agent
     this.xterm.addSession(relay, agent.id, agent.name)
     agent.onChange(() => this.renderBar())

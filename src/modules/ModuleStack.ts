@@ -1,7 +1,7 @@
 import { Module } from './Module.ts'
 import type { ViewType } from './Module.ts'
 import type { Agent } from '../agents/Agent.ts'
-import type { RelaySocket } from '../terminal/RelaySocket.ts'
+import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { XTermView } from '../terminal/XTermView.ts'
 import { onDragY, onPinchSpread } from '../gestures/index.ts'
 
@@ -22,7 +22,7 @@ export class ModuleStack {
     this.bindPinchSpread()
   }
 
-  connectTerminal(relay: RelaySocket, sessionId: string, label = 'Terminal') {
+  connectTerminal(relay: IRelay, sessionId: string, label = 'Terminal') {
     this.modules.forEach(m => m.connectTerminal(relay, sessionId, label))
   }
 
@@ -30,7 +30,7 @@ export class ModuleStack {
    * Wire an agent to an agent view slot.
    * Uses an existing idle agent view if one is visible, otherwise adds a new module.
    */
-  addAgent(agent: Agent, relay: RelaySocket) {
+  addAgent(agent: Agent, relay: IRelay) {
     const idle = this.modules.find(m => m.hasIdleAgentView())
     if (idle) {
       idle.connectAgent(relay, agent)
@@ -50,6 +50,14 @@ export class ModuleStack {
   }
 
   fitTerminals() { this.modules.forEach(m => m.fitTerminal()) }
+
+  /** Show a view in a given module (default: first). Mounts it on demand. */
+  showViewIn(view: ViewType, moduleIndex = 0) {
+    this.modules[moduleIndex]?.showView(view)
+  }
+
+  /** Number of modules currently in the stack. */
+  get moduleCount() { return this.modules.length }
 
   // ── Private ──────────────────────────────────────────
 

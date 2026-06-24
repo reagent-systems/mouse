@@ -23,3 +23,6 @@ release
 *.njsproj
 *.sln
 *.sw?
+
+# Mouse build verification artifacts
+.mouse_build/shots/

@@ -1,7 +1,27 @@
 export type RelayStatus = 'connecting' | 'authenticating' | 'connected' | 'disconnected' | 'error'
 type Unsub = () => void
 
-export class RelaySocket {
+/**
+ * Shared relay surface implemented by both {@link RelaySocket} (live WebSocket)
+ * and the demo {@link MockRelay}. Views depend on this interface so demo mode
+ * can swap in scripted output transparently.
+ */
+export interface IRelay {
+  readonly status: RelayStatus
+  onStatus(fn: (s: RelayStatus) => void): Unsub
+  onSessionData(id: string, fn: (data: string) => void): Unsub
+  onSessionExit(id: string, fn: (code: number | null) => void): Unsub
+  onSessionStarted(id: string, fn: () => void): Unsub
+  connect(): void
+  disconnect(): void
+  startSession(id: string, command: 'bash' | 'opencode', task?: string): void
+  killSession(id: string): void
+  sendInput(id: string, data: string): void
+  resize(id: string, cols: number, rows: number): void
+  sendMessage(id: string, text: string): void
+}
+
+export class RelaySocket implements IRelay {
   private ws: WebSocket | null = null
   private _status: RelayStatus = 'disconnected'
   private statusHandlers: ((s: RelayStatus) => void)[] = []

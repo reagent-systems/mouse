@@ -5,7 +5,7 @@ import { GitChangesView } from './views/GitChanges.ts'
 import { GitGraphView } from './views/GitGraph.ts'
 import { AgentView } from './views/AgentView.ts'
 import { XTermView } from '../terminal/XTermView.ts'
-import type { RelaySocket } from '../terminal/RelaySocket.ts'
+import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { Agent } from '../agents/Agent.ts'
 
 export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'terminal' | 'agent'
@@ -83,13 +83,13 @@ export class Module {
     }
   }
 
-  connectTerminal(relay: RelaySocket, sessionId: string, label = 'Terminal') {
+  connectTerminal(relay: IRelay, sessionId: string, label = 'Terminal') {
     this.mountView(VIEWS.indexOf('terminal'))
     this.xtermView?.connectSession(relay, sessionId, label)
   }
 
   /** Wire an opencode agent to this module's agent view. */
-  connectAgent(relay: RelaySocket, agent: Agent) {
+  connectAgent(relay: IRelay, agent: Agent) {
     this.mountView(VIEWS.indexOf('agent'))
     this.agentView?.connect(relay, agent)
     this.goTo(VIEWS.indexOf('agent'))
@@ -112,6 +112,12 @@ export class Module {
     this.trackEl.style.transform = `translateX(-${i * (100 / VIEWS.length)}%)`
     if (VIEWS[i] === 'terminal') setTimeout(() => this.xtermView?.fit(), 30)
     if (VIEWS[i] === 'agent')    setTimeout(() => this.agentView?.fit(),   30)
+  }
+
+  /** Public navigation by view name — mounts the view and slides to it. */
+  showView(v: ViewType) {
+    const i = VIEWS.indexOf(v)
+    if (i >= 0) this.goTo(i)
   }
 
   private bindGestures() {

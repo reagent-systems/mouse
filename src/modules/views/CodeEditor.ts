@@ -45,19 +45,44 @@ function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/**
+ * Tokenizing HTML/markdown highlighter. Builds spans from the RAW source so it
+ * never re-matches its own injected markup (the previous chained-`.replace`
+ * approach corrupted itself, leaking `class="tag"` into the output). Each
+ * emitted fragment is HTML-escaped exactly once.
+ */
 function highlightLine(raw: string): string {
-  const e = esc(raw)
-  // HTML tag lines
-  if (/^&lt;/.test(e)) {
-    return e
-      .replace(/(&lt;\/?[\w][\w-]*)/g, '<span class="tag">$1</span>')
-      .replace(/([\w-]+=)(?=")/g, '<span class="attr">$1</span>')
-      .replace(/("([^"]*)")/g, '<span class="str">$1</span>')
-      .replace(/(&gt;)/g, '<span class="tag">$1</span>')
+  if (raw.trim() === '') return '&nbsp;'
+
+  // Markdown heading
+  if (/^#{1,6}\s/.test(raw)) return `<span class="fn">${esc(raw)}</span>`
+
+  // HTML tag line — tokenize attributes/strings without self-corruption.
+  if (/^\s*<\/?[a-zA-Z]/.test(raw)) {
+    let out = ''
+    let i = 0
+    while (i < raw.length) {
+      const rest = raw.slice(i)
+      // Tag open/close: <p  </p  <img  />  >
+      let m = rest.match(/^<\/?[a-zA-Z][\w-]*/)
+      if (m) { out += `<span class="tag">${esc(m[0])}</span>`; i += m[0].length; continue }
+      m = rest.match(/^\/?>/)
+      if (m) { out += `<span class="tag">${esc(m[0])}</span>`; i += m[0].length; continue }
+      // Attribute name followed by '='
+      m = rest.match(/^[a-zA-Z_:][\w:-]*(?==)/)
+      if (m) { out += `<span class="attr">${esc(m[0])}</span>`; i += m[0].length; continue }
+      // Quoted string value
+      m = rest.match(/^"[^"]*"/)
+      if (m) { out += `<span class="str">${esc(m[0])}</span>`; i += m[0].length; continue }
+      // Anything else: emit one escaped char
+      out += esc(raw[i])
+      i++
+    }
+    return out
   }
-  // Markdown headings
-  if (/^##+ /.test(raw)) return `<span class="fn">${e}</span>`
-  // Markdown bold
+
+  // Markdown bold inside plain text
+  const e = esc(raw)
   return e.replace(/\*\*([^*]+)\*\*/g, '<span class="kw">$1</span>')
 }
 

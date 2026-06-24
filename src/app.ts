@@ -5,6 +5,9 @@ import { AuthGate } from './auth/AuthGate.ts'
 import { GitHubAppInstallGate } from './auth/GitHubAppInstallGate.ts'
 import { CodespacePicker } from './codespaces/CodespacePicker.ts'
 import { RelaySocket } from './terminal/RelaySocket.ts'
+import { MockRelay } from './terminal/MockRelay.ts'
+import type { RelayLike } from './terminal/MockRelay.ts'
+import { isDemoMode, makeDemoPickResult } from './codespaces/demo.ts'
 import {
   authKind,
   clearAuth,
@@ -20,7 +23,7 @@ import type { PickResult } from './codespaces/CodespacePicker.ts'
 
 export class App {
   el: HTMLElement
-  private relay: RelaySocket | null = null
+  private relay: RelayLike | null = null
   private agentCount = 0
 
   constructor(container: HTMLElement) {
@@ -31,6 +34,12 @@ export class App {
   }
 
   private async boot() {
+    // Demo mode (?demo=1): skip auth + live relay, render the full module UI
+    // with a scripted MockRelay so every view is visible and verifiable.
+    if (isDemoMode()) {
+      this.showMain(makeDemoPickResult(), new MockRelay())
+      return
+    }
     const token = await getValidAccessToken()
     if (!token) {
       if (getStoredToken()) clearAuth()
@@ -141,7 +150,7 @@ export class App {
     this.el.appendChild(picker.el)
   }
 
-  private showMain(result: PickResult) {
+  private showMain(result: PickResult, relayOverride?: RelayLike) {
     const { token, relayUrl, codespace } = result
     const codespaceName = codespace.display_name ?? codespace.name
 
@@ -151,8 +160,12 @@ export class App {
     this.el.appendChild(stack.el)
     this.el.appendChild(bottomBar.el)
 
+    // Demo hook: expose the stack so the verification harness (and manual
+    // testing) can navigate views without simulating touch gestures.
+    if (isDemoMode()) (window as any).__mouseStack = stack
+
     // ── Connect relay ──────────────────────────────────
-    this.relay = new RelaySocket(relayUrl, token)
+    this.relay = relayOverride ?? new RelaySocket(relayUrl, token)
 
     this.relay.onStatus(status => {
       if (status === 'connected') {
