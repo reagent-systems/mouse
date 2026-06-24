@@ -111,7 +111,18 @@ export class CodeEditorView {
       scroll.appendChild(div)
     })
 
+    // Footer hint — matches Screenshot_2026-03-11_at_17.37.50.png. It lives
+    // inside `.view-code`, so it is inherently scoped to the code view only and
+    // never bleeds into other module views.
+    const footer = document.createElement('div')
+    footer.className = 'code-link-hint'
+    footer.innerHTML = `
+      <span class="code-link-hint-icon" aria-hidden="true">↗</span>
+      <span class="code-link-hint-text">Follow link <span class="code-link-hint-kbd">(cmd + click)</span></span>
+    `
+
     this.el.appendChild(hdr)
     this.el.appendChild(scroll)
+    this.el.appendChild(footer)
   }
 }

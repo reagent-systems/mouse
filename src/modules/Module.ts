@@ -4,12 +4,13 @@ import { FileTreeView } from './views/FileTree.ts'
 import { GitChangesView } from './views/GitChanges.ts'
 import { GitGraphView } from './views/GitGraph.ts'
 import { AgentView } from './views/AgentView.ts'
+import { ScriptTerminalView } from './views/ScriptTerminal.ts'
 import { XTermView } from '../terminal/XTermView.ts'
 import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { Agent } from '../agents/Agent.ts'
 
-export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'terminal' | 'agent'
-const VIEWS: ViewType[] = ['code', 'files', 'changes', 'graph', 'terminal', 'agent']
+export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'script' | 'terminal' | 'agent'
+const VIEWS: ViewType[] = ['code', 'files', 'changes', 'graph', 'script', 'terminal', 'agent']
 
 export class Module {
   el: HTMLElement
@@ -19,6 +20,7 @@ export class Module {
   private instances: Partial<Record<ViewType, { el: HTMLElement }>> = {}
   private xtermView: XTermView | null = null
   private agentView: AgentView | null = null
+  private scriptView: ScriptTerminalView | null = null
   private cleanup: (() => void) | null = null
 
   constructor(initialView: ViewType = 'code') {
@@ -66,6 +68,10 @@ export class Module {
       this.xtermView = view
       view.mount()
     }
+    if (v === 'script' && view instanceof ScriptTerminalView) {
+      this.scriptView = view
+      view.mount()
+    }
     if (v === 'agent' && view instanceof AgentView) {
       this.agentView = view
       view.mount()
@@ -78,9 +84,17 @@ export class Module {
       case 'files':    return new FileTreeView()
       case 'changes':  return new GitChangesView()
       case 'graph':    return new GitGraphView()
+      case 'script':   return new ScriptTerminalView()
       case 'terminal': return new XTermView()
       case 'agent':    return new AgentView()
     }
+  }
+
+  /** Run an agent task as an in-app Python script (no relay/PTY needed). */
+  runScriptTask(task: string) {
+    this.mountView(VIEWS.indexOf('script'))
+    this.scriptView?.runTask(task)
+    this.goTo(VIEWS.indexOf('script'))
   }
 
   connectTerminal(relay: IRelay, sessionId: string, label = 'Terminal') {
@@ -111,6 +125,7 @@ export class Module {
     this.viewIndex = i
     this.trackEl.style.transform = `translateX(-${i * (100 / VIEWS.length)}%)`
     if (VIEWS[i] === 'terminal') setTimeout(() => this.xtermView?.fit(), 30)
+    if (VIEWS[i] === 'script')   setTimeout(() => this.scriptView?.fit(),  30)
     if (VIEWS[i] === 'agent')    setTimeout(() => this.agentView?.fit(),   30)
   }
 
@@ -149,6 +164,7 @@ export class Module {
   destroy() {
     this.cleanup?.()
     this.xtermView?.destroy()
+    this.scriptView?.destroy()
     this.agentView?.destroy()
   }
 

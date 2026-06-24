@@ -169,6 +169,21 @@ try {
   await page.evaluate(() => (window).__mouseStack?.showViewIn('code', 0)); await sleep(300)
   const codeText = await page.locator('.code-scroll').first().innerText().catch(() => '')
   if (/class="(tag|attr|str)"/.test(codeText)) fails.push('code highlighter leaked span markup')
+  // The "Follow link (cmd + click)" hint must show in the code view…
+  if (!(await page.locator('.view-code .code-link-hint').count())) {
+    fails.push('code view missing "Follow link" footer hint')
+  } else {
+    const hintTxt = (await page.locator('.code-link-hint').first().innerText()).toLowerCase()
+    if (!hintTxt.includes('follow link') || !hintTxt.includes('cmd')) {
+      fails.push('Follow link hint text does not match the sketch')
+    }
+  }
+  // …and must NOT leak into a non-code view (it is scoped to .view-code).
+  await page.evaluate(() => (window).__mouseStack?.showViewIn('files', 0)); await sleep(250)
+  if (await page.locator('.view-files .code-link-hint').count()) {
+    fails.push('Follow link hint leaked into the files view')
+  }
+  await page.evaluate(() => (window).__mouseStack?.showViewIn('code', 0)); await sleep(250)
 
   // Composer → spawn an agent, watch the terminal stream, answer a y/n prompt.
   await page.locator('.composer-input').fill('Add a feature to the README')

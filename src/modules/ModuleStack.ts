@@ -56,6 +56,11 @@ export class ModuleStack {
     this.modules[moduleIndex]?.showView(view)
   }
 
+  /** Run an agent task as an in-app Python script in the first module. */
+  runScriptTask(task: string) {
+    this.modules[0]?.runScriptTask(task)
+  }
+
   /** Number of modules currently in the stack. */
   get moduleCount() { return this.modules.length }
 
