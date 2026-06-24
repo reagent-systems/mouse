@@ -1,6 +1,6 @@
 # Mouse Build — Status & Continuation Contract
 
-STATUS: IN_PROGRESS
+STATUS: DONE
 
 ## The Goal
 Continually modify the codebase at /Users/thyfriendlyfox/Projects/mouse and produce a
@@ -29,6 +29,11 @@ NOT a simulated app. It must build, run, and render pixel-close to the sketches.
 ## Progress log (append, newest last)
 - Session start: tsc --noEmit passes. node v22, npm 10. node_modules present.
   Codebase already implements most views. Need demo mode + visual verification harness.
+- Added IRelay interface + MockRelay + ?demo=1 demo mode; fixed CodeEditor highlighter
+  self-corruption (tokenizer rewrite). Built Playwright harness (.mouse_build/verify.mjs).
+  Clean build: tsc OK, vite build OK. verify.mjs PASS (all 6 views + agent terminal +
+  composer render; no console errors; highlighter leak guard passes). Visually confirmed
+  code/files/changes/graph/agent shots match sketches. Committed 35da05c. STATUS: DONE.
 
 ## How to continue if interrupted
 Read this file. Run the verification harness at `.mouse_build/verify.mjs`.
