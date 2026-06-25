@@ -1,57 +1,94 @@
-type FileNode = { name: string; icon: string; cls: string; indent: number; expanded?: boolean; children?: FileNode[] }
+import type { Workspace } from '../../runtime/Workspace.ts'
 
-const TREE: FileNode[] = [
-  { name: 'src', icon: '▶', cls: 'fi-dir', indent: 0 },
-  { name: 'agents', icon: '▶', cls: 'fi-dir', indent: 1 },
-  { name: 'Agent.ts', icon: '◆', cls: 'fi-ts', indent: 2 },
-  { name: 'AgentPanel.ts', icon: '◆', cls: 'fi-ts', indent: 2 },
-  { name: 'components', icon: '▶', cls: 'fi-dir', indent: 1 },
-  { name: 'BottomBar.ts', icon: '◆', cls: 'fi-ts', indent: 2 },
-  { name: 'gestures', icon: '▶', cls: 'fi-dir', indent: 1 },
-  { name: 'index.ts', icon: '◆', cls: 'fi-ts', indent: 2 },
-  { name: 'modules', icon: '▶', cls: 'fi-dir', indent: 1 },
-  { name: 'views', icon: '▶', cls: 'fi-dir', indent: 2 },
-  { name: 'CodeEditor.ts', icon: '◆', cls: 'fi-ts', indent: 3 },
-  { name: 'FileTree.ts', icon: '◆', cls: 'fi-ts', indent: 3 },
-  { name: 'GitChanges.ts', icon: '◆', cls: 'fi-ts', indent: 3 },
-  { name: 'GitGraph.ts', icon: '◆', cls: 'fi-ts', indent: 3 },
-  { name: 'Terminal.ts', icon: '◆', cls: 'fi-ts', indent: 3 },
-  { name: 'Module.ts', icon: '◆', cls: 'fi-ts', indent: 2 },
-  { name: 'ModuleStack.ts', icon: '◆', cls: 'fi-ts', indent: 2 },
-  { name: 'app.ts', icon: '◆', cls: 'fi-ts', indent: 1 },
-  { name: 'main.ts', icon: '◆', cls: 'fi-ts', indent: 1 },
-  { name: 'style.css', icon: '◆', cls: 'fi-css', indent: 1 },
-  { name: '.env.example', icon: '◆', cls: 'fi-env', indent: 0 },
-  { name: '.gitignore', icon: '◆', cls: 'fi-git', indent: 0 },
-  { name: 'package.json', icon: '◆', cls: 'fi-json', indent: 0 },
-  { name: 'README.md', icon: '◆', cls: 'fi-md', indent: 0 },
-  { name: 'tsconfig.json', icon: '◆', cls: 'fi-json', indent: 0 },
-]
+type FlatNode = { name: string; path: string; depth: number; isDir: boolean }
 
+const ICONS: Record<string, { icon: string; cls: string }> = {
+  ts:   { icon: '◆', cls: 'fi-ts' },
+  js:   { icon: '◆', cls: 'fi-ts' },
+  py:   { icon: '◆', cls: 'fi-ts' },
+  json: { icon: '◆', cls: 'fi-json' },
+  md:   { icon: '◆', cls: 'fi-md' },
+  css:  { icon: '◆', cls: 'fi-css' },
+  env:  { icon: '◆', cls: 'fi-env' },
+}
+
+function iconFor(name: string): { icon: string; cls: string } {
+  const ext = name.includes('.') ? name.split('.').pop()! : ''
+  return ICONS[ext] ?? { icon: '◆', cls: 'fi-ts' }
+}
+
+/** Build a flat, indented tree from a list of file paths. */
+function buildTree(paths: string[]): FlatNode[] {
+  const dirs = new Set<string>()
+  for (const p of paths) {
+    const parts = p.split('/')
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'))
+  }
+  const all = new Set<string>([...dirs, ...paths])
+  return [...all].sort().map((full) => {
+    const parts = full.split('/')
+    return {
+      name: parts[parts.length - 1],
+      path: full,
+      depth: parts.length - 1,
+      isDir: dirs.has(full),
+    }
+  })
+}
+
+/**
+ * FileTreeView — renders the REAL files in the on-device workspace. Tapping a
+ * file asks the workspace's listeners (via onSelect) to open it in the editor.
+ * Without a workspace it shows nothing (no fake tree).
+ */
 export class FileTreeView {
   el: HTMLElement
+  private ws: Workspace | null
   private selected: HTMLElement | null = null
+  private onSelectFn: ((path: string) => void) | null = null
 
-  constructor() {
+  constructor(workspace: Workspace | null = null) {
+    this.ws = workspace
     this.el = document.createElement('div')
     this.el.className = 'view-files'
     this.render()
+    this.ws?.onChange(() => this.render())
   }
 
-  private render() {
-    TREE.forEach(node => {
+  onSelect(fn: (path: string) => void) { this.onSelectFn = fn }
+
+  private async render() {
+    if (!this.ws) {
+      this.el.innerHTML = `<div class="files-empty">No workspace</div>`
+      return
+    }
+    const paths = await this.ws.listFiles()
+    if (!paths.length) {
+      this.el.innerHTML = `<div class="files-empty">No files</div>`
+      return
+    }
+    this.el.innerHTML = ''
+    for (const node of buildTree(paths)) {
       const item = document.createElement('div')
-      item.className = `file-item ind${node.indent}`
-      item.innerHTML = `
-        <span class="fi ${node.cls}">${node.icon}</span>
-        <span>${node.name}</span>
-      `
-      item.addEventListener('click', () => {
-        if (this.selected) this.selected.classList.remove('selected')
-        item.classList.add('selected')
-        this.selected = item
-      })
+      const indentCls = node.depth > 0 ? `ind${Math.min(node.depth, 3)}` : ''
+      item.className = `file-item ${indentCls}`
+      if (node.isDir) {
+        item.innerHTML = `<span class="fi fi-dir">▶</span><span>${esc(node.name)}</span>`
+      } else {
+        const { icon, cls } = iconFor(node.name)
+        item.innerHTML = `<span class="fi ${cls}">${icon}</span><span>${esc(node.name)}</span>`
+        item.addEventListener('click', () => {
+          if (this.selected) this.selected.classList.remove('selected')
+          item.classList.add('selected')
+          this.selected = item
+          this.onSelectFn?.(node.path)
+        })
+      }
       this.el.appendChild(item)
-    })
+    }
   }
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

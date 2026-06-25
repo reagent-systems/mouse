@@ -12,6 +12,7 @@ import { ModeGate } from './codespaces/ModeGate.ts'
 import { LocalGate } from './codespaces/LocalGate.ts'
 import { OnDeviceGate } from './codespaces/OnDeviceGate.ts'
 import type { OnDeviceResult } from './codespaces/OnDeviceGate.ts'
+import { Workspace } from './runtime/Workspace.ts'
 import {
   getBackendMode, setBackendMode, isLocalModeFlag, isOnDeviceFlag,
 } from './platform/backendMode.ts'
@@ -223,23 +224,28 @@ export class App {
   }
 
   /**
-   * On-device interface: the module stack + composer, with NO relay. The
-   * composer routes agent tasks to the in-app Python runtime (ScriptTerminal),
-   * and views read/write the on-device filesystem. This is the host-free path.
+   * On-device interface: the module stack + composer, with NO relay. The panels
+   * read/write the REAL on-device workspace; the composer runs agent tasks on the
+   * in-app Python runtime. This is the host-free path.
    */
-  private showOnDeviceMain(result: OnDeviceResult) {
+  private async showOnDeviceMain(result: OnDeviceResult) {
     const { fs, workspaceName } = result
+    const workspace = await Workspace.open(fs, workspaceName)
 
-    const stack     = new ModuleStack()
+    const stack     = new ModuleStack(workspace)
     const bottomBar = new BottomBar(workspaceName)
 
     this.el.appendChild(stack.el)
     this.el.appendChild(bottomBar.el)
     ;(window as any).__mouseStack = stack
     ;(window as any).__mouseFS = fs
-    // Open onto the script terminal so the user lands directly in a usable,
-    // runnable interface — no connection step, no waiting.
-    stack.showViewIn('script', 0)
+    ;(window as any).__mouseWorkspace = workspace
+
+    // Wire the file tree → code editor so tapping a file opens it for editing.
+    stack.linkFileTreeToEditor()
+
+    // Land on the code view so the user sees their real files immediately.
+    stack.showViewIn('code', 0)
 
     // Composer → run the task on the in-app Python runtime.
     bottomBar.onSubmit(text => {

@@ -1,4 +1,6 @@
-const SOURCE = `<p align="center">
+import type { Workspace } from '../../runtime/Workspace.ts'
+
+const FALLBACK_SOURCE = `<p align="center">
   <img src="assets/mouse-logo.png" alt="Mouse" />
 </p>
 
@@ -7,122 +9,166 @@ const SOURCE = `<p align="center">
   around a modular, liquid-glass GUI system.
 </p>
 
-<p align="center">
-  <a href="https://github.com/mouse-app">GitHub</a>
-  &nbsp;·&nbsp;
-  <a href="#docs">Docs</a>
-  &nbsp;·&nbsp;
-  <a href="#discord">Discord</a>
-</p>
-
-Using opencode agents, Mouse can autonomously
-edit, test, and ship code — from your phone.
-
-**New:** First mobile platform to support
-multi-agent parallel task execution with
-live status streaming via GitHub Codespaces.
-
-## Why I Built Mouse
-
-The problem: developers need to run autonomous
-coding agents, but every existing tool is
-desktop-first and lacks touch UX.
-
-Mouse brings a fully modular, swipeable panel
-system to mobile — so you can manage agents,
-review diffs, and ship code from anywhere.
-
 ## Features
 
 - Modular resizable panels (swipe to change)
 - Multi-agent parallel execution
-- Voice-to-bash command translation
-- Git changes, graph, and one-tap commit
-- GitHub Codespaces terminal integration
-- opencode agent backend`
+- Git changes, graph, and one-tap commit`
 
 function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 /**
- * Tokenizing HTML/markdown highlighter. Builds spans from the RAW source so it
- * never re-matches its own injected markup (the previous chained-`.replace`
- * approach corrupted itself, leaking `class="tag"` into the output). Each
- * emitted fragment is HTML-escaped exactly once.
+ * Tokenizing HTML/markdown/code highlighter. Builds spans from the RAW source so
+ * it never re-matches its own injected markup. Each fragment is escaped once.
  */
 function highlightLine(raw: string): string {
   if (raw.trim() === '') return '&nbsp;'
-
-  // Markdown heading
   if (/^#{1,6}\s/.test(raw)) return `<span class="fn">${esc(raw)}</span>`
+  if (/^\s*#/.test(raw)) return `<span class="cmt">${esc(raw)}</span>`   // py/sh comment
 
-  // HTML tag line — tokenize attributes/strings without self-corruption.
   if (/^\s*<\/?[a-zA-Z]/.test(raw)) {
     let out = ''
     let i = 0
     while (i < raw.length) {
       const rest = raw.slice(i)
-      // Tag open/close: <p  </p  <img  />  >
       let m = rest.match(/^<\/?[a-zA-Z][\w-]*/)
       if (m) { out += `<span class="tag">${esc(m[0])}</span>`; i += m[0].length; continue }
       m = rest.match(/^\/?>/)
       if (m) { out += `<span class="tag">${esc(m[0])}</span>`; i += m[0].length; continue }
-      // Attribute name followed by '='
       m = rest.match(/^[a-zA-Z_:][\w:-]*(?==)/)
       if (m) { out += `<span class="attr">${esc(m[0])}</span>`; i += m[0].length; continue }
-      // Quoted string value
       m = rest.match(/^"[^"]*"/)
       if (m) { out += `<span class="str">${esc(m[0])}</span>`; i += m[0].length; continue }
-      // Anything else: emit one escaped char
-      out += esc(raw[i])
-      i++
+      out += esc(raw[i]); i++
     }
     return out
   }
 
-  // Markdown bold inside plain text
   const e = esc(raw)
-  return e.replace(/\*\*([^*]+)\*\*/g, '<span class="kw">$1</span>')
+  return e
+    .replace(/\b(def|class|import|from|return|async|await|if|else|for|while|const|let|function|export)\b/g, '<span class="kw">$1</span>')
+    .replace(/(&quot;[^&]*&quot;|'[^']*'|"[^"]*")/g, '<span class="str">$1</span>')
+    .replace(/\*\*([^*]+)\*\*/g, '<span class="kw">$1</span>')
 }
 
+/**
+ * CodeEditorView — shows and EDITS a real file from the on-device workspace.
+ * Read mode renders highlighted lines; tapping "Edit" swaps to a textarea that
+ * writes back to the workspace (which then recomputes changes). Without a
+ * workspace it shows the static README sample (demo/relay modes).
+ */
 export class CodeEditorView {
   el: HTMLElement
+  private ws: Workspace | null
+  private scroll!: HTMLElement
+  private header!: HTMLElement
+  private editor!: HTMLTextAreaElement
+  private editing = false
+  private path = ''
 
-  constructor() {
+  constructor(workspace: Workspace | null = null) {
+    this.ws = workspace
     this.el = document.createElement('div')
     this.el.className = 'view-code'
+    this.build()
+    if (this.ws) this.openFirstFile()
+    else this.renderStatic()
+  }
 
-    const hdr = document.createElement('div')
-    hdr.className = 'code-file-header'
-    hdr.innerHTML = `
+  /** Open a specific file (called by the file tree). */
+  async setFile(path: string) {
+    if (!this.ws) return
+    this.path = path
+    const content = await this.ws.read(path)
+    this.renderContent(path, content)
+  }
+
+  private build() {
+    this.header = document.createElement('div')
+    this.header.className = 'code-file-header'
+
+    this.scroll = document.createElement('div')
+    this.scroll.className = 'code-scroll'
+
+    this.editor = document.createElement('textarea')
+    this.editor.className = 'code-editor-area'
+    this.editor.spellcheck = false
+    this.editor.style.display = 'none'
+    this.editor.addEventListener('input', () => this.saveDebounced())
+
+    this.el.appendChild(this.header)
+    this.el.appendChild(this.scroll)
+    this.el.appendChild(this.editor)
+  }
+
+  private async openFirstFile() {
+    const files = await this.ws!.listFiles()
+    const pick = files.find(f => /readme/i.test(f)) ?? files[0]
+    if (pick) this.setFile(pick)
+    else this.renderContent('', '')
+  }
+
+  private renderContent(path: string, content: string) {
+    this.path = path
+    this.header.innerHTML = `
+      <span style="color:var(--blue)">ℹ</span>
+      <span>${esc(path || 'untitled')}</span>
+      <button type="button" class="code-edit-btn" id="edit-toggle">${this.editing ? 'Done' : 'Edit'}</button>
+    `
+    this.header.querySelector('#edit-toggle')!.addEventListener('click', () => this.toggleEdit(content))
+
+    if (this.editing) {
+      this.scroll.style.display = 'none'
+      this.editor.style.display = 'block'
+      this.editor.value = content
+    } else {
+      this.editor.style.display = 'none'
+      this.scroll.style.display = 'block'
+      this.scroll.innerHTML = ''
+      for (const line of content.split('\n')) {
+        const div = document.createElement('div')
+        div.className = 'code-line'
+        div.innerHTML = highlightLine(line) || '&nbsp;'
+        this.scroll.appendChild(div)
+      }
+    }
+  }
+
+  private toggleEdit(content: string) {
+    this.editing = !this.editing
+    const current = this.editing ? content : this.editor.value
+    this.renderContent(this.path, this.editing ? content : current)
+  }
+
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private saveDebounced() {
+    if (!this.ws || !this.path) return
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      this.ws!.write(this.path, this.editor.value)
+    }, 300)
+  }
+
+  private renderStatic() {
+    this.header.innerHTML = `
       <span style="color:var(--blue)">ℹ</span>
       <span>README.md</span>
-      <span style="color:var(--text-faint);margin-left:auto;font-size:10px">gavrielc · just now · Add Mouse logo ar…</span>
     `
-
-    const scroll = document.createElement('div')
-    scroll.className = 'code-scroll'
-
-    SOURCE.split('\n').forEach(line => {
+    this.scroll.innerHTML = ''
+    for (const line of FALLBACK_SOURCE.split('\n')) {
       const div = document.createElement('div')
       div.className = 'code-line'
       div.innerHTML = highlightLine(line) || '&nbsp;'
-      scroll.appendChild(div)
-    })
-
-    // Footer hint — matches Screenshot_2026-03-11_at_17.37.50.png. It lives
-    // inside `.view-code`, so it is inherently scoped to the code view only and
-    // never bleeds into other module views.
+      this.scroll.appendChild(div)
+    }
     const footer = document.createElement('div')
     footer.className = 'code-link-hint'
     footer.innerHTML = `
       <span class="code-link-hint-icon" aria-hidden="true">↗</span>
       <span class="code-link-hint-text">Follow link <span class="code-link-hint-kbd">(cmd + click)</span></span>
     `
-
-    this.el.appendChild(hdr)
-    this.el.appendChild(scroll)
     this.el.appendChild(footer)
   }
 }

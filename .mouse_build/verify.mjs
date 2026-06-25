@@ -121,13 +121,11 @@ try {
   await page.waitForSelector('.starter-row', { timeout: 6000 }).catch(() => {})
   if (!(await page.locator('.starter-row').count())) fails.push('on-device gate did not offer starter workspaces to fork')
   await shot(page, 'ondevice-gate')
-  // Fork the first starter → should land in the module interface with the script terminal.
+  // Fork the first starter → should land in the module interface showing REAL files.
   await clickIfPresent(page, '.starter-row', 'fork starter workspace')
   await page.waitForSelector('.module-stack', { timeout: 8000 }).catch(() => {})
   await sleep(900)
   if (!(await page.locator('.module-stack').count())) fails.push('on-device: forking did not reach the interface')
-  if (!(await page.locator('.view-scriptterm').count())) fails.push('on-device: in-app script terminal not present')
-  if (!(await page.locator('.scriptterm-chip').count())) fails.push('on-device: bundle launcher chips missing')
   await shot(page, 'ondevice-interface')
   // Verify files were genuinely forked into the on-device FS.
   const fileCount = await page.evaluate(async () => {
@@ -136,6 +134,29 @@ try {
     return (await fs.list()).length
   })
   if (fileCount < 1) fails.push(`on-device: no files forked into the device FS (got ${fileCount})`)
+  // The code editor must show a REAL forked file (agent.py / README.md), not the
+  // static sample. We forked the agent starter, so README.md should be the header.
+  const editorHeader = await page.locator('.code-file-header').first().innerText().catch(() => '')
+  if (!/README|agent\.py|main\.py/.test(editorHeader)) {
+    fails.push(`on-device: editor not showing a forked file (header: "${editorHeader.slice(0, 40)}")`)
+  }
+  // The changes panel must reflect the REAL workspace (forked files = added),
+  // and committing must clear them. Navigate module 1 (changes) and check.
+  const realChanges = await page.evaluate(async () => {
+    const ws = (window).__mouseWorkspace
+    if (!ws) return -1
+    return (await ws.changes()).length
+  })
+  // Right after fork+open, baseline == current, so changes should be 0 (clean).
+  if (realChanges !== 0) fails.push(`on-device: expected clean workspace after fork, got ${realChanges} changes`)
+  // Now edit a file via the workspace API and confirm the change is detected.
+  const afterEdit = await page.evaluate(async () => {
+    const ws = (window).__mouseWorkspace
+    await ws.write('main.py', 'print("edited on device")\n# new line\n')
+    return (await ws.changes()).length
+  })
+  if (afterEdit < 1) fails.push('on-device: editing a file did not register as a change')
+  await shot(page, 'ondevice-edited')
   // Persistence: the chosen mode must stick so relaunch reopens on-device.
   const persistedMode = await page.evaluate(() => localStorage.getItem('mouse_backend_mode'))
   if (persistedMode !== 'ondevice') fails.push(`on-device mode not persisted (got "${persistedMode}")`)
@@ -193,9 +214,8 @@ try {
     await shot(page, `app-view-${v}`)
   }
 
-  // Content assertions per view.
-  await page.evaluate(() => (window).__mouseStack?.showViewIn('files', 0)); await sleep(350)
-  if (!(await page.locator('.view-files .file-item').count())) fails.push('files view empty')
+  // Content assertions per view. (Demo mode has no workspace, so the file tree
+  // is intentionally empty here — real-file coverage is in the on-device journey.)
   await page.evaluate(() => (window).__mouseStack?.showViewIn('graph', 0)); await sleep(350)
   if (!(await page.locator('.graph-dot').count())) fails.push('graph has no commit dots')
   await page.evaluate(() => (window).__mouseStack?.showViewIn('changes', 0)); await sleep(350)

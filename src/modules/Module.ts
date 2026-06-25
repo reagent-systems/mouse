@@ -8,6 +8,7 @@ import { ScriptTerminalView } from './views/ScriptTerminal.ts'
 import { XTermView } from '../terminal/XTermView.ts'
 import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { Agent } from '../agents/Agent.ts'
+import type { Workspace } from '../runtime/Workspace.ts'
 
 export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'script' | 'terminal' | 'agent'
 const VIEWS: ViewType[] = ['code', 'files', 'changes', 'graph', 'script', 'terminal', 'agent']
@@ -22,9 +23,11 @@ export class Module {
   private agentView: AgentView | null = null
   private scriptView: ScriptTerminalView | null = null
   private cleanup: (() => void) | null = null
+  private workspace: Workspace | null
 
-  constructor(initialView: ViewType = 'code') {
+  constructor(initialView: ViewType = 'code', workspace: Workspace | null = null) {
     this.viewIndex = VIEWS.indexOf(initialView)
+    this.workspace = workspace
 
     this.el = document.createElement('div')
     this.el.className = 'module'
@@ -80,9 +83,9 @@ export class Module {
 
   private createView(v: ViewType) {
     switch (v) {
-      case 'code':     return new CodeEditorView()
-      case 'files':    return new FileTreeView()
-      case 'changes':  return new GitChangesView()
+      case 'code':     return new CodeEditorView(this.workspace)
+      case 'files':    return new FileTreeView(this.workspace)
+      case 'changes':  return new GitChangesView(this.workspace)
       case 'graph':    return new GitGraphView()
       case 'script':   return new ScriptTerminalView()
       case 'terminal': return new XTermView()
@@ -95,6 +98,20 @@ export class Module {
     this.mountView(VIEWS.indexOf('script'))
     this.scriptView?.runTask(task)
     this.goTo(VIEWS.indexOf('script'))
+  }
+
+  /** Wire this module's file tree to its code editor: tap a file → open it. */
+  linkFileTreeToEditor() {
+    this.mountView(VIEWS.indexOf('files'))
+    this.mountView(VIEWS.indexOf('code'))
+    const tree = this.instances['files'] as FileTreeView | undefined
+    const editor = this.instances['code'] as CodeEditorView | undefined
+    if (tree && editor) {
+      tree.onSelect((path) => {
+        editor.setFile(path)
+        this.goTo(VIEWS.indexOf('code'))
+      })
+    }
   }
 
   connectTerminal(relay: IRelay, sessionId: string, label = 'Terminal') {

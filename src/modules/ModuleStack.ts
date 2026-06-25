@@ -3,6 +3,7 @@ import type { ViewType } from './Module.ts'
 import type { Agent } from '../agents/Agent.ts'
 import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { XTermView } from '../terminal/XTermView.ts'
+import type { Workspace } from '../runtime/Workspace.ts'
 import { onDragY, onPinchSpread } from '../gestures/index.ts'
 
 const INITIAL_VIEWS: ViewType[] = ['code', 'changes']
@@ -14,8 +15,10 @@ export class ModuleStack {
   private modules: Module[] = []
   private flexes: number[] = []
   private cleanups: (() => void)[] = []
+  private workspace: Workspace | null
 
-  constructor() {
+  constructor(workspace: Workspace | null = null) {
+    this.workspace = workspace
     this.el = document.createElement('div')
     this.el.className = 'module-stack'
     INITIAL_VIEWS.forEach(v => this.addModule(v, false))
@@ -61,13 +64,18 @@ export class ModuleStack {
     this.modules[0]?.runScriptTask(task)
   }
 
+  /** Wire file-tree → editor in every module so taps open files. */
+  linkFileTreeToEditor() {
+    this.modules.forEach(m => m.linkFileTreeToEditor())
+  }
+
   /** Number of modules currently in the stack. */
   get moduleCount() { return this.modules.length }
 
   // ── Private ──────────────────────────────────────────
 
   private addModule(view: ViewType, animate = true) {
-    const mod = new Module(view)
+    const mod = new Module(view, this.workspace)
     if (animate) {
       mod.el.style.transition = `flex ${ANIM_MS}ms cubic-bezier(0.34,1.56,0.64,1), opacity ${ANIM_MS}ms`
       mod.el.style.opacity = '0'
