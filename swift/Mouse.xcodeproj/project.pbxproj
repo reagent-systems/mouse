@@ -12,6 +12,7 @@
 		3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */; };
 		3C060871009B04B75DD57460 /* MouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F529B8B560B4DB034F9698 /* MouseApp.swift */; };
 		7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2B92464EFB49888F46248A5 /* Assets.xcassets */; };
+		83846DD608699BB7C865EB1C /* GlassScreenContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 817E3AD28A6E9BB32AEE35F2 /* GlassScreenContainer.swift */; };
 		8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E73E50FC2D809F76902185C /* AsciiArt.swift */; };
 		8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503560AF5D76D20B38402E7F /* ContentView.swift */; };
 		CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5808E2C3F3EE351EB16E5DD /* AppFont.swift */; };
@@ -25,6 +26,7 @@
 		38F529B8B560B4DB034F9698 /* MouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseApp.swift; sourceTree = "<group>"; };
 		503560AF5D76D20B38402E7F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
+		817E3AD28A6E9BB32AEE35F2 /* GlassScreenContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassScreenContainer.swift; sourceTree = "<group>"; };
 		98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Bold.ttf"; sourceTree = "<group>"; };
 		B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtStyle.swift; sourceTree = "<group>"; };
 		C5808E2C3F3EE351EB16E5DD /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
@@ -42,6 +44,7 @@
 				5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */,
 				E2B92464EFB49888F46248A5 /* Assets.xcassets */,
 				503560AF5D76D20B38402E7F /* ContentView.swift */,
+				817E3AD28A6E9BB32AEE35F2 /* GlassScreenContainer.swift */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
 			);
@@ -146,6 +149,7 @@
 				3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */,
 				2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */,
 				8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */,
+				83846DD608699BB7C865EB1C /* GlassScreenContainer.swift in Sources */,
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -2,7 +2,14 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        AsciiLogoBackground()
+        ZStack {
+            AsciiLogoBackground()
+
+            GlassScreenContainer {
+                Color.clear
+            }
+        }
+        .ignoresSafeArea()
     }
 }
 
