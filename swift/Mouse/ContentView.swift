@@ -7,7 +7,6 @@ struct ContentView: View {
 
             ForegroundView()
         }
-        .ignoresSafeArea()
     }
 }
 

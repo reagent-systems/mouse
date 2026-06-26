@@ -1,13 +1,23 @@
 import SwiftUI
 
-/// Interactive app UI — a horizontally swipeable deck of basic containers.
+/// Interactive app UI — a horizontally swipeable deck of basic containers whose height can be
+/// resized by dragging the top or bottom edge.
 ///
-/// Sizing uses `containerRelativeFrame` (measures the real window) rather than `GeometryReader`,
-/// which gets an inflated size from the oversized ASCII art sibling in the `ZStack`.
+/// Resizing is anchored: dragging one edge moves only that edge while the opposite edge stays put.
+/// The panel area is the space left between a top spacer (`topInset`) and bottom spacer
+/// (`bottomInset`), so no per-frame height math or layout feedback is needed — which keeps the
+/// drag smooth. Container height is read once via a stable background `GeometryReader`.
 struct ForegroundView: View {
     @State private var selection = 0
+    @State private var availableHeight: CGFloat = 0
+    @State private var topInset: CGFloat = 0
+    @State private var bottomInset: CGFloat = 0
+    @State private var didInit = false
+    @State private var dragStartInset: CGFloat?
+
     private let horizontalInset: CGFloat = 24
     private let cornerRadius: CGFloat = 32
+    private let minHeight: CGFloat = 120
 
     private let panels: [PanelStyle] = [
         PanelStyle(title: "1", color: .black),
@@ -16,18 +26,70 @@ struct ForegroundView: View {
     ]
 
     var body: some View {
-        TabView(selection: $selection) {
-            ForEach(Array(panels.enumerated()), id: \.offset) { index, style in
-                Panel(style: style, cornerRadius: cornerRadius)
-                    .frame(maxHeight: .infinity)
-                    .padding(.horizontal, horizontalInset)
-                    .tag(index)
+        VStack(spacing: 0) {
+            Color.clear.frame(height: topInset)
+
+            TabView(selection: $selection) {
+                ForEach(Array(panels.enumerated()), id: \.offset) { index, style in
+                    Panel(style: style, cornerRadius: cornerRadius)
+                        .frame(maxHeight: .infinity)
+                        .padding(.horizontal, horizontalInset)
+                        .tag(index)
+                }
             }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .overlay(alignment: .top) { resizeHandle(edge: .top) }
+            .overlay(alignment: .bottom) { resizeHandle(edge: .bottom) }
+
+            Color.clear.frame(height: bottomInset)
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
+        // Force the VStack to exactly the container size. `containerRelativeFrame` measures the real
+        // window; a `GeometryReader` here reports an inflated size from the oversized ASCII sibling.
         .containerRelativeFrame([.horizontal, .vertical]) { length, axis in
-            axis == .vertical ? length / 3 : length
+            if axis == .vertical, availableHeight != length {
+                DispatchQueue.main.async { setAvailableHeight(length) }
+            }
+            return length
         }
+    }
+
+    private func setAvailableHeight(_ height: CGFloat) {
+        guard height > 0 else { return }
+        availableHeight = height
+        if !didInit {
+            topInset = height / 3
+            bottomInset = height / 3
+            didInit = true
+        }
+    }
+
+    private func resizeHandle(edge: VerticalEdge) -> some View {
+        Capsule()
+            .fill(.white.opacity(0.6))
+            .frame(width: 40, height: 5)
+            .frame(maxWidth: .infinity)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+            .padding(.horizontal, horizontalInset)
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { value in
+                        guard availableHeight > 0 else { return }
+                        switch edge {
+                        case .top:
+                            let base = dragStartInset ?? topInset
+                            if dragStartInset == nil { dragStartInset = base }
+                            let upper = max(0, availableHeight - bottomInset - minHeight)
+                            topInset = min(max(base + value.translation.height, 0), upper)
+                        case .bottom:
+                            let base = dragStartInset ?? bottomInset
+                            if dragStartInset == nil { dragStartInset = base }
+                            let upper = max(0, availableHeight - topInset - minHeight)
+                            bottomInset = min(max(base - value.translation.height, 0), upper)
+                        }
+                    }
+                    .onEnded { _ in dragStartInset = nil }
+            )
     }
 }
 
@@ -52,8 +114,5 @@ struct Panel: View {
 }
 
 #Preview {
-    ZStack {
-        AsciiLogoBackground()
-        ForegroundView()
-    }
+    ContentView()
 }
