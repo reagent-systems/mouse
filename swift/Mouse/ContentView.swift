@@ -5,11 +5,8 @@ struct ContentView: View {
         ZStack {
             AsciiLogoBackground()
 
-            GlassScreenContainer {
-                Color.clear
-            }
+            ForegroundView()
         }
-        .ignoresSafeArea()
     }
 }
 

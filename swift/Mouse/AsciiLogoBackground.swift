@@ -1,5 +1,7 @@
 import SwiftUI
 
+/// Decorative app backdrop — animated ASCII logo. Do not add foreground UI here.
+/// Lives behind `ForegroundView` in `ContentView`; hit testing is disabled.
 struct AsciiLogoBackground: View {
     private let startDate = Date()
 
@@ -31,6 +33,8 @@ struct AsciiLogoBackground: View {
         }
         .background(Color.white)
         .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
