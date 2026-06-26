@@ -1,7 +1,7 @@
 {
   "name": "@mouse-app/relay",
   "version": "0.3.0",
-  "description": "WebSocket PTY relay for Mouse — runs inside a GitHub Codespace",
+  "description": "WebSocket PTY relay for Mouse — runs inside a GitHub Codespace or locally (self-hosted)",
   "repository": {
     "type": "git",
     "url": "https://github.com/reagent-systems/mouse.git"
@@ -13,15 +13,22 @@
   "type": "module",
   "files": [
     "mouse-relay.mjs",
+    "runtimes.mjs",
+    "scripts/fix-node-pty.mjs",
     "README.md"
   ],
   "bin": {
     "relay": "mouse-relay.mjs",
     "mouse-relay": "mouse-relay.mjs"
   },
+  "scripts": {
+    "postinstall": "node scripts/fix-node-pty.mjs",
+    "start": "node mouse-relay.mjs",
+    "local": "node mouse-relay.mjs --local"
+  },
   "dependencies": {
-    "node-pty": "^1.0.0",
-    "ws": "^8.18.0"
+    "node-pty": "^1.1.0",
+    "ws": "^8.21.0"
   },
   "engines": {
     "node": ">=18"

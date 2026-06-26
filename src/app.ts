@@ -5,7 +5,17 @@ import { AuthGate } from './auth/AuthGate.ts'
 import { GitHubAppInstallGate } from './auth/GitHubAppInstallGate.ts'
 import { CodespacePicker } from './codespaces/CodespacePicker.ts'
 import { RelaySocket } from './terminal/RelaySocket.ts'
-import { RepoService } from './codespaces/RepoService.ts'
+import { MockRelay } from './terminal/MockRelay.ts'
+import type { RelayLike } from './terminal/MockRelay.ts'
+import { isDemoMode, makeDemoPickResult } from './codespaces/demo.ts'
+import { ModeGate } from './codespaces/ModeGate.ts'
+import { LocalGate } from './codespaces/LocalGate.ts'
+import { OnDeviceGate } from './codespaces/OnDeviceGate.ts'
+import type { OnDeviceResult } from './codespaces/OnDeviceGate.ts'
+import { Workspace } from './runtime/Workspace.ts'
+import {
+  getBackendMode, setBackendMode, isLocalModeFlag, isOnDeviceFlag,
+} from './platform/backendMode.ts'
 import {
   authKind,
   clearAuth,
@@ -21,7 +31,7 @@ import type { PickResult } from './codespaces/CodespacePicker.ts'
 
 export class App {
   el: HTMLElement
-  private relay: RelaySocket | null = null
+  private relay: RelayLike | null = null
   private agentCount = 0
 
   constructor(container: HTMLElement) {
@@ -32,6 +42,48 @@ export class App {
   }
 
   private async boot() {
+    // Demo mode (?demo=1): skip auth + live relay, render the full module UI
+    // with a scripted MockRelay so every view is visible and verifiable.
+    if (isDemoMode()) {
+      this.showMain(makeDemoPickResult(), new MockRelay())
+      return
+    }
+
+    // On-device mode (?ondevice=1 flag): run entirely on this device, no host.
+    if (isOnDeviceFlag()) {
+      setBackendMode('ondevice')
+      this.showOnDeviceGate()
+      return
+    }
+
+    // Local relay mode (?local=1 flag, or previously chosen): self-hosted relay.
+    if (isLocalModeFlag()) {
+      setBackendMode('local')
+      this.showLocalGate()
+      return
+    }
+
+    // Mock GitHub (?mockgh=1) implies the Codespaces auth journey for testing —
+    // skip the mode chooser and go straight to GitHub sign-in.
+    const forceCodespaces = typeof window !== 'undefined'
+      && new URLSearchParams(window.location.search).has('mockgh')
+
+    // Returning users keep their chosen backend; first-run sees the chooser.
+    const chosen = localStorage.getItem('mouse_backend_mode')
+    if (!forceCodespaces && !chosen) {
+      this.showModeGate()
+      return
+    }
+    if (!forceCodespaces && getBackendMode() === 'ondevice') {
+      this.showOnDeviceGate()
+      return
+    }
+    if (!forceCodespaces && getBackendMode() === 'local') {
+      this.showLocalGate()
+      return
+    }
+
+    // Codespaces path: require GitHub auth.
     const token = await getValidAccessToken()
     if (!token) {
       if (getStoredToken()) clearAuth()
@@ -39,6 +91,35 @@ export class App {
       return
     }
     await this.continueAfterSignIn(token)
+  }
+
+  private showModeGate() {
+    this.el.innerHTML = ''
+    const gate = new ModeGate((mode) => {
+      setBackendMode(mode)
+      if (mode === 'ondevice') { this.showOnDeviceGate(); return }
+      if (mode === 'local') { this.showLocalGate(); return }
+      this.boot()
+    })
+    this.el.appendChild(gate.el)
+  }
+
+  private showOnDeviceGate() {
+    this.el.innerHTML = ''
+    const gate = new OnDeviceGate(
+      (result) => { this.el.innerHTML = ''; this.showOnDeviceMain(result) },
+      () => { this.showModeGate() },
+    )
+    this.el.appendChild(gate.el)
+  }
+
+  private showLocalGate() {
+    this.el.innerHTML = ''
+    const gate = new LocalGate(
+      (result) => { this.el.innerHTML = ''; this.showMain(result) },
+      () => { this.showModeGate() },
+    )
+    this.el.appendChild(gate.el)
   }
 
   private showAuth() {
@@ -142,7 +223,42 @@ export class App {
     this.el.appendChild(picker.el)
   }
 
-  private showMain(result: PickResult) {
+  /**
+   * On-device interface: the module stack + composer, with NO relay. The panels
+   * read/write the REAL on-device workspace; the composer runs agent tasks on the
+   * in-app Python runtime. This is the host-free path.
+   */
+  private async showOnDeviceMain(result: OnDeviceResult) {
+    const { fs, workspaceName } = result
+    const workspace = await Workspace.open(fs, workspaceName)
+
+    const stack     = new ModuleStack(workspace)
+    const bottomBar = new BottomBar(workspaceName)
+
+    this.el.appendChild(stack.el)
+    this.el.appendChild(bottomBar.el)
+    ;(window as any).__mouseStack = stack
+    ;(window as any).__mouseFS = fs
+    ;(window as any).__mouseWorkspace = workspace
+
+    // Wire the file tree → code editor so tapping a file opens it for editing.
+    stack.linkFileTreeToEditor()
+
+    // Land on the code view so the user sees their real files immediately.
+    stack.showViewIn('code', 0)
+
+    // Composer → run the task on the in-app Python runtime.
+    bottomBar.onSubmit(text => {
+      stack.runScriptTask(text)
+    })
+
+    bottomBar.onSignOut(() => {
+      this.el.innerHTML = ''
+      this.boot()
+    })
+  }
+
+  private showMain(result: PickResult, relayOverride?: RelayLike) {
     const { token, relayUrl, codespace } = result
     const codespaceName = codespace.display_name ?? codespace.name
 
@@ -152,8 +268,12 @@ export class App {
     this.el.appendChild(stack.el)
     this.el.appendChild(bottomBar.el)
 
+    // Demo hook: expose the stack so the verification harness (and manual
+    // testing) can navigate views without simulating touch gestures.
+    if (isDemoMode()) (window as any).__mouseStack = stack
+
     // ── Connect relay ──────────────────────────────────
-    this.relay = new RelaySocket(relayUrl, token)
+    this.relay = relayOverride ?? new RelaySocket(relayUrl, token)
 
     this.relay.onStatus(status => {
       if (status === 'connected') {
@@ -161,11 +281,10 @@ export class App {
         this.relay!.onSessionStarted('terminal', () => {
           stack.connectTerminal(this.relay!, 'terminal', 'Terminal')
         })
-        stack.connectRepo(new RepoService(this.relay!))
         this.toast(`Connected to ${codespaceName}`)
       }
       if (status === 'disconnected') this.toast('Terminal disconnected')
-      if (status === 'error')        this.toast('Connection error — is the relay running?')
+      if (status === 'error')        this.toast('Connection error')
     })
 
     this.relay.connect()

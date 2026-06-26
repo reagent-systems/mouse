@@ -1,161 +1,105 @@
-import type { RepoService, GitFileChange, GitStatus } from '../../codespaces/RepoService.ts'
+import type { Workspace, ChangedFile } from '../../runtime/Workspace.ts'
 
-function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
+// Static fallback for demo/relay modes (no real workspace).
+const FALLBACK_STAGED = [{ path: 'README.md', status: 'modified' as const, added: 9, removed: 2 }]
+const FALLBACK_UNSTAGED = [
+  { path: 'src/modules/Module.ts', status: 'modified' as const, added: 34, removed: 12 },
+  { path: 'src/style.css', status: 'modified' as const, added: 18, removed: 4 },
+  { path: 'src/app.ts', status: 'modified' as const, added: 8, removed: 0 },
+]
 
+/**
+ * GitChangesView — shows the REAL change set from the on-device workspace
+ * (files added/modified/deleted vs the last commit, with per-file line deltas)
+ * and the Commit button folds those changes into a new baseline. Without a
+ * workspace it shows the static sample (demo/relay modes).
+ */
 export class GitChangesView {
   el: HTMLElement
-  private repo: RepoService | null = null
-  private status: GitStatus | null = null
-  private busy = false
+  private ws: Workspace | null
 
-  constructor() {
+  constructor(workspace: Workspace | null = null) {
+    this.ws = workspace
     this.el = document.createElement('div')
     this.el.className = 'view-changes'
-    this.el.innerHTML = `<div class="panel-msg">Connect a Codespace to see changes.</div>`
+    this.render()
+    this.ws?.onChange(() => this.render())
   }
 
-  connectRepo(repo: RepoService) {
-    this.repo = repo
-    this.refresh()
-  }
+  private async render() {
+    const changes: ChangedFile[] = this.ws
+      ? await this.ws.changes()
+      : [...FALLBACK_STAGED, ...FALLBACK_UNSTAGED]
 
-  async refresh() {
-    if (!this.repo) return
-    try {
-      this.status = await this.repo.status()
-      this.render()
-    } catch (e) {
-      this.el.innerHTML = `<div class="panel-msg panel-error">${esc(errMsg(e))}</div>`
-    }
-  }
-
-  private render() {
-    const st = this.status
-    if (!st) return
-    const total = st.staged.length + st.unstaged.length
+    const count = changes.length
+    const msg = this.ws ? this.suggestMessage(changes) : 'feat: add modular swipe panel system with glass UI'
 
     this.el.innerHTML = `
       <div class="changes-header">
-        <span class="changes-label">CHANGES${st.branch ? ` · ${esc(st.branch)}` : ''}</span>
-        <span class="changes-sparkle" id="refresh-btn" title="Refresh">↻</span>
+        <span class="changes-label">CHANGES</span>
+        <span class="changes-sparkle">✦</span>
       </div>
       <div class="commit-area">
-        <textarea class="commit-input" id="commit-msg" rows="1" placeholder="Commit message"></textarea>
+        <div class="commit-msg">${esc(msg)}</div>
         <div class="commit-btn-row">
-          <button class="commit-btn" id="commit-btn" ${st.staged.length === 0 ? 'disabled' : ''}>
-            <span>✓</span> Commit${st.staged.length ? ` (${st.staged.length})` : ''}
+          <button class="commit-btn"${count ? '' : ' disabled'}>
+            <span>✓</span> Commit${count ? ` (${count})` : ''}
           </button>
+          <button class="commit-btn-drop">▾</button>
         </div>
       </div>
       <div class="changes-files-area">
-        ${section('Staged', st.staged, 'staged')}
-        ${section('Changes', st.unstaged, 'unstaged')}
-        ${total === 0 ? `<div class="panel-msg">Working tree clean.</div>` : ''}
+        <div class="changes-section-hdr">
+          <span>Changes</span>
+          <span class="changes-count">${count}</span>
+        </div>
+        ${count ? changes.map(f => fileRow(f)).join('') : '<div class="files-empty">No changes</div>'}
       </div>
     `
 
-    this.el.querySelector('#refresh-btn')?.addEventListener('click', () => this.refresh())
-
-    this.el.querySelectorAll<HTMLElement>('.changed-file').forEach(row => {
-      row.addEventListener('click', () => this.toggleStage(row.dataset.path!, row.dataset.group === 'staged'))
+    const btn = this.el.querySelector('.commit-btn') as HTMLButtonElement
+    btn?.addEventListener('click', async () => {
+      if (this.ws) {
+        const n = await this.ws.commit()
+        btn.innerHTML = `<span>✓</span> Committed ${n}`
+        // render() re-runs via the workspace change event; reset label after.
+        setTimeout(() => this.render(), 1200)
+      } else {
+        btn.textContent = '✓ Committed!'
+        setTimeout(() => { btn.innerHTML = '<span>✓</span> Commit' }, 1500)
+      }
     })
-
-    const commitBtn = this.el.querySelector('#commit-btn') as HTMLButtonElement | null
-    commitBtn?.addEventListener('click', () => this.commit())
   }
 
-  private async toggleStage(path: string, staged: boolean) {
-    if (!this.repo || this.busy) return
-    this.busy = true
-    try {
-      if (staged) await this.repo.unstage(path)
-      else await this.repo.stage(path)
-      await this.refresh()
-    } catch (e) {
-      this.flash(errMsg(e))
-    } finally {
-      this.busy = false
+  /** Heuristic commit message from the change set. */
+  private suggestMessage(changes: ChangedFile[]): string {
+    if (!changes.length) return 'No changes to commit'
+    if (changes.length === 1) {
+      const f = changes[0]
+      const verb = f.status === 'added' ? 'add' : f.status === 'deleted' ? 'remove' : 'update'
+      return `${verb} ${f.path.split('/').pop()}`
     }
-  }
-
-  private async commit() {
-    if (!this.repo || this.busy) return
-    const input = this.el.querySelector('#commit-msg') as HTMLTextAreaElement | null
-    const msg = input?.value.trim()
-    if (!msg) {
-      input?.focus()
-      return
-    }
-    const btn = this.el.querySelector('#commit-btn') as HTMLButtonElement | null
-    this.busy = true
-    if (btn) { btn.disabled = true; btn.textContent = 'Committing…' }
-    try {
-      const short = await this.repo.commit(msg)
-      this.flash(`Committed ${short}`)
-      await this.refresh()
-    } catch (e) {
-      this.flash(errMsg(e))
-      if (btn) { btn.disabled = false; btn.innerHTML = '<span>✓</span> Commit' }
-    } finally {
-      this.busy = false
-    }
-  }
-
-  private flash(text: string) {
-    const hdr = this.el.querySelector('.changes-header')
-    if (!hdr) return
-    let note = this.el.querySelector('.changes-note') as HTMLElement | null
-    if (!note) {
-      note = document.createElement('span')
-      note.className = 'changes-note'
-      hdr.appendChild(note)
-    }
-    note.textContent = text
-    setTimeout(() => note?.remove(), 3000)
+    return `update ${changes.length} files`
   }
 }
 
-function section(title: string, files: GitFileChange[], group: string): string {
-  if (files.length === 0) return ''
+function fileRow(f: ChangedFile) {
+  const color = f.status === 'added' ? 'var(--green)' : f.status === 'deleted' ? 'var(--red)' : 'var(--blue)'
   return `
-    <div class="changes-section-hdr">
-      <span>${title}</span>
-      <span class="changes-count">${files.length}</span>
-    </div>
-    ${files.map(f => fileRow(f, group)).join('')}
-  `
-}
-
-function fileRow(f: GitFileChange, group: string): string {
-  const name = f.path.split('/').pop() ?? f.path
-  const code = f.untracked ? 'U' : (group === 'staged' ? f.index : f.work).trim() || 'M'
-  const stats = f.untracked
-    ? `<span class="stat-add">new</span>`
-    : `<span class="stat-add">+${f.added}</span><span style="color:var(--text-faint)">, </span><span class="stat-del">-${f.deleted}</span>`
-  return `
-    <div class="changed-file" data-path="${esc(f.path)}" data-group="${group}" title="${esc(f.path)} — tap to ${group === 'staged' ? 'unstage' : 'stage'}">
+    <div class="changed-file">
       <div class="changed-file-name">
-        <span class="git-code git-code-${codeClass(code)}">${esc(code)}</span>
-        <span>${esc(name)}</span>
+        <span style="color:${color}">◆</span>
+        <span>${esc(f.path.split('/').pop() ?? f.path)}</span>
       </div>
-      <div class="changed-file-stats">${stats}</div>
+      <div class="changed-file-stats">
+        <span class="stat-add">+${f.added}</span>
+        <span style="color:var(--text-faint)">, </span>
+        <span class="stat-del">-${f.removed}</span>
+      </div>
     </div>
   `
 }
 
-function codeClass(code: string): string {
-  switch (code[0]) {
-    case 'A': return 'add'
-    case 'M': return 'mod'
-    case 'D': return 'del'
-    case 'R': return 'mod'
-    case 'U': return 'new'
-    default:  return 'mod'
-  }
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

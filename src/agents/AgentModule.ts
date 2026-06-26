@@ -1,5 +1,5 @@
 import type { Agent } from './Agent.ts'
-import type { RelaySocket } from '../terminal/RelaySocket.ts'
+import type { IRelay } from '../terminal/RelaySocket.ts'
 import { XTermView } from '../terminal/XTermView.ts'
 
 // Height threshold below which the module snaps to the compact bar
@@ -15,7 +15,7 @@ export class AgentModule {
   private collapsed = false
   private ro: ResizeObserver
 
-  constructor(agent: Agent, relay: RelaySocket) {
+  constructor(agent: Agent, relay: IRelay) {
     this.el = document.createElement('div')
     this.el.className = 'module agent-module'
 
@@ -64,8 +64,8 @@ export class AgentModule {
   }
 
   // Called by ModuleStack — agents don't share the bash session
-  connectTerminal(_relay: RelaySocket, _id: string, _label: string) { /* no-op */ }
-  addAgentSession(_relay: RelaySocket, _id: string, _label: string)  { /* no-op */ }
+  connectTerminal(_relay: IRelay, _id: string, _label: string) { /* no-op */ }
+  addAgentSession(_relay: IRelay, _id: string, _label: string)  { /* no-op */ }
   getTerminalView() { return null }
   fitTerminal()     { if (!this.collapsed) this.xterm.fit() }
 

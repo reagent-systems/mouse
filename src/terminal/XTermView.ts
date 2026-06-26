@@ -1,7 +1,7 @@
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import type { RelaySocket } from './RelaySocket.ts'
+import type { IRelay } from './RelaySocket.ts'
 import '@xterm/xterm/css/xterm.css'
 
 interface SessionState {
@@ -18,7 +18,7 @@ export class XTermView {
   private mobileInput: HTMLInputElement
   private resizeObserver: ResizeObserver
 
-  private relay: RelaySocket | null = null
+  private relay: IRelay | null = null
   private activeId: string | null = null
   private sessions = new Map<string, SessionState>()
   private unsubs: (() => void)[] = []
@@ -101,7 +101,7 @@ export class XTermView {
 
   // ── Session management ──────────────────────────────
 
-  addSession(relay: RelaySocket, id: string, label: string) {
+  addSession(relay: IRelay, id: string, label: string) {
     this.relay = relay
     if (this.sessions.has(id)) return
 
@@ -154,7 +154,7 @@ export class XTermView {
   }
 
   // ── Legacy single-session connect (used by Module) ──
-  connectSession(relay: RelaySocket, sessionId: string, label = 'Terminal') {
+  connectSession(relay: IRelay, sessionId: string, label = 'Terminal') {
     this.addSession(relay, sessionId, label)
   }
 

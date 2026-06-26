@@ -1,0 +1,17 @@
+# pnpm workspace + supply-chain build-script allowlist.
+#
+# Lifecycle (install/build) scripts are the primary npm supply-chain attack
+# vector. pnpm blocks ALL of them by default. Only the packages listed below —
+# each deliberately reviewed first-party build tooling — are permitted to run
+# scripts. Anything else (including any future transitive dependency) is blocked
+# until a human adds it here.
+onlyBuiltDependencies:
+  - esbuild              # vite's native bundler (links platform binary)
+  - electron             # desktop runtime (postinstall fetches Electron binary)
+  - electron-winstaller  # windows installer build (electron-builder dep)
+
+# Confirmed-approved builds (written/required by pnpm 11 to actually run them).
+allowBuilds:
+  esbuild: true
+  electron: true
+  electron-winstaller: true

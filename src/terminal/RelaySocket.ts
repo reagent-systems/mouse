@@ -1,13 +1,27 @@
 export type RelayStatus = 'connecting' | 'authenticating' | 'connected' | 'disconnected' | 'error'
 type Unsub = () => void
 
-export interface ExecResult {
-  stdout: string
-  stderr: string
-  code: number
+/**
+ * Shared relay surface implemented by both {@link RelaySocket} (live WebSocket)
+ * and the demo {@link MockRelay}. Views depend on this interface so demo mode
+ * can swap in scripted output transparently.
+ */
+export interface IRelay {
+  readonly status: RelayStatus
+  onStatus(fn: (s: RelayStatus) => void): Unsub
+  onSessionData(id: string, fn: (data: string) => void): Unsub
+  onSessionExit(id: string, fn: (code: number | null) => void): Unsub
+  onSessionStarted(id: string, fn: () => void): Unsub
+  connect(): void
+  disconnect(): void
+  startSession(id: string, command: 'bash' | 'opencode', task?: string): void
+  killSession(id: string): void
+  sendInput(id: string, data: string): void
+  resize(id: string, cols: number, rows: number): void
+  sendMessage(id: string, text: string): void
 }
 
-export class RelaySocket {
+export class RelaySocket implements IRelay {
   private ws: WebSocket | null = null
   private _status: RelayStatus = 'disconnected'
   private statusHandlers: ((s: RelayStatus) => void)[] = []
@@ -18,10 +32,6 @@ export class RelaySocket {
   private dataHandlers  = new Map<string, Set<(data: string) => void>>()
   private exitHandlers  = new Map<string, Set<(code: number | null) => void>>()
   private startHandlers = new Map<string, Set<() => void>>()
-
-  // Pending one-shot exec requests, keyed by request id
-  private execPending = new Map<string, (r: ExecResult) => void>()
-  private execSeq = 0
 
   constructor(url: string, token: string) {
     this.url = url
@@ -79,31 +89,6 @@ export class RelaySocket {
     this.sendJSON({ type: 'resize', id, cols, rows })
   }
 
-  /**
-   * Run a single command in the Codespace and resolve with its output.
-   * Used by the file/git panels. Rejects if the relay is not connected or
-   * does not answer in time (e.g. an older relay without `exec` support).
-   */
-  exec(command: string, timeoutMs = 20000): Promise<ExecResult> {
-    return new Promise((resolve, reject) => {
-      if (this._status !== 'connected') {
-        reject(new Error('Not connected to a Codespace'))
-        return
-      }
-      const id = `exec-${++this.execSeq}`
-      const timer = setTimeout(() => {
-        if (this.execPending.delete(id)) {
-          reject(new Error('Command timed out (relay may need updating to @mouse-app/relay@latest)'))
-        }
-      }, timeoutMs)
-      this.execPending.set(id, (r) => {
-        clearTimeout(timer)
-        resolve(r)
-      })
-      this.sendJSON({ type: 'exec', id, command })
-    })
-  }
-
   // ── Connection lifecycle ────────────────────────────
 
   connect() {
@@ -155,18 +140,6 @@ export class RelaySocket {
       case 'session_exit':
         this.exitHandlers.get(msg.id)?.forEach(fn => fn(msg.code ?? null))
         break
-      case 'exec_result': {
-        const handler = this.execPending.get(msg.id)
-        if (handler) {
-          this.execPending.delete(msg.id)
-          handler({
-            stdout: typeof msg.stdout === 'string' ? msg.stdout : '',
-            stderr: typeof msg.stderr === 'string' ? msg.stderr : '',
-            code: typeof msg.code === 'number' ? msg.code : 0,
-          })
-        }
-        break
-      }
     }
   }
 
@@ -178,12 +151,6 @@ export class RelaySocket {
 
   private setStatus(s: RelayStatus) {
     this._status = s
-    if (s === 'disconnected' || s === 'error') {
-      // Resolve any in-flight exec calls so the panels surface an error instead of hanging.
-      const pending = [...this.execPending.values()]
-      this.execPending.clear()
-      pending.forEach(fn => fn({ stdout: '', stderr: 'Connection lost', code: 1 }))
-    }
     this.statusHandlers.forEach(fn => fn(s))
   }
 }

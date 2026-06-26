@@ -4,11 +4,14 @@ import type { Codespace } from './CodespacesApi.ts'
 import {
   listCodespaces,
   waitUntilAvailable,
-  isRelayRunning,
+  probeRelay,
   relayWssUrl,
   getRepositoryMetadata,
   createUserCodespace,
+  listUserRepos,
+  listBranches,
 } from './CodespacesApi.ts'
+import type { RepoSummary } from './CodespacesApi.ts'
 import { RELAY_DEVCONTAINER_MERGE_JSON } from './relayAutoStartSnippet.ts'
 
 export interface PickResult {
@@ -86,56 +89,118 @@ export class CodespacePicker {
     spaces.forEach(cs => list.appendChild(this.makeCard(cs)))
   }
 
-  private renderCreateForm() {
+  private allRepos: RepoSummary[] = []
+
+  private async renderCreateForm() {
     this.el.innerHTML = `
       <div class="picker-header">
         <button type="button" class="picker-back" id="back-btn">‹ Back</button>
+        <span class="picker-title">New Codespace</span>
+        <button type="button" class="picker-refresh" id="repo-refresh" title="Resync repos">⟳</button>
       </div>
       <div class="picker-create-form">
-        <input type="text" class="picker-create-input" id="repo-input"
-          placeholder="owner/repo" autocomplete="off" />
-        <input type="text" class="picker-create-input" id="branch-input"
-          placeholder="branch (optional)" autocomplete="off" />
+        <input type="text" class="picker-create-input" id="repo-search"
+          placeholder="Search your repositories…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        <div class="repo-list" id="repo-list">
+          <div class="picker-loading"><span class="auth-spinner"></span> Loading repositories…</div>
+        </div>
+        <div id="branch-row" hidden>
+          <label class="repo-branch-label" for="branch-select">Branch</label>
+          <select class="picker-create-input" id="branch-select"></select>
+        </div>
         <p class="auth-error" id="create-err" hidden></p>
-        <button type="button" class="auth-btn" id="submit-create">Create</button>
+        <button type="button" class="auth-btn" id="submit-create" disabled>Select a repository</button>
       </div>
     `
     const errEl = this.el.querySelector('#create-err') as HTMLElement
-    const repoInput = this.el.querySelector('#repo-input') as HTMLInputElement
-    const branchInput = this.el.querySelector('#branch-input') as HTMLInputElement
+    const searchEl = this.el.querySelector('#repo-search') as HTMLInputElement
+    const listEl = this.el.querySelector('#repo-list') as HTMLElement
+    const branchRow = this.el.querySelector('#branch-row') as HTMLElement
+    const branchSelect = this.el.querySelector('#branch-select') as HTMLSelectElement
+    const submitBtn = this.el.querySelector('#submit-create') as HTMLButtonElement
+
+    let selected: RepoSummary | null = null
 
     this.el.querySelector('#back-btn')!.addEventListener('click', () => this.load())
-    this.el.querySelector('#submit-create')!.addEventListener('click', async () => {
-      errEl.hidden = true
-      const raw = repoInput.value.trim()
-      const parts = raw.split('/').map(s => s.trim()).filter(Boolean)
-      if (parts.length !== 2) {
-        errEl.textContent = 'Enter repository as owner/repo.'
-        errEl.hidden = false
+
+    const renderRepoList = (filter: string) => {
+      const f = filter.trim().toLowerCase()
+      const matches = (f
+        ? this.allRepos.filter(r => r.full_name.toLowerCase().includes(f))
+        : this.allRepos
+      ).slice(0, 200)
+      if (!matches.length) {
+        listEl.innerHTML = `<div class="repo-empty">${this.allRepos.length ? 'No repositories match.' : 'No repositories found for this account.'}</div>`
         return
       }
-      const [owner, repo] = parts
-      const refBranch = branchInput.value.trim()
+      listEl.innerHTML = ''
+      for (const r of matches) {
+        const row = document.createElement('div')
+        row.className = 'repo-row' + (selected?.full_name === r.full_name ? ' selected' : '')
+        row.innerHTML = `
+          <span class="repo-row-icon">${r.private ? '🔒' : '⬡'}</span>
+          <span class="repo-row-name">${escHtml(r.full_name)}</span>
+          <span class="repo-row-branch">${escHtml(r.default_branch)}</span>
+        `
+        row.addEventListener('click', async () => {
+          selected = r
+          submitBtn.disabled = false
+          submitBtn.textContent = `Create on ${r.name}`
+          listEl.querySelectorAll('.repo-row').forEach(x => x.classList.remove('selected'))
+          row.classList.add('selected')
+          // Populate branches (default first).
+          branchRow.hidden = false
+          branchSelect.innerHTML = `<option value="${escHtml(r.default_branch)}">${escHtml(r.default_branch)} (default)</option>`
+          try {
+            const branches = await listBranches(this.token, r.owner, r.name)
+            branchSelect.innerHTML = branches.map(b =>
+              `<option value="${escHtml(b)}"${b === r.default_branch ? ' selected' : ''}>${escHtml(b)}${b === r.default_branch ? ' (default)' : ''}</option>`,
+            ).join('') || branchSelect.innerHTML
+          } catch { /* keep default */ }
+        })
+        listEl.appendChild(row)
+      }
+    }
 
-      const btn = this.el.querySelector('#submit-create') as HTMLButtonElement
-      btn.disabled = true
-      btn.textContent = 'Creating…'
+    const loadRepos = async () => {
+      listEl.innerHTML = `<div class="picker-loading"><span class="auth-spinner"></span> Loading repositories…</div>`
       try {
-        const meta = await getRepositoryMetadata(this.token, owner, repo)
-        const ref = refBranch || meta.default_branch
+        this.allRepos = await listUserRepos(this.token)
+        renderRepoList(searchEl.value)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        listEl.innerHTML = `<div class="repo-empty">${escHtml(msg)}</div>`
+      }
+    }
+
+    searchEl.addEventListener('input', () => renderRepoList(searchEl.value))
+    this.el.querySelector('#repo-refresh')!.addEventListener('click', () => loadRepos())
+
+    submitBtn.addEventListener('click', async () => {
+      if (!selected) return
+      errEl.hidden = true
+      submitBtn.disabled = true
+      submitBtn.textContent = 'Creating…'
+      try {
+        const meta = await getRepositoryMetadata(this.token, selected.owner, selected.name)
+        const ref = branchSelect.value || meta.default_branch
         const cs = await createUserCodespace(this.token, meta.id, ref)
         const live = await waitUntilAvailable(this.token, cs.name, (state) => {
-          btn.textContent = state === 'Shutdown' ? 'Starting…' : `${state}…`
+          submitBtn.textContent = state === 'Shutdown' ? 'Starting…' : `${state}…`
         })
         await this.connect(live)
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
         errEl.textContent = msg
         errEl.hidden = false
-        btn.disabled = false
-        btn.textContent = 'Create'
+        submitBtn.disabled = false
+        submitBtn.textContent = selected ? `Create on ${selected.name}` : 'Create'
       }
     })
+
+    // Use cached repos if we already synced this session; else fetch.
+    if (this.allRepos.length) renderRepoList('')
+    else await loadRepos()
   }
 
   private makeCard(cs: Codespace): HTMLElement {
@@ -174,17 +239,20 @@ export class CodespacePicker {
         if (el) el.textContent = state === 'Shutdown' ? 'Starting Codespace…' : state + '…'
       })
 
-      // 2. Check if relay is up
+      // 2. Probe the relay. 'unknown' (private-port-forward auth) must NOT be
+      //    treated as down — that caused Connect to silently re-render the setup
+      //    screen. On 'up' or 'unknown' we hand off and let the WebSocket auth be
+      //    the real test; only 'down' shows the setup instructions.
       const statusEl = this.el.querySelector('.connect-state')
       if (statusEl) statusEl.textContent = 'Checking relay…'
 
-      const up = await isRelayRunning(live.name, this.token)
-      if (!up) {
+      const probe = await probeRelay(live.name, this.token)
+      if (probe === 'down') {
         this.renderRelaySetup(live, live)
         return
       }
 
-      // 3. Done — relay is up
+      // 3. Relay is up (or unverifiable behind a private forward) — connect.
       this.onDone({
         codespace: live,
         relayUrl: relayWssUrl(live.name),
@@ -273,4 +341,8 @@ export class CodespacePicker {
     this.el.querySelector('#back-btn')!.addEventListener('click', () => this.load())
     this.el.querySelector('#back-btn2')!.addEventListener('click', () => this.load())
   }
+}
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }

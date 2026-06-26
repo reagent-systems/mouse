@@ -4,13 +4,14 @@ import { FileTreeView } from './views/FileTree.ts'
 import { GitChangesView } from './views/GitChanges.ts'
 import { GitGraphView } from './views/GitGraph.ts'
 import { AgentView } from './views/AgentView.ts'
+import { ScriptTerminalView } from './views/ScriptTerminal.ts'
 import { XTermView } from '../terminal/XTermView.ts'
-import type { RelaySocket } from '../terminal/RelaySocket.ts'
-import type { RepoService } from '../codespaces/RepoService.ts'
+import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { Agent } from '../agents/Agent.ts'
+import type { Workspace } from '../runtime/Workspace.ts'
 
-export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'terminal' | 'agent'
-const VIEWS: ViewType[] = ['code', 'files', 'changes', 'graph', 'terminal', 'agent']
+export type ViewType = 'code' | 'files' | 'changes' | 'graph' | 'script' | 'terminal' | 'agent'
+const VIEWS: ViewType[] = ['code', 'files', 'changes', 'graph', 'script', 'terminal', 'agent']
 
 export class Module {
   el: HTMLElement
@@ -20,11 +21,13 @@ export class Module {
   private instances: Partial<Record<ViewType, { el: HTMLElement }>> = {}
   private xtermView: XTermView | null = null
   private agentView: AgentView | null = null
-  private repo: RepoService | null = null
+  private scriptView: ScriptTerminalView | null = null
   private cleanup: (() => void) | null = null
+  private workspace: Workspace | null
 
-  constructor(initialView: ViewType = 'code') {
+  constructor(initialView: ViewType = 'code', workspace: Workspace | null = null) {
     this.viewIndex = VIEWS.indexOf(initialView)
+    this.workspace = workspace
 
     this.el = document.createElement('div')
     this.el.className = 'module'
@@ -68,58 +71,56 @@ export class Module {
       this.xtermView = view
       view.mount()
     }
+    if (v === 'script' && view instanceof ScriptTerminalView) {
+      this.scriptView = view
+      view.mount()
+    }
     if (v === 'agent' && view instanceof AgentView) {
       this.agentView = view
       view.mount()
     }
-    if (v === 'files' && view instanceof FileTreeView) {
-      view.onOpenFile((path) => this.openFileInCode(path))
-    }
-    if (this.repo) this.applyRepo(v)
-  }
-
-  /** Pass the live repo to a repo-aware view if it supports it. */
-  private applyRepo(v: ViewType) {
-    if (!this.repo) return
-    const view = this.instances[v] as { connectRepo?: (r: RepoService) => void } | undefined
-    view?.connectRepo?.(this.repo)
-  }
-
-  /** Provide a live Codespace repo to all current and future repo-aware views. */
-  connectRepo(repo: RepoService) {
-    this.repo = repo
-    ;(['code', 'files', 'changes', 'graph'] as ViewType[]).forEach(v => {
-      if (this.instances[v]) this.applyRepo(v)
-    })
-  }
-
-  /** Open a file (from the Files panel) in this module's Code view and navigate to it. */
-  private openFileInCode(path: string) {
-    const idx = VIEWS.indexOf('code')
-    this.mountView(idx)
-    const code = this.instances['code'] as CodeEditorView | undefined
-    code?.openFile(path)
-    this.goTo(idx)
   }
 
   private createView(v: ViewType) {
     switch (v) {
-      case 'code':     return new CodeEditorView()
-      case 'files':    return new FileTreeView()
-      case 'changes':  return new GitChangesView()
+      case 'code':     return new CodeEditorView(this.workspace)
+      case 'files':    return new FileTreeView(this.workspace)
+      case 'changes':  return new GitChangesView(this.workspace)
       case 'graph':    return new GitGraphView()
+      case 'script':   return new ScriptTerminalView()
       case 'terminal': return new XTermView()
       case 'agent':    return new AgentView()
     }
   }
 
-  connectTerminal(relay: RelaySocket, sessionId: string, label = 'Terminal') {
+  /** Run an agent task as an in-app Python script (no relay/PTY needed). */
+  runScriptTask(task: string) {
+    this.mountView(VIEWS.indexOf('script'))
+    this.scriptView?.runTask(task)
+    this.goTo(VIEWS.indexOf('script'))
+  }
+
+  /** Wire this module's file tree to its code editor: tap a file → open it. */
+  linkFileTreeToEditor() {
+    this.mountView(VIEWS.indexOf('files'))
+    this.mountView(VIEWS.indexOf('code'))
+    const tree = this.instances['files'] as FileTreeView | undefined
+    const editor = this.instances['code'] as CodeEditorView | undefined
+    if (tree && editor) {
+      tree.onSelect((path) => {
+        editor.setFile(path)
+        this.goTo(VIEWS.indexOf('code'))
+      })
+    }
+  }
+
+  connectTerminal(relay: IRelay, sessionId: string, label = 'Terminal') {
     this.mountView(VIEWS.indexOf('terminal'))
     this.xtermView?.connectSession(relay, sessionId, label)
   }
 
   /** Wire an opencode agent to this module's agent view. */
-  connectAgent(relay: RelaySocket, agent: Agent) {
+  connectAgent(relay: IRelay, agent: Agent) {
     this.mountView(VIEWS.indexOf('agent'))
     this.agentView?.connect(relay, agent)
     this.goTo(VIEWS.indexOf('agent'))
@@ -141,7 +142,14 @@ export class Module {
     this.viewIndex = i
     this.trackEl.style.transform = `translateX(-${i * (100 / VIEWS.length)}%)`
     if (VIEWS[i] === 'terminal') setTimeout(() => this.xtermView?.fit(), 30)
+    if (VIEWS[i] === 'script')   setTimeout(() => this.scriptView?.fit(),  30)
     if (VIEWS[i] === 'agent')    setTimeout(() => this.agentView?.fit(),   30)
+  }
+
+  /** Public navigation by view name — mounts the view and slides to it. */
+  showView(v: ViewType) {
+    const i = VIEWS.indexOf(v)
+    if (i >= 0) this.goTo(i)
   }
 
   private bindGestures() {
@@ -173,6 +181,7 @@ export class Module {
   destroy() {
     this.cleanup?.()
     this.xtermView?.destroy()
+    this.scriptView?.destroy()
     this.agentView?.destroy()
   }
 

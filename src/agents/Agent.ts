@@ -1,4 +1,4 @@
-import type { RelaySocket } from '../terminal/RelaySocket.ts'
+import type { IRelay } from '../terminal/RelaySocket.ts'
 
 export type AgentStatus = 'idle' | 'running' | 'thinking' | 'waiting' | 'done' | 'error'
 
@@ -26,12 +26,12 @@ export class Agent {
   cwd: string
   startedAt: Date = new Date()
 
-  private relay: RelaySocket
+  private relay: IRelay
   private listeners: (() => void)[] = []
   private unsubs: (() => void)[] = []
   private lineBuffer: string[] = []
 
-  constructor(id: string, name: string, relay: RelaySocket, cwd = '~/project') {
+  constructor(id: string, name: string, relay: IRelay, cwd = '~/project') {
     this.id = id
     this.name = name
     this.relay = relay

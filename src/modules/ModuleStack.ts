@@ -1,9 +1,9 @@
 import { Module } from './Module.ts'
 import type { ViewType } from './Module.ts'
 import type { Agent } from '../agents/Agent.ts'
-import type { RelaySocket } from '../terminal/RelaySocket.ts'
-import type { RepoService } from '../codespaces/RepoService.ts'
+import type { IRelay } from '../terminal/RelaySocket.ts'
 import type { XTermView } from '../terminal/XTermView.ts'
+import type { Workspace } from '../runtime/Workspace.ts'
 import { onDragY, onPinchSpread } from '../gestures/index.ts'
 
 const INITIAL_VIEWS: ViewType[] = ['code', 'changes']
@@ -15,30 +15,25 @@ export class ModuleStack {
   private modules: Module[] = []
   private flexes: number[] = []
   private cleanups: (() => void)[] = []
-  private repo: RepoService | null = null
+  private workspace: Workspace | null
 
-  constructor() {
+  constructor(workspace: Workspace | null = null) {
+    this.workspace = workspace
     this.el = document.createElement('div')
     this.el.className = 'module-stack'
     INITIAL_VIEWS.forEach(v => this.addModule(v, false))
     this.bindPinchSpread()
   }
 
-  connectTerminal(relay: RelaySocket, sessionId: string, label = 'Terminal') {
+  connectTerminal(relay: IRelay, sessionId: string, label = 'Terminal') {
     this.modules.forEach(m => m.connectTerminal(relay, sessionId, label))
-  }
-
-  /** Provide a live Codespace repo to every module's file/git panels. */
-  connectRepo(repo: RepoService) {
-    this.repo = repo
-    this.modules.forEach(m => m.connectRepo(repo))
   }
 
   /**
    * Wire an agent to an agent view slot.
    * Uses an existing idle agent view if one is visible, otherwise adds a new module.
    */
-  addAgent(agent: Agent, relay: RelaySocket) {
+  addAgent(agent: Agent, relay: IRelay) {
     const idle = this.modules.find(m => m.hasIdleAgentView())
     if (idle) {
       idle.connectAgent(relay, agent)
@@ -59,11 +54,28 @@ export class ModuleStack {
 
   fitTerminals() { this.modules.forEach(m => m.fitTerminal()) }
 
+  /** Show a view in a given module (default: first). Mounts it on demand. */
+  showViewIn(view: ViewType, moduleIndex = 0) {
+    this.modules[moduleIndex]?.showView(view)
+  }
+
+  /** Run an agent task as an in-app Python script in the first module. */
+  runScriptTask(task: string) {
+    this.modules[0]?.runScriptTask(task)
+  }
+
+  /** Wire file-tree → editor in every module so taps open files. */
+  linkFileTreeToEditor() {
+    this.modules.forEach(m => m.linkFileTreeToEditor())
+  }
+
+  /** Number of modules currently in the stack. */
+  get moduleCount() { return this.modules.length }
+
   // ── Private ──────────────────────────────────────────
 
   private addModule(view: ViewType, animate = true) {
-    const mod = new Module(view)
-    if (this.repo) mod.connectRepo(this.repo)
+    const mod = new Module(view, this.workspace)
     if (animate) {
       mod.el.style.transition = `flex ${ANIM_MS}ms cubic-bezier(0.34,1.56,0.64,1), opacity ${ANIM_MS}ms`
       mod.el.style.opacity = '0'

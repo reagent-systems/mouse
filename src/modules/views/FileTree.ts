@@ -1,132 +1,94 @@
-import type { RepoService } from '../../codespaces/RepoService.ts'
+import type { Workspace } from '../../runtime/Workspace.ts'
 
-interface DirNode {
-  name: string
-  dirs: Map<string, DirNode>
-  files: string[]
+type FlatNode = { name: string; path: string; depth: number; isDir: boolean }
+
+const ICONS: Record<string, { icon: string; cls: string }> = {
+  ts:   { icon: '◆', cls: 'fi-ts' },
+  js:   { icon: '◆', cls: 'fi-ts' },
+  py:   { icon: '◆', cls: 'fi-ts' },
+  json: { icon: '◆', cls: 'fi-json' },
+  md:   { icon: '◆', cls: 'fi-md' },
+  css:  { icon: '◆', cls: 'fi-css' },
+  env:  { icon: '◆', cls: 'fi-env' },
 }
 
-function newDir(name: string): DirNode {
-  return { name, dirs: new Map(), files: [] }
+function iconFor(name: string): { icon: string; cls: string } {
+  const ext = name.includes('.') ? name.split('.').pop()! : ''
+  return ICONS[ext] ?? { icon: '◆', cls: 'fi-ts' }
+}
+
+/** Build a flat, indented tree from a list of file paths. */
+function buildTree(paths: string[]): FlatNode[] {
+  const dirs = new Set<string>()
+  for (const p of paths) {
+    const parts = p.split('/')
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'))
+  }
+  const all = new Set<string>([...dirs, ...paths])
+  return [...all].sort().map((full) => {
+    const parts = full.split('/')
+    return {
+      name: parts[parts.length - 1],
+      path: full,
+      depth: parts.length - 1,
+      isDir: dirs.has(full),
+    }
+  })
+}
+
+/**
+ * FileTreeView — renders the REAL files in the on-device workspace. Tapping a
+ * file asks the workspace's listeners (via onSelect) to open it in the editor.
+ * Without a workspace it shows nothing (no fake tree).
+ */
+export class FileTreeView {
+  el: HTMLElement
+  private ws: Workspace | null
+  private selected: HTMLElement | null = null
+  private onSelectFn: ((path: string) => void) | null = null
+
+  constructor(workspace: Workspace | null = null) {
+    this.ws = workspace
+    this.el = document.createElement('div')
+    this.el.className = 'view-files'
+    this.render()
+    this.ws?.onChange(() => this.render())
+  }
+
+  onSelect(fn: (path: string) => void) { this.onSelectFn = fn }
+
+  private async render() {
+    if (!this.ws) {
+      this.el.innerHTML = `<div class="files-empty">No workspace</div>`
+      return
+    }
+    const paths = await this.ws.listFiles()
+    if (!paths.length) {
+      this.el.innerHTML = `<div class="files-empty">No files</div>`
+      return
+    }
+    this.el.innerHTML = ''
+    for (const node of buildTree(paths)) {
+      const item = document.createElement('div')
+      const indentCls = node.depth > 0 ? `ind${Math.min(node.depth, 3)}` : ''
+      item.className = `file-item ${indentCls}`
+      if (node.isDir) {
+        item.innerHTML = `<span class="fi fi-dir">▶</span><span>${esc(node.name)}</span>`
+      } else {
+        const { icon, cls } = iconFor(node.name)
+        item.innerHTML = `<span class="fi ${cls}">${icon}</span><span>${esc(node.name)}</span>`
+        item.addEventListener('click', () => {
+          if (this.selected) this.selected.classList.remove('selected')
+          item.classList.add('selected')
+          this.selected = item
+          this.onSelectFn?.(node.path)
+        })
+      }
+      this.el.appendChild(item)
+    }
+  }
 }
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-const EXT_CLASS: Record<string, string> = {
-  ts: 'fi-ts', tsx: 'fi-ts', js: 'fi-ts', jsx: 'fi-ts', mjs: 'fi-ts', cjs: 'fi-ts',
-  json: 'fi-json', md: 'fi-md', css: 'fi-css', scss: 'fi-css',
-  gitignore: 'fi-git', env: 'fi-env', example: 'fi-env',
-}
-
-function fileClass(name: string): string {
-  const dot = name.lastIndexOf('.')
-  const ext = dot === -1 ? name.replace(/^\./, '') : name.slice(dot + 1)
-  return EXT_CLASS[ext.toLowerCase()] ?? 'fi-ts'
-}
-
-export class FileTreeView {
-  el: HTMLElement
-  private repo: RepoService | null = null
-  private onOpen: ((path: string) => void) | null = null
-  private selectedEl: HTMLElement | null = null
-
-  constructor() {
-    this.el = document.createElement('div')
-    this.el.className = 'view-files'
-    this.el.innerHTML = `<div class="panel-msg">Connect a Codespace to browse files.</div>`
-  }
-
-  /** Register a handler invoked when the user taps a file. */
-  onOpenFile(cb: (path: string) => void) {
-    this.onOpen = cb
-  }
-
-  connectRepo(repo: RepoService) {
-    this.repo = repo
-    this.refresh()
-  }
-
-  async refresh() {
-    if (!this.repo) return
-    this.el.innerHTML = `<div class="panel-msg">Loading files…</div>`
-    try {
-      const files = await this.repo.listFiles()
-      if (files.length === 0) {
-        this.el.innerHTML = `<div class="panel-msg">No files in this repository.</div>`
-        return
-      }
-      const root = newDir('')
-      for (const path of files) this.insert(root, path)
-      this.el.innerHTML = ''
-      this.renderDir(root, '', 0, this.el)
-    } catch (e) {
-      this.el.innerHTML = `<div class="panel-msg panel-error">${esc(errMsg(e))}</div>`
-    }
-  }
-
-  private insert(root: DirNode, path: string) {
-    const parts = path.split('/')
-    let node = root
-    for (let i = 0; i < parts.length - 1; i++) {
-      const seg = parts[i]
-      if (!node.dirs.has(seg)) node.dirs.set(seg, newDir(seg))
-      node = node.dirs.get(seg)!
-    }
-    node.files.push(parts[parts.length - 1])
-  }
-
-  private renderDir(node: DirNode, prefix: string, depth: number, parent: HTMLElement) {
-    const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b))
-    for (const name of dirNames) {
-      const child = node.dirs.get(name)!
-      const fullPath = prefix ? `${prefix}/${name}` : name
-
-      const row = document.createElement('div')
-      row.className = 'file-item'
-      row.style.paddingLeft = `${14 + depth * 14}px`
-      const caret = document.createElement('span')
-      caret.className = 'fi fi-dir fi-caret'
-      caret.textContent = '▸'
-      const label = document.createElement('span')
-      label.textContent = name
-      row.appendChild(caret)
-      row.appendChild(label)
-
-      const childWrap = document.createElement('div')
-      childWrap.hidden = true
-      this.renderDir(child, fullPath, depth + 1, childWrap)
-
-      let open = false
-      row.addEventListener('click', () => {
-        open = !open
-        childWrap.hidden = !open
-        caret.textContent = open ? '▾' : '▸'
-      })
-
-      parent.appendChild(row)
-      parent.appendChild(childWrap)
-    }
-
-    const files = [...node.files].sort((a, b) => a.localeCompare(b))
-    for (const name of files) {
-      const fullPath = prefix ? `${prefix}/${name}` : name
-      const row = document.createElement('div')
-      row.className = 'file-item'
-      row.style.paddingLeft = `${14 + depth * 14}px`
-      row.innerHTML = `<span class="fi ${fileClass(name)}">◆</span><span>${esc(name)}</span>`
-      row.addEventListener('click', () => {
-        if (this.selectedEl) this.selectedEl.classList.remove('selected')
-        row.classList.add('selected')
-        this.selectedEl = row
-        this.onOpen?.(fullPath)
-      })
-      parent.appendChild(row)
-    }
-  }
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }

@@ -1,116 +1,174 @@
-import type { RepoService } from '../../codespaces/RepoService.ts'
+import type { Workspace } from '../../runtime/Workspace.ts'
 
-const DEFAULT_FILES = ['README.md', 'readme.md', 'README', 'package.json']
-const KEYWORDS = new Set([
-  'const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class',
-  'extends', 'import', 'export', 'from', 'default', 'new', 'await', 'async', 'try',
-  'catch', 'finally', 'throw', 'typeof', 'instanceof', 'in', 'of', 'this', 'super',
-  'public', 'private', 'protected', 'static', 'interface', 'type', 'enum', 'void',
-  'true', 'false', 'null', 'undefined', 'def', 'self', 'lambda', 'with', 'as', 'pass',
-])
+const FALLBACK_SOURCE = `<p align="center">
+  <img src="assets/mouse-logo.png" alt="Mouse" />
+</p>
 
-function esc(s: string): string {
+<p align="center">
+  A mobile-first coding agent platform built
+  around a modular, liquid-glass GUI system.
+</p>
+
+## Features
+
+- Modular resizable panels (swipe to change)
+- Multi-agent parallel execution
+- Git changes, graph, and one-tap commit`
+
+function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-/** Light, language-agnostic highlighter operating on already-escaped text. */
-function highlight(raw: string): string {
+/**
+ * Tokenizing HTML/markdown/code highlighter. Builds spans from the RAW source so
+ * it never re-matches its own injected markup. Each fragment is escaped once.
+ */
+function highlightLine(raw: string): string {
+  if (raw.trim() === '') return '&nbsp;'
+  if (/^#{1,6}\s/.test(raw)) return `<span class="fn">${esc(raw)}</span>`
+  if (/^\s*#/.test(raw)) return `<span class="cmt">${esc(raw)}</span>`   // py/sh comment
+
+  if (/^\s*<\/?[a-zA-Z]/.test(raw)) {
+    let out = ''
+    let i = 0
+    while (i < raw.length) {
+      const rest = raw.slice(i)
+      let m = rest.match(/^<\/?[a-zA-Z][\w-]*/)
+      if (m) { out += `<span class="tag">${esc(m[0])}</span>`; i += m[0].length; continue }
+      m = rest.match(/^\/?>/)
+      if (m) { out += `<span class="tag">${esc(m[0])}</span>`; i += m[0].length; continue }
+      m = rest.match(/^[a-zA-Z_:][\w:-]*(?==)/)
+      if (m) { out += `<span class="attr">${esc(m[0])}</span>`; i += m[0].length; continue }
+      m = rest.match(/^"[^"]*"/)
+      if (m) { out += `<span class="str">${esc(m[0])}</span>`; i += m[0].length; continue }
+      out += esc(raw[i]); i++
+    }
+    return out
+  }
+
   const e = esc(raw)
-  const tokens: string[] = []
-  const stash = (html: string) => `\u0000${tokens.push(html) - 1}\u0000`
-
-  let s = e
-  // Comments to end of line (// or #).
-  s = s.replace(/(\/\/|#).*/g, m => stash(`<span class="cmt">${m}</span>`))
-  // Strings (single, double, backtick) — escaped quotes already turned into entities.
-  s = s.replace(/(&quot;[^&]*?&quot;|&#39;[^&]*?&#39;|'[^']*?'|"[^"]*?"|`[^`]*?`)/g,
-    m => stash(`<span class="str">${m}</span>`))
-  // Numbers.
-  s = s.replace(/\b(\d[\d_.]*)\b/g, m => stash(`<span class="num">${m}</span>`))
-  // Keywords.
-  s = s.replace(/\b([A-Za-z_]\w*)\b/g, (m) => (KEYWORDS.has(m) ? stash(`<span class="kw">${m}</span>`) : m))
-
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => tokens[Number(i)])
+  return e
+    .replace(/\b(def|class|import|from|return|async|await|if|else|for|while|const|let|function|export)\b/g, '<span class="kw">$1</span>')
+    .replace(/(&quot;[^&]*&quot;|'[^']*'|"[^"]*")/g, '<span class="str">$1</span>')
+    .replace(/\*\*([^*]+)\*\*/g, '<span class="kw">$1</span>')
 }
 
+/**
+ * CodeEditorView — shows and EDITS a real file from the on-device workspace.
+ * Read mode renders highlighted lines; tapping "Edit" swaps to a textarea that
+ * writes back to the workspace (which then recomputes changes). Without a
+ * workspace it shows the static README sample (demo/relay modes).
+ */
 export class CodeEditorView {
   el: HTMLElement
-  private repo: RepoService | null = null
-  private hdr: HTMLElement
-  private scroll: HTMLElement
-  private currentPath: string | null = null
+  private ws: Workspace | null
+  private scroll!: HTMLElement
+  private header!: HTMLElement
+  private editor!: HTMLTextAreaElement
+  private editing = false
+  private path = ''
 
-  constructor() {
+  constructor(workspace: Workspace | null = null) {
+    this.ws = workspace
     this.el = document.createElement('div')
     this.el.className = 'view-code'
+    this.build()
+    if (this.ws) this.openFirstFile()
+    else this.renderStatic()
+  }
 
-    this.hdr = document.createElement('div')
-    this.hdr.className = 'code-file-header'
-    this.hdr.innerHTML = `<span style="color:var(--blue)">ℹ</span><span>Code</span>`
+  /** Open a specific file (called by the file tree). */
+  async setFile(path: string) {
+    if (!this.ws) return
+    this.path = path
+    const content = await this.ws.read(path)
+    this.renderContent(path, content)
+  }
+
+  private build() {
+    this.header = document.createElement('div')
+    this.header.className = 'code-file-header'
 
     this.scroll = document.createElement('div')
     this.scroll.className = 'code-scroll'
-    this.scroll.innerHTML = `<div class="panel-msg">Connect a Codespace to browse files.</div>`
 
-    this.el.appendChild(this.hdr)
+    this.editor = document.createElement('textarea')
+    this.editor.className = 'code-editor-area'
+    this.editor.spellcheck = false
+    this.editor.style.display = 'none'
+    this.editor.addEventListener('input', () => this.saveDebounced())
+
+    this.el.appendChild(this.header)
     this.el.appendChild(this.scroll)
+    this.el.appendChild(this.editor)
   }
 
-  connectRepo(repo: RepoService) {
-    this.repo = repo
-    if (!this.currentPath) this.openDefault()
+  private async openFirstFile() {
+    const files = await this.ws!.listFiles()
+    const pick = files.find(f => /readme/i.test(f)) ?? files[0]
+    if (pick) this.setFile(pick)
+    else this.renderContent('', '')
   }
 
-  async openFile(path: string) {
-    if (!this.repo) return
-    this.currentPath = path
-    this.setHeader(path)
-    this.scroll.innerHTML = `<div class="panel-msg">Loading ${esc(path)}…</div>`
-    try {
-      const content = await this.repo.readFile(path)
-      this.renderContent(content)
-    } catch (e) {
-      this.scroll.innerHTML = `<div class="panel-msg panel-error">${esc(errMsg(e))}</div>`
-    }
-  }
+  private renderContent(path: string, content: string) {
+    this.path = path
+    this.header.innerHTML = `
+      <span style="color:var(--blue)">ℹ</span>
+      <span>${esc(path || 'untitled')}</span>
+      <button type="button" class="code-edit-btn" id="edit-toggle">${this.editing ? 'Done' : 'Edit'}</button>
+    `
+    this.header.querySelector('#edit-toggle')!.addEventListener('click', () => this.toggleEdit(content))
 
-  private async openDefault() {
-    if (!this.repo) return
-    for (const name of DEFAULT_FILES) {
-      try {
-        const content = await this.repo.readFile(name)
-        this.currentPath = name
-        this.setHeader(name)
-        this.renderContent(content)
-        return
-      } catch {
-        /* try next */
+    if (this.editing) {
+      this.scroll.style.display = 'none'
+      this.editor.style.display = 'block'
+      this.editor.value = content
+    } else {
+      this.editor.style.display = 'none'
+      this.scroll.style.display = 'block'
+      this.scroll.innerHTML = ''
+      for (const line of content.split('\n')) {
+        const div = document.createElement('div')
+        div.className = 'code-line'
+        div.innerHTML = highlightLine(line) || '&nbsp;'
+        this.scroll.appendChild(div)
       }
     }
-    this.scroll.innerHTML = `<div class="panel-msg">Select a file from the Files panel.</div>`
   }
 
-  private setHeader(path: string) {
-    const name = path.split('/').pop() ?? path
-    this.hdr.innerHTML = `<span style="color:var(--blue)">ℹ</span><span>${esc(name)}</span>` +
-      `<span style="color:var(--text-faint);margin-left:auto;font-size:10px">${esc(path)}</span>`
+  private toggleEdit(content: string) {
+    this.editing = !this.editing
+    const current = this.editing ? content : this.editor.value
+    this.renderContent(this.path, this.editing ? content : current)
   }
 
-  private renderContent(content: string) {
-    const lines = content.replace(/\n$/, '').split('\n')
-    const gutterW = String(lines.length).length
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private saveDebounced() {
+    if (!this.ws || !this.path) return
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      this.ws!.write(this.path, this.editor.value)
+    }, 300)
+  }
+
+  private renderStatic() {
+    this.header.innerHTML = `
+      <span style="color:var(--blue)">ℹ</span>
+      <span>README.md</span>
+    `
     this.scroll.innerHTML = ''
-    lines.forEach((line, i) => {
+    for (const line of FALLBACK_SOURCE.split('\n')) {
       const div = document.createElement('div')
       div.className = 'code-line'
-      const num = String(i + 1).padStart(gutterW, ' ')
-      div.innerHTML = `<span class="code-gutter">${num}</span>${highlight(line) || '&nbsp;'}`
+      div.innerHTML = highlightLine(line) || '&nbsp;'
       this.scroll.appendChild(div)
-    })
-    this.scroll.scrollTop = 0
+    }
+    const footer = document.createElement('div')
+    footer.className = 'code-link-hint'
+    footer.innerHTML = `
+      <span class="code-link-hint-icon" aria-hidden="true">↗</span>
+      <span class="code-link-hint-text">Follow link <span class="code-link-hint-kbd">(cmd + click)</span></span>
+    `
+    this.el.appendChild(footer)
   }
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }
