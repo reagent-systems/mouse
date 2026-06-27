@@ -34,8 +34,8 @@ struct ForegroundView: View {
         VStack(spacing: 0) {
             ForEach(Array(deck.lanes.enumerated()), id: \.element.id) { index, lane in
                 CarouselLane(
-                    lane: laneBinding(lane.id),
-                    pages: deck.pages(forLane: lane.id),
+                    deck: deck,
+                    lane: lane,
                     cornerRadius: cornerRadius,
                     horizontalInset: horizontalInset
                 )
@@ -54,20 +54,6 @@ struct ForegroundView: View {
             return length
         }
         .simultaneousGesture(magnifyGesture)
-    }
-
-    /// Identity-based binding into `deck.lanes`. Looking up by `id` (instead of subscripting by a
-    /// captured index) keeps a removed lane from crashing while its exit transition is still on
-    /// screen — at that moment the index no longer exists, but the lookup just no-ops.
-    private func laneBinding(_ id: Lane.ID) -> Binding<Lane> {
-        Binding(
-            get: { deck.lanes.first { $0.id == id } ?? Lane(current: deck.pool.first?.id ?? UUID()) },
-            set: { newValue in
-                if let i = deck.lanes.firstIndex(where: { $0.id == id }) {
-                    deck.lanes[i] = newValue
-                }
-            }
-        )
     }
 
     // MARK: - Magnify (add / remove lanes)
@@ -90,8 +76,8 @@ struct ForegroundView: View {
         guard newCount <= maxLanes else { return }
         // Must still be able to give every lane at least `minLaneHeight`.
         guard usableHeight(for: newCount) >= minLaneHeight * CGFloat(newCount) else { return }
-        // A new lane pulls back the last removed lane's instance (or the first free one); bail if
-        // everything is checked out.
+        // A new lane pulls a container off the ring (restoring the last removed lane's container if
+        // it's still on the ring); bail if the whole ring is already on screen.
         guard let restored = deck.containerForNewLane() else { return }
 
         let insertIndex = nearestGapIndex(toY: y)
@@ -99,7 +85,7 @@ struct ForegroundView: View {
         // The new lane claims an even share; neighbours shrink proportionally to make room.
         desired.insert(usableHeight(for: newCount) / CGFloat(newCount), at: insertIndex)
 
-        let newLane = Lane(current: restored.id)
+        let newLane = Lane(current: restored)
         withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
             deck.lanes.insert(newLane, at: insertIndex)
             applyHeights(distribute(desired: desired, total: usableHeight(for: newCount)))
@@ -114,13 +100,13 @@ struct ForegroundView: View {
         var desired = deck.lanes.map { $0.height }
         desired.remove(at: removeIndex)
 
-        // Remember the instance this lane was showing so re-adding a lane can restore it.
-        deck.removedStack.append(deck.lanes[removeIndex].current)
-
+        let released = deck.lanes[removeIndex].current
         withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
             deck.lanes.remove(at: removeIndex)
             applyHeights(distribute(desired: desired, total: usableHeight(for: newCount)))
         }
+        // Its container goes back onto the ring and is remembered for restoration.
+        deck.release(released)
     }
 
     // MARK: - Height bookkeeping (keeps the deck filling `availableHeight`)
@@ -225,42 +211,39 @@ struct ForegroundView: View {
     }
 }
 
-/// A lane window onto the shared stack. It looks like a carousel, but swiping just slides plain
-/// panels and, on release, changes which instance is `current` — pulling the neighbouring free
-/// instance in and pushing the previous one back to the stack. Panels are never torn down and
-/// rebuilt (unlike `TabView`), so there is no reload flash, and navigation wraps both directions.
+/// A lane window onto the shared ring. It looks like a carousel, but swiping just slides plain
+/// panels and, on release, moves a container between this lane and the ring's shared edges:
+/// swiping left pulls the right-edge container in (pushing the old one off the left), swiping right
+/// pulls the left-edge container in (pushing the old one off the right). Every lane shows the same
+/// off-screen edges, so containers shuffle freely between lanes. Panels are never torn down and
+/// rebuilt (unlike `TabView`), so there is no reload flash.
 struct CarouselLane: View {
-    @Binding var lane: Lane
-    let pages: [ContainerType]
+    let deck: CarouselDeck
+    let lane: Lane
     let cornerRadius: CGFloat
     let horizontalInset: CGFloat
 
     @State private var drag: CGFloat = 0
 
-    private var currentIndex: Int {
-        pages.firstIndex { $0.id == lane.current } ?? 0
-    }
-
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            let count = pages.count
+            let rightEdge = deck.reserve.first
+            let leftEdge = deck.reserve.last
 
             ZStack {
-                if count > 0 {
-                    if count > 1 {
-                        let next = pages[(currentIndex + 1) % count]
-                        let prev = pages[(currentIndex - 1 + count) % count]
-                        panel(prev, width: w, height: h).offset(x: drag - w)
-                        panel(next, width: w, height: h).offset(x: drag + w)
-                    }
-                    panel(pages[currentIndex], width: w, height: h).offset(x: drag)
+                if let leftEdge {
+                    panel(leftEdge, width: w, height: h).offset(x: drag - w)
                 }
+                if let rightEdge {
+                    panel(rightEdge, width: w, height: h).offset(x: drag + w)
+                }
+                panel(lane.current, width: w, height: h).offset(x: drag)
             }
             .frame(width: w, height: h)
             .contentShape(Rectangle())
-            .gesture(swipe(width: w, count: count))
+            .gesture(swipe(width: w, hasLeft: leftEdge != nil, hasRight: rightEdge != nil))
         }
     }
 
@@ -270,38 +253,29 @@ struct CarouselLane: View {
             .frame(width: width, height: height)
     }
 
-    private func swipe(width w: CGFloat, count: Int) -> some Gesture {
+    private func swipe(width w: CGFloat, hasLeft: Bool, hasRight: Bool) -> some Gesture {
         DragGesture(minimumDistance: 10)
-            .onChanged { value in
-                guard count > 1 else { return }
-                drag = value.translation.width
-            }
+            .onChanged { value in drag = value.translation.width }
             .onEnded { value in
-                guard count > 1 else {
-                    withAnimation(.snappy(duration: 0.2)) { drag = 0 }
-                    return
-                }
                 let threshold = w * 0.22
                 let t = value.translation.width
-                if t <= -threshold {
-                    // Pull the next instance in; it was sitting one width to the right.
-                    commit(to: pages[(currentIndex + 1) % count].id, restingAt: drag + w)
-                } else if t >= threshold {
-                    // Pull the previous instance in; it was sitting one width to the left.
-                    commit(to: pages[(currentIndex - 1 + count) % count].id, restingAt: drag - w)
+                if t <= -threshold, hasRight {
+                    commit(restingAt: drag + w) { deck.advance(laneID: lane.id) }
+                } else if t >= threshold, hasLeft {
+                    commit(restingAt: drag - w) { deck.retreat(laneID: lane.id) }
                 } else {
                     withAnimation(.snappy(duration: 0.2)) { drag = 0 }
                 }
             }
     }
 
-    /// Commit the new `current` *immediately* (so the value is never stale, even when the user
-    /// out-swipes the animation), then animate the slide in a second render pass: place the new
-    /// current exactly where its panel already sat (`restingAt`), then glide it to center. The
-    /// `async` hop guarantees SwiftUI renders the resting position before animating from it, so the
-    /// swap is invisible and a fast follow-up swipe can never reveal the previous container.
-    private func commit(to id: ContainerType.ID, restingAt offset: CGFloat) {
-        lane.current = id
+    /// Move the container on the ring *immediately* (so what's shown is never stale, even when the
+    /// user out-swipes the animation), then animate the slide in a second render pass: the incoming
+    /// container already sits at `restingAt`, so we keep it there and glide it to center. The `async`
+    /// hop guarantees SwiftUI renders the resting position before animating from it, so the swap is
+    /// invisible and a fast follow-up swipe can never reveal the previous container.
+    private func commit(restingAt offset: CGFloat, _ move: () -> Void) {
+        move()
         drag = offset
         DispatchQueue.main.async {
             withAnimation(.snappy(duration: 0.25)) { drag = 0 }

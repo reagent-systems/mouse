@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// A container instance in the shared pool. Identity is per-instance (`id`); `kind` says which
-/// catalog type it is. The pool can hold several instances of the same `kind` (e.g. six 6's), and
-/// each instance can occupy at most one on-screen position at a time.
+/// A container instance on the ring. Identity is per-instance (`id`); `kind` says which catalog
+/// type it is, so the ring may hold several instances of the same `kind` (e.g. six 6's). An
+/// instance lives in exactly one place at a time: a lane, or the off-screen reserve.
 struct ContainerType: Identifiable {
     let id = UUID()
     let kind: Int
@@ -10,66 +10,71 @@ struct ContainerType: Identifiable {
     let color: Color
 }
 
-/// One horizontal lane. A lane isn't a private carousel — it's a window onto the shared pool that
-/// currently displays one instance (`current`). Swiping "pulls" another free instance in and
-/// "pushes" the old one back to the pool.
+/// One on-screen spot in the ring window. A lane holds whichever container currently sits in it.
 struct Lane: Identifiable {
     let id = UUID()
-    var current: ContainerType.ID
+    var current: ContainerType
     var height: CGFloat = 0
 }
 
-/// The vertical stack of lanes plus the single pool of container instances they pull from.
+/// The whole thing is a single circular ring. The screen is a window over it, split into `lanes`
+/// spots; everything else is the off-screen `reserve`. The reserve is ordered so `first` sits just
+/// off the RIGHT edge of the screen and `last` sits just off the LEFT edge. Every lane pulls from
+/// and pushes to these same two edges, so a container pushed off one lane can be grabbed by any
+/// lane — shuffling is allowed.
 @Observable
 final class CarouselDeck {
-    /// Every container instance. Instances displayed by a lane are "checked out"; the rest are free.
-    var pool: [ContainerType]
     var lanes: [Lane]
-    /// LIFO history of the instances that removed lanes were showing, newest last. Re-adding a lane
-    /// restores the most recently removed lane's instance (if it's still free).
+    var reserve: [ContainerType]
+    /// LIFO of removed lanes' container ids, so re-adding a lane restores the last one removed.
     var removedStack: [ContainerType.ID] = []
 
-    init(pool: [ContainerType], lanes: [Lane]) {
-        self.pool = pool
+    init(lanes: [Lane], reserve: [ContainerType]) {
         self.lanes = lanes
+        self.reserve = reserve
     }
 
     static func demo() -> CarouselDeck {
-        let pool = ContainerType.demoPool()
-        let lanes = pool.prefix(3).map { Lane(current: $0.id) }
-        return CarouselDeck(pool: pool, lanes: Array(lanes))
+        let all = ContainerType.demoPool()
+        let lanes = all.prefix(3).map { Lane(current: $0) }
+        return CarouselDeck(lanes: Array(lanes), reserve: Array(all.dropFirst(3)))
     }
 
-    /// Instance IDs currently displayed by some lane (optionally ignoring one lane).
-    func heldIDs(excluding laneID: Lane.ID? = nil) -> Set<ContainerType.ID> {
-        Set(lanes.filter { $0.id != laneID }.map { $0.current })
+    /// Swipe-left commit: pull the right-edge container into the lane, push the old one off the left.
+    func advance(laneID: Lane.ID) {
+        guard let i = lanes.firstIndex(where: { $0.id == laneID }), !reserve.isEmpty else { return }
+        let incoming = reserve.removeFirst()
+        let outgoing = lanes[i].current
+        lanes[i].current = incoming
+        reserve.append(outgoing)
     }
 
-    /// Instances a lane may show, in pool order: its own current plus anything not held elsewhere.
-    /// This set is invariant when the lane swaps its current for a free instance, so the lane's
-    /// pager stays stable while exclusivity is enforced against the other lanes.
-    func pages(forLane laneID: Lane.ID) -> [ContainerType] {
-        guard let lane = lanes.first(where: { $0.id == laneID }) else { return [] }
-        let held = heldIDs(excluding: laneID)
-        return pool.filter { $0.id == lane.current || !held.contains($0.id) }
+    /// Swipe-right commit: pull the left-edge container into the lane, push the old one off the right.
+    func retreat(laneID: Lane.ID) {
+        guard let i = lanes.firstIndex(where: { $0.id == laneID }), !reserve.isEmpty else { return }
+        let incoming = reserve.removeLast()
+        let outgoing = lanes[i].current
+        lanes[i].current = incoming
+        reserve.insert(outgoing, at: 0)
     }
 
-    /// The first instance no lane is displaying, or `nil` when the whole pool is checked out.
-    func firstFreeContainer() -> ContainerType? {
-        let held = heldIDs()
-        return pool.first { !held.contains($0.id) }
-    }
-
-    /// Pick the instance a newly-added lane should show: the most recently removed lane's instance
-    /// if it's still free, otherwise the first free instance. Returns `nil` if the pool is exhausted.
+    /// The container a newly-added lane should show: the most recently removed lane's container if
+    /// it's still on the ring, otherwise the right-edge container. Removes it from the reserve.
+    /// Returns `nil` only if the ring is fully on screen (nothing left to pull).
     func containerForNewLane() -> ContainerType? {
-        let held = heldIDs()
-        while let last = removedStack.popLast() {
-            if !held.contains(last), let match = pool.first(where: { $0.id == last }) {
-                return match
+        while let lastID = removedStack.popLast() {
+            if let idx = reserve.firstIndex(where: { $0.id == lastID }) {
+                return reserve.remove(at: idx)
             }
         }
-        return firstFreeContainer()
+        guard !reserve.isEmpty else { return nil }
+        return reserve.removeFirst()
+    }
+
+    /// Return a removed lane's container to the ring (off the left edge) and remember it.
+    func release(_ container: ContainerType) {
+        reserve.append(container)
+        removedStack.append(container.id)
     }
 }
 
@@ -92,7 +97,7 @@ extension ContainerType {
         return ContainerType(kind: template.kind, title: template.title, color: template.color)
     }
 
-    /// Demo pool: all 15 catalog types, plus extra instances of type 6 so six 6's exist.
+    /// Demo ring: all 15 catalog types, plus extra instances of type 6 so six 6's exist.
     static func demoPool() -> [ContainerType] {
         var pool = catalog()
         for _ in 0..<5 { pool.append(entry(kind: 6)) }
