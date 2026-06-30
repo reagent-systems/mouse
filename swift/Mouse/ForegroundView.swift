@@ -1,164 +1,264 @@
 import SwiftUI
 
-/// Interactive app UI — a horizontal pager of saved layouts, each with its own independent ring.
-/// Screen-edge swipes switch layouts; lane swipes and pinch/zoom only affect the active layout's ring.
+/// Interactive app UI — each layout owns an independent ring. Hold the left or right edge to
+/// preview a new ring expanding vertically from that edge; release after a beat to create it.
 struct ForegroundView: View {
     @State private var layoutDeck = LayoutDeck.demo()
     @State private var availableHeight: CGFloat = 0
+    @State private var newRingPreview = CarouselDeck.fresh(laneCount: 3)
+    @State private var edgeHoldStart: Date?
+    @State private var edgeHoldTimer: Timer?
 
-    private let edgeDragWidth: CGFloat = 28
+    private let edgeZoneWidth: CGFloat = 32
+    private let edgeHoldDuration: TimeInterval = 0.35
+    private let edgePeekWidth: CGFloat = 108
+    private let cornerRadius: CGFloat = 32
+    private let horizontalInset: CGFloat = 24
+    private let dividerHeight: CGFloat = 32
+    private let minLaneHeight: CGFloat = 80
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            Color.clear
-                .onAppear { layoutDeck.pageWidth = w }
-                .onChange(of: w) { _, width in layoutDeck.pageWidth = width }
 
             ZStack {
-                if layoutDeck.canGoPrevious {
-                    RingDeckView(
-                        layoutDeck: layoutDeck,
-                        deck: layoutDeck.layouts[layoutDeck.currentIndex - 1].deck,
-                        availableHeight: availableHeight
-                    )
-                    .offset(x: layoutDeck.layoutDragOffset - w)
-                }
-
-                if let nextDeck = layoutDeck.deckForNextPeek() {
-                    RingDeckView(
-                        layoutDeck: layoutDeck,
-                        deck: nextDeck,
-                        availableHeight: availableHeight
-                    )
-                    .offset(x: layoutDeck.layoutDragOffset + w)
-                }
-
                 RingDeckView(
                     layoutDeck: layoutDeck,
                     deck: layoutDeck.current.deck,
-                    availableHeight: availableHeight
+                    availableHeight: h,
+                    isPreview: false,
+                    cornerRadius: cornerRadius,
+                    horizontalInset: horizontalInset,
+                    dividerHeight: dividerHeight,
+                    minLaneHeight: minLaneHeight
                 )
-                .offset(x: layoutDeck.layoutDragOffset)
+                .frame(width: w, height: h)
+
+                if layoutDeck.isHoldingEdge, let side = layoutDeck.edgeHoldSide {
+                    HStack(spacing: 0) {
+                        if side == .left {
+                            edgePreviewStrip(height: h)
+                            Spacer(minLength: 0)
+                        } else {
+                            Spacer(minLength: 0)
+                            edgePreviewStrip(height: h)
+                        }
+                    }
+                    .frame(width: w, height: h)
+                    .allowsHitTesting(false)
+                }
             }
             .frame(width: w, height: h)
             .clipped()
-            .overlay { layoutEdgeDragOverlay }
+            .overlay {
+                HStack(spacing: 0) {
+                    edgeHoldZone(side: .left, height: h)
+                    Spacer(minLength: 0)
+                    edgeHoldZone(side: .right, height: h)
+                }
+            }
+            .onAppear {
+                layoutDeck.pageWidth = w
+                configureAllLayoutHeights(for: h)
+            }
+            .onChange(of: w) { _, width in layoutDeck.pageWidth = width }
+            .onChange(of: h) { _, height in
+                availableHeight = height
+                configureAllLayoutHeights(for: height)
+            }
         }
         .containerRelativeFrame([.horizontal, .vertical]) { length, axis in
             if axis == .vertical, availableHeight != length {
-                DispatchQueue.main.async { availableHeight = length }
+                DispatchQueue.main.async {
+                    availableHeight = length
+                    configureAllLayoutHeights(for: length)
+                }
             }
             return length
         }
     }
 
-    // MARK: - Layout edge drag
+    private func edgePreviewStrip(height: CGFloat) -> some View {
+        RingDeckView(
+            deck: newRingPreview,
+            availableHeight: height,
+            isPreview: true,
+            cornerRadius: cornerRadius,
+            horizontalInset: horizontalInset,
+            dividerHeight: dividerHeight,
+            minLaneHeight: minLaneHeight
+        )
+        .frame(width: layoutDeck.edgePreviewWidth, height: height)
+        .clipped()
+    }
 
-    private var layoutEdgeDragOverlay: some View {
-        HStack(spacing: 0) {
-            layoutEdgeZone(direction: .previous, alignment: .leading)
-            Spacer(minLength: 0)
-            layoutEdgeZone(direction: .next, alignment: .trailing)
+    private func configureAllLayoutHeights(for height: CGFloat) {
+        guard height > 0 else { return }
+
+        for layout in layoutDeck.layouts {
+            configureHeights(for: layout.deck, height: height)
+        }
+        configureHeights(for: newRingPreview, height: height)
+    }
+
+    private func configureHeights(for deck: CarouselDeck, height: CGFloat) {
+        guard height > 0, !deck.heightsInitialized else { return }
+        let count = deck.lanes.count
+        guard count > 0 else { return }
+        let usable = height - CGFloat(max(0, count - 1)) * dividerHeight
+        let each = max(minLaneHeight, usable / CGFloat(count))
+        for i in deck.lanes.indices { deck.lanes[i].height = each }
+        deck.heightsInitialized = true
+    }
+
+    // MARK: - Edge hold → new ring
+
+    private func edgeHoldZone(side: EdgeSide, height: CGFloat) -> some View {
+        Color.clear
+            .frame(width: edgeZoneWidth, height: height)
+            .contentShape(Rectangle())
+            .gesture(edgeHoldGesture(side: side))
+    }
+
+    private func edgeHoldGesture(side: EdgeSide) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                guard !layoutDeck.isHoldingEdge || layoutDeck.edgeHoldSide == side else { return }
+
+                if layoutDeck.edgeHoldSide == nil {
+                    layoutDeck.edgeHoldSide = side
+                    newRingPreview = CarouselDeck.fresh(laneCount: 3)
+                    configureHeights(for: newRingPreview, height: availableHeight)
+                    edgeHoldStart = Date()
+                    layoutDeck.edgePreviewWidth = 0
+                    startEdgeHoldTimer()
+                }
+
+                updateEdgePreviewProgress()
+            }
+            .onEnded { _ in
+                stopEdgeHoldTimer()
+                guard layoutDeck.edgeHoldSide == side else { return }
+                let heldLongEnough = edgeHoldStart.map {
+                    Date().timeIntervalSince($0) >= edgeHoldDuration
+                } ?? false
+                edgeHoldStart = nil
+
+                if heldLongEnough {
+                    commitEdgeHold()
+                } else {
+                    cancelEdgeHold()
+                }
+            }
+    }
+
+    private func startEdgeHoldTimer() {
+        stopEdgeHoldTimer()
+        edgeHoldTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
+            updateEdgePreviewProgress()
         }
     }
 
-    private func layoutEdgeZone(direction: LayoutSwipeDirection, alignment: Alignment) -> some View {
-        Color.clear
-            .frame(width: edgeDragWidth)
-            .frame(maxHeight: .infinity, alignment: alignment)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { value in
-                        guard direction != .previous || layoutDeck.canGoPrevious else { return }
-                        layoutDeck.layoutDragDirection = direction
-                        layoutDeck.layoutDragOffset = value.translation.width
-                    }
-                    .onEnded { value in
-                        let threshold: CGFloat = 40
-                        let t = value.translation.width
-                        let w = max(layoutDeck.pageWidth, 1)
+    private func stopEdgeHoldTimer() {
+        edgeHoldTimer?.invalidate()
+        edgeHoldTimer = nil
+    }
 
-                        let shouldCommit: Bool = switch direction {
-                        case .next: t <= -threshold
-                        case .previous: t >= threshold && layoutDeck.canGoPrevious
-                        }
+    private func updateEdgePreviewProgress() {
+        guard let start = edgeHoldStart, layoutDeck.isHoldingEdge else { return }
+        let progress = min(1, Date().timeIntervalSince(start) / edgeHoldDuration)
+        layoutDeck.edgePreviewWidth = edgePeekWidth * progress
+    }
 
-                        if shouldCommit {
-                            let target: CGFloat = direction == .next ? -w : w
-                            withAnimation(.snappy(duration: 0.25)) {
-                                layoutDeck.layoutDragOffset = target
-                            } completion: {
-                                var transaction = Transaction()
-                                transaction.disablesAnimations = true
-                                withTransaction(transaction) {
-                                    switch direction {
-                                    case .next: layoutDeck.goNext()
-                                    case .previous: layoutDeck.goPrevious()
-                                    }
-                                    layoutDeck.layoutDragOffset = 0
-                                    layoutDeck.layoutDragDirection = nil
-                                }
-                            }
-                        } else {
-                            withAnimation(.snappy(duration: 0.2)) {
-                                layoutDeck.layoutDragOffset = 0
-                                layoutDeck.layoutDragDirection = nil
-                            }
-                        }
-                    }
-            )
+    private func commitEdgeHold() {
+        stopEdgeHoldTimer()
+        let w = max(layoutDeck.pageWidth, 1)
+        withAnimation(.snappy(duration: 0.25)) {
+            layoutDeck.edgePreviewWidth = w
+        } completion: {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                let created = layoutDeck.createAndSwitchToNewLayout(laneCount: 3)
+                configureHeights(for: created.deck, height: availableHeight)
+                layoutDeck.resetEdgeHold()
+            }
+        }
+    }
+
+    private func cancelEdgeHold() {
+        stopEdgeHoldTimer()
+        withAnimation(.snappy(duration: 0.2)) {
+            layoutDeck.edgePreviewWidth = 0
+        } completion: {
+            layoutDeck.resetEdgeHold()
+        }
     }
 }
 
 // MARK: - One layout's ring (lanes + pinch/zoom + dividers)
 
 private struct RingDeckView: View {
-    let layoutDeck: LayoutDeck
+    var layoutDeck: LayoutDeck? = nil
     let deck: CarouselDeck
     let availableHeight: CGFloat
+    var isPreview: Bool
+    let cornerRadius: CGFloat
+    let horizontalInset: CGFloat
+    let dividerHeight: CGFloat
+    let minLaneHeight: CGFloat
 
     @State private var dragStart: (top: CGFloat, bottom: CGFloat)?
 
-    private let horizontalInset: CGFloat = 24
-    private let cornerRadius: CGFloat = 32
-    private let dividerHeight: CGFloat = 32
-    private let minLaneHeight: CGFloat = 80
     private let maxLanes: Int = 6
-
     private let addThreshold: CGFloat = 1.2
     private let removeThreshold: CGFloat = 0.83
+
+    private var chromeActive: Bool { layoutDeck?.isChromeActive ?? false }
 
     var body: some View {
         VStack(spacing: 0) {
             ForEach(Array(deck.lanes.enumerated()), id: \.element.id) { index, lane in
-                CarouselLane(
-                    deck: deck,
-                    lane: lane,
-                    laneIndex: index,
-                    layoutDragging: layoutDeck.isLayoutDragging,
-                    cornerRadius: cornerRadius,
-                    horizontalInset: horizontalInset
-                )
-                .frame(height: lane.height)
-                .transition(.scale.combined(with: .opacity))
+                Group {
+                    if isPreview {
+                        StaticLaneView(
+                            container: lane.current,
+                            cornerRadius: cornerRadius,
+                            horizontalInset: horizontalInset
+                        )
+                    } else {
+                        CarouselLane(
+                            deck: deck,
+                            lane: lane,
+                            laneIndex: index,
+                            layoutDragging: chromeActive,
+                            cornerRadius: cornerRadius,
+                            horizontalInset: horizontalInset
+                        )
+                    }
+                }
+                .frame(height: max(lane.height, minLaneHeight))
 
                 if index < deck.lanes.count - 1 {
-                    dividerHandle(index: index)
+                    if isPreview {
+                        Color.clear.frame(height: dividerHeight)
+                    } else {
+                        dividerHandle(index: index)
+                    }
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { configureHeightsIfNeeded() }
         .onChange(of: availableHeight) { _, _ in configureHeightsIfNeeded() }
-        .simultaneousGesture(magnifyGesture)
+        .simultaneousGesture(isPreview ? nil : magnifyGesture)
     }
 
     private var magnifyGesture: some Gesture {
         MagnifyGesture(minimumScaleDelta: 0.05)
             .onEnded { value in
-                guard !layoutDeck.isLayoutDragging else { return }
+                guard !chromeActive else { return }
                 let y = value.startLocation.y
                 if value.magnification >= addThreshold {
                     addLane(nearY: y)
@@ -275,7 +375,7 @@ private struct RingDeckView: View {
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        guard !layoutDeck.isLayoutDragging, index + 1 < deck.lanes.count else { return }
+                        guard !chromeActive, index + 1 < deck.lanes.count else { return }
                         let start = dragStart ?? (deck.lanes[index].height, deck.lanes[index + 1].height)
                         if dragStart == nil { dragStart = start }
 
@@ -292,6 +392,18 @@ private struct RingDeckView: View {
 }
 
 // MARK: - Lane carousel (within one ring)
+
+private struct StaticLaneView: View {
+    let container: ContainerType
+    let cornerRadius: CGFloat
+    let horizontalInset: CGFloat
+
+    var body: some View {
+        Panel(type: container, cornerRadius: cornerRadius)
+            .padding(.horizontal, horizontalInset)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
 
 struct CarouselLane: View {
     let deck: CarouselDeck
@@ -316,10 +428,10 @@ struct CarouselLane: View {
             let canRight = deck.canAdvance(forLaneAt: laneIndex)
 
             ZStack {
-                if let leftEdge, canLeft {
+                if let leftEdge, canLeft, !layoutDragging {
                     panel(leftEdge, width: w, height: h).offset(x: drag - w)
                 }
-                if let rightEdge, canRight {
+                if let rightEdge, canRight, !layoutDragging {
                     panel(rightEdge, width: w, height: h).offset(x: drag + w)
                 }
                 panel(lane.current, width: w, height: h).offset(x: drag)

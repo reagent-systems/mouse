@@ -1,11 +1,8 @@
 import SwiftUI
 
-/// Screen-level swipe direction — switches between saved layouts, not ring containers.
-enum LayoutSwipeDirection {
-    /// Finger moves left — reveal the next layout from the right.
-    case next
-    /// Finger moves right — reveal the previous layout from the left.
-    case previous
+enum EdgeSide {
+    case left
+    case right
 }
 
 /// One saved layout: a name plus a complete, independent ring (`CarouselDeck`).
@@ -15,18 +12,19 @@ struct LayoutSnapshot: Identifiable {
     var deck: CarouselDeck
 }
 
-/// Horizontal pager over saved layouts. Each layout owns its own ring; screen-edge swipes swap
-/// layouts without touching container order inside a ring.
+/// Owns every saved layout (each with its own ring) and edge-hold chrome state.
 @Observable
 final class LayoutDeck {
     var layouts: [LayoutSnapshot]
     var currentIndex: Int = 0
 
-    var layoutDragOffset: CGFloat = 0
-    var layoutDragDirection: LayoutSwipeDirection?
+    /// Edge being held to draft a new ring; preview grows horizontally from that edge.
+    var edgeHoldSide: EdgeSide?
+    var edgePreviewWidth: CGFloat = 0
     var pageWidth: CGFloat = 0
 
-    var isLayoutDragging: Bool { layoutDragDirection != nil }
+    var isHoldingEdge: Bool { edgeHoldSide != nil }
+    var isChromeActive: Bool { isHoldingEdge }
 
     init(layouts: [LayoutSnapshot]) {
         self.layouts = layouts
@@ -35,37 +33,24 @@ final class LayoutDeck {
     static func demo() -> LayoutDeck {
         LayoutDeck(layouts: [
             LayoutSnapshot(name: "Layout 1", deck: .demo()),
-            LayoutSnapshot(name: "Layout 2", deck: .fresh(laneCount: 4)),
         ])
     }
 
     var current: LayoutSnapshot { layouts[currentIndex] }
 
-    var canGoPrevious: Bool { currentIndex > 0 }
-
-    /// Swipe past the last layout creates a fresh one.
-    func goNext() {
-        if currentIndex + 1 < layouts.count {
-            currentIndex += 1
-        } else {
-            layouts.append(LayoutSnapshot(
-                name: "Layout \(layouts.count + 1)",
-                deck: .fresh(laneCount: 3)
-            ))
-            currentIndex += 1
-        }
+    @discardableResult
+    func createAndSwitchToNewLayout(laneCount: Int = 3) -> LayoutSnapshot {
+        let layout = LayoutSnapshot(
+            name: "Layout \(layouts.count + 1)",
+            deck: .fresh(laneCount: laneCount)
+        )
+        layouts.append(layout)
+        currentIndex = layouts.count - 1
+        return layout
     }
 
-    func goPrevious() {
-        guard currentIndex > 0 else { return }
-        currentIndex -= 1
-    }
-
-    /// Deck shown when peeking the next page (may be a not-yet-committed new layout).
-    func deckForNextPeek() -> CarouselDeck? {
-        if currentIndex + 1 < layouts.count {
-            return layouts[currentIndex + 1].deck
-        }
-        return nil
+    func resetEdgeHold() {
+        edgeHoldSide = nil
+        edgePreviewWidth = 0
     }
 }
