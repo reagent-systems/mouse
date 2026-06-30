@@ -17,6 +17,13 @@ struct Lane: Identifiable {
     var height: CGFloat = 0
 }
 
+enum HorizontalSwipeDirection {
+    /// Finger moves left — pull the right-edge container into the lane.
+    case advance
+    /// Finger moves right — pull the left-edge container into the lane.
+    case retreat
+}
+
 /// The whole thing is a single circular ring. The screen is a window over it, split into `lanes`
 /// spots; everything else is the off-screen `reserve`. The reserve is ordered so `first` sits just
 /// off the RIGHT edge of the screen and `last` sits just off the LEFT edge. Every lane pulls from
@@ -29,6 +36,15 @@ final class CarouselDeck {
     /// LIFO of removed lanes' container ids, so re-adding a lane restores the last one removed.
     var removedStack: [ContainerType.ID] = []
 
+    /// Lanes currently mid-horizontal-drag. Advance preloads top-to-bottom; retreat bottom-to-top.
+    var activeHorizontalDrags: [Lane.ID: HorizontalSwipeDirection] = [:]
+
+    /// When set, every lane follows this shared edge drag (all containers move at once).
+    var edgeDragOffset: CGFloat = 0
+    var edgeDragDirection: HorizontalSwipeDirection?
+    /// Measured lane width; used to animate edge drags to a full commit position.
+    var laneWidth: CGFloat = 0
+
     init(lanes: [Lane], reserve: [ContainerType]) {
         self.lanes = lanes
         self.reserve = reserve
@@ -39,6 +55,12 @@ final class CarouselDeck {
         let lanes = all.prefix(3).map { Lane(current: $0) }
         return CarouselDeck(lanes: Array(lanes), reserve: Array(all.dropFirst(3)))
     }
+
+    func laneIndex(for id: Lane.ID) -> Int? {
+        lanes.firstIndex { $0.id == id }
+    }
+
+    // MARK: - Ring moves
 
     /// Swipe-left commit: pull the right-edge container into the lane, push the old one off the left.
     func advance(laneID: Lane.ID) {
@@ -57,6 +79,124 @@ final class CarouselDeck {
         lanes[i].current = incoming
         reserve.insert(outgoing, at: 0)
     }
+
+    /// Move every lane in top-to-bottom order (edge drag commit). Applied atomically so SwiftUI
+    /// never renders a half-advanced ring.
+    func advanceAll() {
+        var simReserve = reserve
+        var simLanes = lanes
+        for i in simLanes.indices {
+            guard !simReserve.isEmpty else { break }
+            let incoming = simReserve.removeFirst()
+            let outgoing = simLanes[i].current
+            simLanes[i].current = incoming
+            simReserve.append(outgoing)
+        }
+        lanes = simLanes
+        reserve = simReserve
+    }
+
+    /// Bottom-to-top — the inverse of `advanceAll`. Applied atomically for the same reason.
+    func retreatAll() {
+        var simReserve = reserve
+        var simLanes = lanes
+        for i in stride(from: simLanes.count - 1, through: 0, by: -1) {
+            guard !simReserve.isEmpty else { break }
+            let incoming = simReserve.removeLast()
+            let outgoing = simLanes[i].current
+            simLanes[i].current = incoming
+            simReserve.insert(outgoing, at: 0)
+        }
+        lanes = simLanes
+        reserve = simReserve
+    }
+
+    // MARK: - Preload / peek
+
+    /// Right-edge container this lane would pull if it commits an advance now, accounting for
+    /// higher-priority lanes above it that are already dragging or bulk edge-dragging.
+    func peekRightEdge(forLaneAt index: Int) -> ContainerType? {
+        simulatedRing(forLaneAt: index, direction: .advance, bulkDirection: edgeDragDirection).reserve.first
+    }
+
+    /// Left-edge container this lane would pull if it commits a retreat now.
+    func peekLeftEdge(forLaneAt index: Int) -> ContainerType? {
+        simulatedRing(forLaneAt: index, direction: .retreat, bulkDirection: edgeDragDirection).reserve.last
+    }
+
+    func canAdvance(forLaneAt index: Int) -> Bool {
+        !simulatedRing(forLaneAt: index, direction: .advance, bulkDirection: edgeDragDirection).reserve.isEmpty
+    }
+
+    func canRetreat(forLaneAt index: Int) -> Bool {
+        !simulatedRing(forLaneAt: index, direction: .retreat, bulkDirection: edgeDragDirection).reserve.isEmpty
+    }
+
+    /// Simulate ring state after all higher-priority pending operations for this direction run first.
+    /// Advance commits top-to-bottom; retreat commits bottom-to-top.
+    private func simulatedRing(
+        forLaneAt index: Int,
+        direction: HorizontalSwipeDirection,
+        bulkDirection: HorizontalSwipeDirection?
+    ) -> (reserve: [ContainerType], laneContents: [ContainerType]) {
+        var simReserve = reserve
+        var simLanes = lanes.map(\.current)
+
+        if bulkDirection == direction {
+            switch direction {
+            case .advance:
+                for i in 0..<index {
+                    applySimulated(direction: .advance, laneIndex: i, reserve: &simReserve, lanes: &simLanes)
+                }
+            case .retreat:
+                for i in stride(from: lanes.count - 1, through: index + 1, by: -1) {
+                    applySimulated(direction: .retreat, laneIndex: i, reserve: &simReserve, lanes: &simLanes)
+                }
+            }
+            return (simReserve, simLanes)
+        }
+
+        let pending = activeHorizontalDrags.compactMap { id, dir -> (Int, HorizontalSwipeDirection)? in
+            guard let idx = laneIndex(for: id), dir == direction else { return nil }
+            return (idx, dir)
+        }
+
+        switch direction {
+        case .advance:
+            for (idx, _) in pending.filter({ $0.0 < index }).sorted(by: { $0.0 < $1.0 }) {
+                applySimulated(direction: .advance, laneIndex: idx, reserve: &simReserve, lanes: &simLanes)
+            }
+        case .retreat:
+            for (idx, _) in pending.filter({ $0.0 > index }).sorted(by: { $0.0 > $1.0 }) {
+                applySimulated(direction: .retreat, laneIndex: idx, reserve: &simReserve, lanes: &simLanes)
+            }
+        }
+
+        return (simReserve, simLanes)
+    }
+
+    private func applySimulated(
+        direction: HorizontalSwipeDirection,
+        laneIndex: Int,
+        reserve: inout [ContainerType],
+        lanes: inout [ContainerType]
+    ) {
+        guard !reserve.isEmpty else { return }
+        switch direction {
+        case .advance:
+            let incoming = reserve.removeFirst()
+            let outgoing = lanes[laneIndex]
+            lanes[laneIndex] = incoming
+            reserve.append(outgoing)
+        case .retreat:
+            let incoming = reserve.removeLast()
+            let outgoing = lanes[laneIndex]
+            lanes[laneIndex] = incoming
+            reserve.insert(outgoing, at: 0)
+        }
+    }
+
+    // MARK: - Lane add/remove
 
     /// The container a newly-added lane should show: the most recently removed lane's container if
     /// it's still on the ring, otherwise the right-edge container. Removes it from the reserve.
