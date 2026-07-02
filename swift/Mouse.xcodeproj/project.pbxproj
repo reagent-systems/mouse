@@ -14,8 +14,10 @@
 		3C060871009B04B75DD57460 /* MouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F529B8B560B4DB034F9698 /* MouseApp.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
 		7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2B92464EFB49888F46248A5 /* Assets.xcassets */; };
+		7C5227A29F56120AF5DA92DA /* RingCollection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4742BED435591B60446A61FB /* RingCollection.swift */; };
 		8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E73E50FC2D809F76902185C /* AsciiArt.swift */; };
 		8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503560AF5D76D20B38402E7F /* ContentView.swift */; };
+		B1EE649F1DE6EC031E63B539 /* RingNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19E550E5082CB6D6A69647B0 /* RingNavigator.swift */; };
 		CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5808E2C3F3EE351EB16E5DD /* AppFont.swift */; };
 		DC525882F3784C97FF273D57 /* IBMPlexMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */; };
 /* End PBXBuildFile section */
@@ -23,8 +25,10 @@
 /* Begin PBXFileReference section */
 		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
+		19E550E5082CB6D6A69647B0 /* RingNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RingNavigator.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
 		38F529B8B560B4DB034F9698 /* MouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseApp.swift; sourceTree = "<group>"; };
+		4742BED435591B60446A61FB /* RingCollection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RingCollection.swift; sourceTree = "<group>"; };
 		503560AF5D76D20B38402E7F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
 		8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundView.swift; sourceTree = "<group>"; };
@@ -49,6 +53,8 @@
 				503560AF5D76D20B38402E7F /* ContentView.swift */,
 				8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
+				4742BED435591B60446A61FB /* RingCollection.swift */,
+				19E550E5082CB6D6A69647B0 /* RingNavigator.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
 			);
 			path = Mouse;
@@ -153,6 +159,8 @@
 				8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */,
 				0A6F9CDD9D58550755EB4B28 /* ForegroundView.swift in Sources */,
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
+				7C5227A29F56120AF5DA92DA /* RingCollection.swift in Sources */,
+				B1EE649F1DE6EC031E63B539 /* RingNavigator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

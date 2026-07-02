@@ -14,7 +14,7 @@ import SwiftUI
 /// Sizing uses `containerRelativeFrame` (measures the real window); a `GeometryReader` here reports
 /// an inflated size from the oversized ASCII art sibling in the `ZStack`.
 struct ForegroundView: View {
-    @State private var deck = CarouselDeck.demo()
+    @Bindable var deck: CarouselDeck
     @State private var availableHeight: CGFloat = 0
     @State private var didInit = false
     @State private var dragStart: (top: CGFloat, bottom: CGFloat)?

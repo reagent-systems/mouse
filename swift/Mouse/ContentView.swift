@@ -5,7 +5,7 @@ struct ContentView: View {
         ZStack {
             AsciiLogoBackground()
 
-            ForegroundView()
+            RingNavigator()
         }
     }
 }
