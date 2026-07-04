@@ -4,7 +4,7 @@ import SwiftUI
 /// type it is, so the ring may hold several instances of the same `kind` (e.g. six 6's). An
 /// instance lives in exactly one place at a time: a lane, or the off-screen reserve.
 struct ContainerType: Identifiable {
-    let id = UUID()
+    let id: UUID
     let kind: Int
     let title: String
     let color: Color
@@ -41,6 +41,17 @@ final class ContainerContent {
         sharedByKind[kind] = fresh
         return fresh
     }
+
+    /// Snapshot / restore of the shared registry, for persistence. Restore must run before any
+    /// instances are rebuilt so `resolve(kind:)` hands them the restored objects.
+    static func snapshotSharedContents() -> [ContentSnapshot] {
+        sharedByKind.values.map { $0.snapshot() }
+    }
+
+    static func restoreSharedContents(_ snapshots: [ContentSnapshot]) {
+        sharedByKind = Dictionary(uniqueKeysWithValues:
+            snapshots.filter { syncedKinds.contains($0.kind) }.map { ($0.kind, $0.restore()) })
+    }
 }
 
 /// One on-screen spot in the ring window. A lane holds whichever container currently sits in it.
@@ -62,9 +73,10 @@ final class CarouselDeck {
     /// LIFO of removed lanes' container ids, so re-adding a lane restores the last one removed.
     var removedStack: [ContainerType.ID] = []
 
-    init(lanes: [Lane], reserve: [ContainerType]) {
+    init(lanes: [Lane], reserve: [ContainerType], removedStack: [ContainerType.ID] = []) {
         self.lanes = lanes
         self.reserve = reserve
+        self.removedStack = removedStack
     }
 
     static func demo() -> CarouselDeck {
@@ -152,13 +164,14 @@ extension ContainerType {
 
     /// The catalog of 15 distinct container types.
     static func catalog() -> [ContainerType] {
-        (1...15).map(entry(kind:))
+        (1...15).map { entry(kind: $0) }
     }
 
-    /// Build a fresh instance of a given catalog type.
-    static func entry(kind: Int) -> ContainerType {
+    /// Build an instance of a given catalog type — fresh by default, or with a persisted identity.
+    static func entry(kind: Int, id: UUID = UUID()) -> ContainerType {
         let k = (kind - 1) % 15 + 1
         return ContainerType(
+            id: id,
             kind: k,
             title: "\(k)",
             color: palette[(k - 1) % palette.count],

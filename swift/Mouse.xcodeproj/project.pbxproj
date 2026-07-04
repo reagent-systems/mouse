@@ -12,6 +12,7 @@
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
 		3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */; };
 		3C060871009B04B75DD57460 /* MouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F529B8B560B4DB034F9698 /* MouseApp.swift */; };
+		4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
 		7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2B92464EFB49888F46248A5 /* Assets.xcassets */; };
 		8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E73E50FC2D809F76902185C /* AsciiArt.swift */; };
@@ -33,6 +34,7 @@
 		B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtStyle.swift; sourceTree = "<group>"; };
 		C5808E2C3F3EE351EB16E5DD /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
 		E2B92464EFB49888F46248A5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StripPersistence.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -49,6 +51,7 @@
 				503560AF5D76D20B38402E7F /* ContentView.swift */,
 				8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
+				F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
 			);
 			path = Mouse;
@@ -153,6 +156,7 @@
 				8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */,
 				0A6F9CDD9D58550755EB4B28 /* ForegroundView.swift in Sources */,
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
+				4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -18,8 +18,12 @@ import SwiftUI
 ///
 /// Sizing uses `containerRelativeFrame` (measures the real window); a `GeometryReader` here reports
 /// an inflated size from the oversized ASCII art sibling in the `ZStack`.
+///
+/// The strip persists across launches (`StripPersistence`): restored here at init, saved whenever
+/// the scene leaves the active phase.
 struct ForegroundView: View {
-    @State private var strip = RingStrip(rings: [CarouselDeck.demo()])
+    @State private var strip = StripPersistence.load() ?? RingStrip(rings: [CarouselDeck.demo()])
+    @Environment(\.scenePhase) private var scenePhase
     @State private var availableHeight: CGFloat = 0
     @State private var availableWidth: CGFloat = 0
     @State private var didInit = false
@@ -73,6 +77,9 @@ struct ForegroundView: View {
         .simultaneousGesture(magnifyGesture)
         .overlay(alignment: .leading) { edgeStrip(.left) }
         .overlay(alignment: .trailing) { edgeStrip(.right) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { StripPersistence.save(strip) }
+        }
     }
 
     private func laneStack(for ring: CarouselDeck) -> some View {
@@ -233,8 +240,10 @@ struct ForegroundView: View {
     private func configure(for height: CGFloat) {
         availableHeight = height
         guard !didInit else { return }
-        let even = deck.lanes.map { _ in CGFloat(1) }
-        applyHeights(distribute(desired: even, total: usableHeight(for: deck.lanes.count)), to: deck)
+        // Fresh lanes carry height 0, so they get an even split; lanes restored from a previous
+        // run keep their proportions, re-fit to this window's height.
+        let desired = deck.lanes.map { max($0.height, 1) }
+        applyHeights(distribute(desired: desired, total: usableHeight(for: deck.lanes.count)), to: deck)
         didInit = true
     }
 
