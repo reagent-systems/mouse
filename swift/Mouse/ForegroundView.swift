@@ -11,19 +11,41 @@ import SwiftUI
 /// - Spreading apart (zoom) inserts a new lane at the gap nearest the gesture's start point.
 /// - Pinching together removes the lane nearest the gesture's center.
 ///
+/// A one-finger drag starting in a screen-edge strip swipes the whole *ring*: every lane slides off
+/// that side together and the neighbouring ring's lanes slide in. If the strip of rings ends on
+/// that side, the swipe mints a fresh single-lane ring instead, so edge swipes both create rings
+/// and travel back to existing ones.
+///
 /// Sizing uses `containerRelativeFrame` (measures the real window); a `GeometryReader` here reports
 /// an inflated size from the oversized ASCII art sibling in the `ZStack`.
 struct ForegroundView: View {
-    @State private var deck = CarouselDeck.demo()
+    @State private var strip = RingStrip(rings: [CarouselDeck.demo()])
     @State private var availableHeight: CGFloat = 0
+    @State private var availableWidth: CGFloat = 0
     @State private var didInit = false
     @State private var dragStart: (top: CGFloat, bottom: CGFloat)?
+
+    /// Horizontal offset of the current ring's lane stack during a ring swipe (and its settle).
+    @State private var ringDrag: CGFloat = 0
+    /// The off-screen ring rendered beside the current one while a ring swipe is in flight.
+    @State private var adjacent: AdjacentRing?
+
+    private struct AdjacentRing {
+        let ring: CarouselDeck
+        let side: RingSide
+        /// True while the ring is a candidate that only joins the strip if the swipe commits.
+        let isNew: Bool
+    }
+
+    private var deck: CarouselDeck { strip.current }
 
     private let horizontalInset: CGFloat = 24
     private let cornerRadius: CGFloat = 32
     private let dividerHeight: CGFloat = 32
     private let minLaneHeight: CGFloat = 80
     private let maxLanes: Int = 6
+    /// Width of the screen-edge strips that capture ring swipes instead of lane swipes.
+    private let edgeZoneWidth: CGFloat = 32
 
     /// Final magnification above which a spread counts as "zoom → add a lane".
     private let addThreshold: CGFloat = 1.2
@@ -31,10 +53,33 @@ struct ForegroundView: View {
     private let removeThreshold: CGFloat = 0.83
 
     var body: some View {
+        ZStack {
+            if let adjacent {
+                laneStack(for: adjacent.ring)
+                    .offset(x: ringDrag + (adjacent.side == .right ? availableWidth : -availableWidth))
+            }
+            laneStack(for: deck)
+                .offset(x: ringDrag)
+        }
+        .containerRelativeFrame([.horizontal, .vertical]) { length, axis in
+            if axis == .vertical, availableHeight != length {
+                DispatchQueue.main.async { configure(for: length) }
+            }
+            if axis == .horizontal, availableWidth != length {
+                DispatchQueue.main.async { availableWidth = length }
+            }
+            return length
+        }
+        .simultaneousGesture(magnifyGesture)
+        .overlay(alignment: .leading) { edgeStrip(.left) }
+        .overlay(alignment: .trailing) { edgeStrip(.right) }
+    }
+
+    private func laneStack(for ring: CarouselDeck) -> some View {
         VStack(spacing: 0) {
-            ForEach(Array(deck.lanes.enumerated()), id: \.element.id) { index, lane in
+            ForEach(Array(ring.lanes.enumerated()), id: \.element.id) { index, lane in
                 CarouselLane(
-                    deck: deck,
+                    deck: ring,
                     lane: lane,
                     cornerRadius: cornerRadius,
                     horizontalInset: horizontalInset
@@ -42,18 +87,92 @@ struct ForegroundView: View {
                 .frame(height: lane.height)
                 .transition(.scale.combined(with: .opacity))
 
-                if index < deck.lanes.count - 1 {
-                    dividerHandle(index: index)
+                if index < ring.lanes.count - 1 {
+                    dividerHandle(ring: ring, index: index)
                 }
             }
         }
-        .containerRelativeFrame([.horizontal, .vertical]) { length, axis in
-            if axis == .vertical, availableHeight != length {
-                DispatchQueue.main.async { configure(for: length) }
+        // Each lane also renders the ring's reserve edge panels a screen-width to either side.
+        // Clip them to the stack so they can't surface when the whole stack slides during a ring
+        // swipe (clip before the outer `.offset`, so the window travels with the stack).
+        .clipped()
+    }
+
+    // MARK: - Ring swipe (edge gesture: slide to or create a neighbouring ring)
+
+    private func edgeStrip(_ side: RingSide) -> some View {
+        Color.clear
+            .frame(width: edgeZoneWidth)
+            .contentShape(Rectangle())
+            .gesture(ringSwipe(from: side))
+    }
+
+    private func ringSwipe(from side: RingSide) -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard availableWidth > 0 else { return }
+                if adjacent == nil { adjacent = makeAdjacent(side) }
+                guard let adjacent, adjacent.side == side else { return }
+                let t = value.translation.width
+                // Only allow pulling the neighbour on; the far direction pins at rest.
+                ringDrag = side == .right ? min(0, t) : max(0, t)
             }
-            return length
+            .onEnded { value in
+                guard let adj = adjacent, adj.side == side else { return }
+                let threshold = availableWidth * 0.22
+                let t = value.translation.width
+                let crossed = side == .right ? t <= -threshold : t >= threshold
+                if crossed {
+                    commitRingSwitch(to: adj)
+                } else {
+                    withAnimation(.snappy(duration: 0.2), completionCriteria: .logicallyComplete) {
+                        ringDrag = 0
+                    } completion: {
+                        adjacent = nil
+                    }
+                }
+            }
+    }
+
+    /// The ring that slides in from `side`: the strip's existing neighbour if there is one,
+    /// otherwise a fresh single-lane ring. Created up front so it can render during the drag; a
+    /// fresh ring only joins the strip if the swipe commits.
+    private func makeAdjacent(_ side: RingSide) -> AdjacentRing {
+        if let existing = strip.neighbor(on: side) {
+            // Re-fit in case the window changed while this ring was off screen.
+            let heights = distribute(
+                desired: existing.lanes.map { $0.height },
+                total: usableHeight(for: existing.lanes.count)
+            )
+            applyHeights(heights, to: existing)
+            return AdjacentRing(ring: existing, side: side, isNew: false)
         }
-        .simultaneousGesture(magnifyGesture)
+        let fresh = CarouselDeck.fresh()
+        fresh.lanes[0].height = usableHeight(for: 1)
+        return AdjacentRing(ring: fresh, side: side, isNew: true)
+    }
+
+    private func commitRingSwitch(to adj: AdjacentRing) {
+        let outgoing = strip.current
+        if adj.isNew {
+            // A new ring is only mintable past the strip's end, so on the left the insertion index
+            // is the current index (0) and `currentIndex` already points at it after the insert.
+            strip.rings.insert(adj.ring, at: adj.side == .right ? strip.currentIndex + 1 : strip.currentIndex)
+            if adj.side == .right { strip.currentIndex += 1 }
+        } else {
+            strip.currentIndex += adj.side == .right ? 1 : -1
+        }
+        // Same two-pass trick as CarouselLane.commit: swap identities with offsets that keep both
+        // stacks visually stationary, let SwiftUI render that, then glide everything to rest.
+        adjacent = AdjacentRing(ring: outgoing, side: adj.side.opposite, isNew: false)
+        ringDrag += adj.side == .right ? availableWidth : -availableWidth
+        DispatchQueue.main.async {
+            withAnimation(.snappy(duration: 0.25), completionCriteria: .logicallyComplete) {
+                ringDrag = 0
+            } completion: {
+                adjacent = nil
+            }
+        }
     }
 
     // MARK: - Magnify (add / remove lanes)
@@ -88,7 +207,7 @@ struct ForegroundView: View {
         let newLane = Lane(current: restored)
         withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
             deck.lanes.insert(newLane, at: insertIndex)
-            applyHeights(distribute(desired: desired, total: usableHeight(for: newCount)))
+            applyHeights(distribute(desired: desired, total: usableHeight(for: newCount)), to: deck)
         }
     }
 
@@ -103,7 +222,7 @@ struct ForegroundView: View {
         let released = deck.lanes[removeIndex].current
         withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
             deck.lanes.remove(at: removeIndex)
-            applyHeights(distribute(desired: desired, total: usableHeight(for: newCount)))
+            applyHeights(distribute(desired: desired, total: usableHeight(for: newCount)), to: deck)
         }
         // Its container goes back onto the ring and is remembered for restoration.
         deck.release(released)
@@ -115,7 +234,7 @@ struct ForegroundView: View {
         availableHeight = height
         guard !didInit else { return }
         let even = deck.lanes.map { _ in CGFloat(1) }
-        applyHeights(distribute(desired: even, total: usableHeight(for: deck.lanes.count)))
+        applyHeights(distribute(desired: even, total: usableHeight(for: deck.lanes.count)), to: deck)
         didInit = true
     }
 
@@ -124,9 +243,9 @@ struct ForegroundView: View {
         availableHeight - CGFloat(max(0, count - 1)) * dividerHeight
     }
 
-    private func applyHeights(_ heights: [CGFloat]) {
-        guard heights.count == deck.lanes.count else { return }
-        for i in deck.lanes.indices { deck.lanes[i].height = heights[i] }
+    private func applyHeights(_ heights: [CGFloat], to ring: CarouselDeck) {
+        guard heights.count == ring.lanes.count else { return }
+        for i in ring.lanes.indices { ring.lanes[i].height = heights[i] }
     }
 
     /// Scale `desired` heights so they sum exactly to `total` while keeping each ≥ `minLaneHeight`.
@@ -184,7 +303,7 @@ struct ForegroundView: View {
         return bestIndex
     }
 
-    private func dividerHandle(index: Int) -> some View {
+    private func dividerHandle(ring: CarouselDeck, index: Int) -> some View {
         Capsule()
             .fill(Color.secondary.opacity(0.45))
             .frame(width: 40, height: 5)
@@ -195,16 +314,16 @@ struct ForegroundView: View {
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        guard index + 1 < deck.lanes.count else { return }
-                        let start = dragStart ?? (deck.lanes[index].height, deck.lanes[index + 1].height)
+                        guard index + 1 < ring.lanes.count else { return }
+                        let start = dragStart ?? (ring.lanes[index].height, ring.lanes[index + 1].height)
                         if dragStart == nil { dragStart = start }
 
                         let delta = value.translation.height
                         let newTop = start.top + delta
                         let newBottom = start.bottom - delta
                         guard newTop >= minLaneHeight, newBottom >= minLaneHeight else { return }
-                        deck.lanes[index].height = newTop
-                        deck.lanes[index + 1].height = newBottom
+                        ring.lanes[index].height = newTop
+                        ring.lanes[index + 1].height = newBottom
                     }
                     .onEnded { _ in dragStart = nil }
             )

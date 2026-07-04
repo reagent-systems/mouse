@@ -40,6 +40,12 @@ final class CarouselDeck {
         return CarouselDeck(lanes: Array(lanes), reserve: Array(all.dropFirst(3)))
     }
 
+    /// A brand-new ring: one lane showing catalog type 1, the rest of the catalog in reserve.
+    static func fresh() -> CarouselDeck {
+        let all = ContainerType.catalog()
+        return CarouselDeck(lanes: [Lane(current: all[0])], reserve: Array(all.dropFirst()))
+    }
+
     /// Swipe-left commit: pull the right-edge container into the lane, push the old one off the left.
     func advance(laneID: Lane.ID) {
         guard let i = lanes.firstIndex(where: { $0.id == laneID }), !reserve.isEmpty else { return }
@@ -75,6 +81,33 @@ final class CarouselDeck {
     func release(_ container: ContainerType) {
         reserve.append(container)
         removedStack.append(container.id)
+    }
+}
+
+/// Which screen edge a ring swipe starts from — equivalently, which side of the current ring the
+/// incoming ring sits on.
+enum RingSide {
+    case left, right
+    var opposite: RingSide { self == .left ? .right : .left }
+}
+
+/// An ordered strip of rings. Exactly one ring is on screen at a time; an edge swipe slides to the
+/// neighbouring ring on that side, or mints a fresh ring when the strip ends there.
+@Observable
+final class RingStrip {
+    var rings: [CarouselDeck]
+    var currentIndex: Int
+
+    init(rings: [CarouselDeck], currentIndex: Int = 0) {
+        self.rings = rings
+        self.currentIndex = currentIndex
+    }
+
+    var current: CarouselDeck { rings[currentIndex] }
+
+    func neighbor(on side: RingSide) -> CarouselDeck? {
+        let i = currentIndex + (side == .right ? 1 : -1)
+        return rings.indices.contains(i) ? rings[i] : nil
     }
 }
 
