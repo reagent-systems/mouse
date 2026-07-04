@@ -8,6 +8,39 @@ struct ContainerType: Identifiable {
     let kind: Int
     let title: String
     let color: Color
+    /// What's inside the container, separate from the instance displaying it. Reference-typed:
+    /// synced kinds share one object across every instance in every ring; other kinds get a
+    /// private one per instance.
+    let content: ContainerContent
+}
+
+/// A container's mutable contents — the attachment point for whatever containers end up holding.
+/// The point is the reference semantics: kinds in `syncedKinds` resolve to a single app-wide
+/// object, so every instance of that kind — any lane, any reserve, any ring, existing or created
+/// later — shows and mutates the same state. Being `@Observable`, any visible instance updates
+/// live when the shared state changes from anywhere. The registry never evicts: a synced kind's
+/// contents persist even while no instance of it is on screen.
+@Observable
+final class ContainerContent {
+    let kind: Int
+
+    init(kind: Int) { self.kind = kind }
+
+    /// Container kinds whose content is shared app-wide.
+    static let syncedKinds: Set<Int> = [15]
+
+    // Only ever touched from SwiftUI on the main thread; container creation has no other callers.
+    nonisolated(unsafe) private static var sharedByKind: [Int: ContainerContent] = [:]
+
+    /// The content object for a new instance of `kind`: the app-wide shared one for synced kinds,
+    /// otherwise a fresh private one.
+    static func resolve(kind: Int) -> ContainerContent {
+        guard syncedKinds.contains(kind) else { return ContainerContent(kind: kind) }
+        if let shared = sharedByKind[kind] { return shared }
+        let fresh = ContainerContent(kind: kind)
+        sharedByKind[kind] = fresh
+        return fresh
+    }
 }
 
 /// One on-screen spot in the ring window. A lane holds whichever container currently sits in it.
@@ -119,15 +152,18 @@ extension ContainerType {
 
     /// The catalog of 15 distinct container types.
     static func catalog() -> [ContainerType] {
-        (1...15).map { n in
-            ContainerType(kind: n, title: "\(n)", color: palette[(n - 1) % palette.count])
-        }
+        (1...15).map(entry(kind:))
     }
 
     /// Build a fresh instance of a given catalog type.
     static func entry(kind: Int) -> ContainerType {
-        let template = catalog()[(kind - 1) % 15]
-        return ContainerType(kind: template.kind, title: template.title, color: template.color)
+        let k = (kind - 1) % 15 + 1
+        return ContainerType(
+            kind: k,
+            title: "\(k)",
+            color: palette[(k - 1) % palette.count],
+            content: .resolve(kind: k)
+        )
     }
 
     /// Demo ring: all 15 catalog types, plus extra instances of type 6 so six 6's exist.
