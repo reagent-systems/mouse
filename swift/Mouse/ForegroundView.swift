@@ -153,8 +153,7 @@ struct ForegroundView: View {
             }
         }
         // The edge lesson's label belongs to this ring's edge: rendered inside the stack, it
-        // gets dragged along with the ring as the user swipes it away. It only holds still
-        // against the idle nudge (words outside containers don't move with idle animations).
+        // moves with everything the ring does — the idle nudge and the swipe that drags it away.
         .overlay(alignment: .trailing) {
             if ring.isOnboarding && ring.edgeLessonActive {
                 Text(edgeSwiped ? "Edge Swiped." : "Edge Swipe?")
@@ -163,7 +162,6 @@ struct ForegroundView: View {
                     .fixedSize()
                     .rotationEffect(.degrees(-90))
                     .frame(width: 40)
-                    .offset(x: -edgeNudge)
                     .allowsHitTesting(false)
             }
         }
@@ -539,9 +537,6 @@ struct CarouselLane: View {
                     .scaleEffect(x: 1, y: dragRole == .lesson ? (h + deck.dragPulse) / max(h, 1) : 1, anchor: .bottom)
                     .scaleEffect(x: 1, y: dragRole == .above ? (h - deck.dragPulse) / max(h, 1) : 1, anchor: .top)
                     .offset(x: drag + nudge.width, y: nudge.height)
-                    // Same value-scoped spring as the gap label, so word and edges interpolate
-                    // frame-identically in both directions of the pulse.
-                    .animation(.spring(duration: 0.4), value: deck.dragPulse)
 
                 if lane.current.usesGapLabel {
                     // The drag lesson's word rides the boundary as it travels; the spread word
