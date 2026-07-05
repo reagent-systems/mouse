@@ -338,11 +338,14 @@ extension ContainerType {
         return ContainerType(
             id: id,
             kind: k,
-            title: "\(k)",
+            title: k == gitHubKind ? "GitHub" : "\(k)",
             color: palette[(k - 1) % palette.count],
             content: .resolve(kind: k)
         )
     }
+
+    /// Catalog kind 1 is the GitHub sign-in container (`GitHubSignInView` / `GitHubAuth`).
+    static let gitHubKind = 1
 
     static let swipePresetKind = 0
     static let dragPresetKind = -1

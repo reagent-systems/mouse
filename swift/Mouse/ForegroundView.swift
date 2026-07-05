@@ -685,7 +685,9 @@ struct Panel: View {
             .overlay {
                 // Gap-label lessons render their label in the lane (outside the container, so it
                 // doesn't move with idle animations); the panel itself stays blank for those.
-                if !type.usesGapLabel {
+                if type.kind == ContainerType.gitHubKind {
+                    GitHubSignInView()
+                } else if !type.usesGapLabel {
                     Text(type.displayTitle)
                         .font(type.isOnboardingPreset
                             ? .custom(AppFont.asciiName, size: 28)
