@@ -35,6 +35,7 @@
 		C5808E2C3F3EE351EB16E5DD /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
 		E2B92464EFB49888F46248A5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StripPersistence.swift; sourceTree = "<group>"; };
+		FB01C138F6E8F2292E1D3EC4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -50,6 +51,7 @@
 				A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */,
 				503560AF5D76D20B38402E7F /* ContentView.swift */,
 				8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */,
+				FB01C138F6E8F2292E1D3EC4 /* Info.plist */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
 				F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
@@ -172,7 +174,7 @@
 				DEVELOPMENT_TEAM = 5NBX5ZD3H6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_UIAppFonts = "IBMPlexMono-Bold.ttf";
+				INFOPLIST_FILE = Mouse/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -194,7 +196,7 @@
 				DEVELOPMENT_TEAM = 5NBX5ZD3H6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_UIAppFonts = "IBMPlexMono-Bold.ttf";
+				INFOPLIST_FILE = Mouse/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				LD_RUNPATH_SEARCH_PATHS = (

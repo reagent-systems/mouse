@@ -26,6 +26,8 @@ struct RingSnapshot: Codable {
     var lanes: [LaneSnapshot]
     var reserve: [InstanceSnapshot]
     var removedStack: [UUID]
+    /// Set for the dedicated onboarding ring. Absent for ordinary rings.
+    var isOnboarding: Bool?
 }
 
 struct LaneSnapshot: Codable {
@@ -36,6 +38,10 @@ struct LaneSnapshot: Codable {
 struct InstanceSnapshot: Codable {
     var id: UUID
     var kind: Int
+    /// Legacy field from the idle-settling era; still read (mapped to `done`) for old saves.
+    var idleOff: Bool?
+    /// Set when a lesson preset's gesture has been performed. Absent for ordinary containers.
+    var done: Bool?
 }
 
 /// The persisted fields of `ContainerContent`. Grows alongside it as containers gain real
@@ -68,7 +74,8 @@ extension CarouselDeck {
         RingSnapshot(
             lanes: lanes.map { LaneSnapshot(container: $0.current.snapshot(), height: $0.height) },
             reserve: reserve.map { $0.snapshot() },
-            removedStack: removedStack
+            removedStack: removedStack,
+            isOnboarding: isOnboarding ? true : nil
         )
     }
 
@@ -76,19 +83,48 @@ extension CarouselDeck {
         self.init(
             lanes: snapshot.lanes.map { Lane(current: $0.container.restore(), height: $0.height) },
             reserve: snapshot.reserve.map { $0.restore() },
-            removedStack: snapshot.removedStack
+            removedStack: snapshot.removedStack,
+            isOnboarding: snapshot.isOnboarding ?? false
         )
     }
 }
 
 extension ContainerType {
-    func snapshot() -> InstanceSnapshot { InstanceSnapshot(id: id, kind: kind) }
+    func snapshot() -> InstanceSnapshot {
+        InstanceSnapshot(
+            id: id,
+            kind: kind,
+            done: content.done ? true : nil
+        )
+    }
 }
 
 extension InstanceSnapshot {
     /// Rebuild the instance: catalog visuals come from `kind`; content comes from `resolve` —
     /// the shared object for synced kinds (restored just prior), a fresh private one otherwise.
-    func restore() -> ContainerType { .entry(kind: kind, id: id) }
+    /// Kinds ≤ 0 are onboarding presets. A lesson caught mid-morph at save time restores as its
+    /// successor (finished drag → spread, finished spread → blank), so relaunch can't rewind it.
+    func restore() -> ContainerType {
+        let finished = done ?? idleOff ?? false
+        let container: ContainerType
+        switch kind {
+        case ContainerType.swipePresetKind:
+            container = .onboardingSwipe(id: id)
+        case ContainerType.dragPresetKind:
+            container = finished ? .onboardingSpread(id: id) : .onboardingDrag(id: id)
+        case ContainerType.spreadPresetKind:
+            container = finished ? .onboardingBlank(id: id) : .onboardingSpread(id: id)
+        case ContainerType.pinchPresetKind:
+            container = .onboardingPinch(id: id)
+        case ContainerType.blankPresetKind:
+            container = .onboardingBlank(id: id)
+        default:
+            container = .entry(kind: kind, id: id)
+        }
+        // Morphed cases above already restored as their successor; everything else keeps its flag.
+        if finished, container.kind == kind { container.content.done = true }
+        return container
+    }
 }
 
 extension ContainerContent {

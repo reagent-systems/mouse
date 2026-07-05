@@ -12,6 +12,47 @@ struct ContainerType: Identifiable {
     /// synced kinds share one object across every instance in every ring; other kinds get a
     /// private one per instance.
     let content: ContainerContent
+    /// What the container does when nothing is happening in its lane.
+    var idle: IdleAnimation = .none
+    /// The label once the container's lesson has been performed ("Swipe?" → "Swiped."). The swap
+    /// happens live, mid-gesture, via `content.done`.
+    var doneTitle: String? = nil
+
+    /// Preset onboarding containers (kinds ≤ 0) teach a gesture instead of holding content.
+    var isOnboardingPreset: Bool { kind <= 0 }
+
+    /// Lesson presets gate the onboarding chain; blank fillers don't.
+    var isLessonPreset: Bool {
+        [Self.swipePresetKind, Self.dragPresetKind, Self.spreadPresetKind, Self.pinchPresetKind]
+            .contains(kind)
+    }
+
+    /// Whether the label rides the divider gap above the container instead of its center.
+    var usesGapLabel: Bool {
+        kind == Self.dragPresetKind || kind == Self.spreadPresetKind
+    }
+
+    /// The live label: past tense once the lesson is being (or has been) performed.
+    var displayTitle: String {
+        if content.done, let doneTitle { return doneTitle }
+        return title
+    }
+}
+
+/// A container's idle behavior, part of its properties. Onboarding presets use it to suggest
+/// their gesture without any overlay UI or arrows — the motion is the arrow.
+enum IdleAnimation: Equatable {
+    case none
+    /// Periodic small left-right bounce — "this swipes".
+    case horizontalBounce
+    /// The container's top edge periodically reaches up toward the divider (scale from the
+    /// bottom) — "the boundary above me drags". The container itself doesn't travel.
+    case gapReach
+    /// Periodic slight shrink — "this pinches closed".
+    case shrinkPulse
+    /// The gap above periodically widens: this container's top edge retreats (scale from the
+    /// bottom) while the container above retreats upward in sync — "this space spreads open".
+    case gapBreathe
 }
 
 /// A container's mutable contents — the attachment point for whatever containers end up holding.
@@ -23,6 +64,9 @@ struct ContainerType: Identifiable {
 @Observable
 final class ContainerContent {
     let kind: Int
+    /// For lesson presets: flips true the moment the user is clearly performing the gesture,
+    /// which live-swaps the label to its past tense and stops the idle animation.
+    var done = false
 
     init(kind: Int) { self.kind = kind }
 
@@ -72,17 +116,121 @@ final class CarouselDeck {
     var reserve: [ContainerType]
     /// LIFO of removed lanes' container ids, so re-adding a lane restores the last one removed.
     var removedStack: [ContainerType.ID] = []
+    /// True for the dedicated first-launch onboarding ring, which holds nothing but lesson
+    /// containers and retires once the user edge-swipes away to their first real ring.
+    let isOnboarding: Bool
+    /// The spread lesson's shared idle pulse (1 at rest, briefly below): both sides of the gap
+    /// retreat from it in OPPOSITE directions, widening the space. Transient — never persisted.
+    var spreadPulse: CGFloat = 1
+    /// The drag lesson's shared idle pulse, in points: how far the taught boundary has shifted
+    /// up. Both sides follow it in the SAME direction — the lane above shrinks upward while the
+    /// lesson lane's top edge reaches up, so the divider visibly travels. Transient.
+    var dragPulse: CGFloat = 0
+    /// Set while the pinch lesson is scheduled but not yet on stage (the blank beat after
+    /// "Spread." leaves), so the edge lesson can't jump the queue in between. Transient.
+    var pinchLessonStaged = false
+    /// Extra divider height while a gap-label lesson needs room for its word. Animated model
+    /// state (not derived at render time) so divider growth and the compensating lane re-fit
+    /// share one transaction — the stack's total height never wavers. Set by the view layer.
+    var dividerBoost: CGFloat = 0
 
-    init(lanes: [Lane], reserve: [ContainerType], removedStack: [ContainerType.ID] = []) {
+    /// A lane's part in a gap lesson's idle animation (drag or spread), if any.
+    enum GapRole {
+        /// The lesson container itself (below the taught gap).
+        case lesson
+        /// The lane directly above the taught gap.
+        case above
+    }
+
+    func gapRole(of laneID: Lane.ID, lessonKind: Int) -> GapRole? {
+        guard let i = lanes.firstIndex(where: {
+            $0.current.kind == lessonKind && !$0.current.content.done
+        }) else { return nil }
+        if lanes[i].id == laneID { return .lesson }
+        if i > 0, lanes[i - 1].id == laneID { return .above }
+        return nil
+    }
+
+    /// Whether any lane shows a gap-label lesson (drag/spread) — those dividers grow to fit
+    /// the word.
+    var hasGapLabelLesson: Bool { lanes.contains { $0.current.usesGapLabel } }
+
+    init(
+        lanes: [Lane],
+        reserve: [ContainerType],
+        removedStack: [ContainerType.ID] = [],
+        isOnboarding: Bool = false
+    ) {
         self.lanes = lanes
         self.reserve = reserve
         self.removedStack = removedStack
+        self.isOnboarding = isOnboarding
     }
 
-    static func demo() -> CarouselDeck {
-        let all = ContainerType.demoPool()
-        let lanes = all.prefix(3).map { Lane(current: $0) }
-        return CarouselDeck(lanes: Array(lanes), reserve: Array(all.dropFirst(3)))
+    /// The dedicated onboarding ring: blank fillers around the "Swipe?" lesson, empty reserve so
+    /// nothing else swipes. Lessons chain — swipe → drag → spread → pinch → edge swipe — with
+    /// each finished lesson producing the next.
+    static func onboarding() -> CarouselDeck {
+        CarouselDeck(
+            lanes: [
+                Lane(current: .onboardingBlank()),
+                Lane(current: .onboardingSwipe()),
+                Lane(current: .onboardingBlank()),
+            ],
+            reserve: [],
+            isOnboarding: true
+        )
+    }
+
+    /// The edge-swipe lesson (the ring's final step) begins only once no lesson container is in
+    /// the lanes at all — a finished lesson still lingering ("Dragged.", "Spread."), mid-morph,
+    /// or staged-but-not-yet-shown keeps the stage to itself, so lessons appear strictly one at
+    /// a time.
+    var edgeLessonActive: Bool {
+        isOnboarding && !pinchLessonStaged && !lanes.contains { $0.current.isLessonPreset }
+    }
+
+    /// Mark the drag lesson as being performed (label flips to "Dragged.", idle stops).
+    func markDragLessonDone() {
+        for lane in lanes where lane.current.kind == ContainerType.dragPresetKind {
+            lane.current.content.done = true
+        }
+    }
+
+    var hasDoneDragLesson: Bool {
+        lanes.contains { $0.current.kind == ContainerType.dragPresetKind && $0.current.content.done }
+    }
+
+    /// The spread lesson still waiting to be performed, if any.
+    var pendingSpreadLesson: ContainerType? {
+        lanes.first {
+            $0.current.kind == ContainerType.spreadPresetKind && !$0.current.content.done
+        }?.current
+    }
+
+    /// Swap each finished drag preset for the spread lesson — its half of the zoom teaching.
+    func morphDoneDragIntoSpread() {
+        for i in lanes.indices
+        where lanes[i].current.kind == ContainerType.dragPresetKind && lanes[i].current.content.done {
+            lanes[i].current = .onboardingSpread()
+        }
+    }
+
+    /// A finished spread lesson goes blank once its moment has passed.
+    func morphDoneSpreadIntoBlank() {
+        for i in lanes.indices
+        where lanes[i].current.kind == ContainerType.spreadPresetKind && lanes[i].current.content.done {
+            lanes[i].current = .onboardingBlank()
+        }
+    }
+
+    /// The pinch lesson takes the stage only after "Spread." has left it: the spread gesture's
+    /// new lane arrives blank, then swaps to the pinch preset. No-op if that lane is gone
+    /// (pinching it away early already proved the lesson).
+    func placePinchLesson(replacing blankID: ContainerType.ID) {
+        pinchLessonStaged = false
+        guard let i = lanes.firstIndex(where: { $0.current.id == blankID }) else { return }
+        lanes[i].current = .onboardingPinch()
     }
 
     /// A brand-new ring: one lane showing catalog type 1, the rest of the catalog in reserve.
@@ -91,21 +239,31 @@ final class CarouselDeck {
         return CarouselDeck(lanes: [Lane(current: all[0])], reserve: Array(all.dropFirst()))
     }
 
-    /// Swipe-left commit: pull the right-edge container into the lane, push the old one off the left.
+    /// Swipe-left commit: pull the right-edge container into the lane, push the old one off the
+    /// left. A swiped-away onboarding preset hands its lane to its chain successor instead of
+    /// pulling from the reserve.
     func advance(laneID: Lane.ID) {
-        guard let i = lanes.firstIndex(where: { $0.id == laneID }), !reserve.isEmpty else { return }
-        let incoming = reserve.removeFirst()
+        guard let i = lanes.firstIndex(where: { $0.id == laneID }) else { return }
         let outgoing = lanes[i].current
-        lanes[i].current = incoming
+        if let fill = ContainerType.fillIn(after: outgoing) {
+            lanes[i].current = fill
+        } else {
+            guard !reserve.isEmpty else { return }
+            lanes[i].current = reserve.removeFirst()
+        }
         reserve.append(outgoing)
     }
 
     /// Swipe-right commit: pull the left-edge container into the lane, push the old one off the right.
     func retreat(laneID: Lane.ID) {
-        guard let i = lanes.firstIndex(where: { $0.id == laneID }), !reserve.isEmpty else { return }
-        let incoming = reserve.removeLast()
+        guard let i = lanes.firstIndex(where: { $0.id == laneID }) else { return }
         let outgoing = lanes[i].current
-        lanes[i].current = incoming
+        if let fill = ContainerType.fillIn(after: outgoing) {
+            lanes[i].current = fill
+        } else {
+            guard !reserve.isEmpty else { return }
+            lanes[i].current = reserve.removeLast()
+        }
         reserve.insert(outgoing, at: 0)
     }
 
@@ -127,6 +285,13 @@ final class CarouselDeck {
         reserve.append(container)
         removedStack.append(container.id)
     }
+
+    /// Drop a container from the off-screen reserve entirely. Onboarding presets retire this way
+    /// after being swiped: once the swipe is taught, they leave the ring instead of riding it.
+    func removeFromReserve(_ id: ContainerType.ID) {
+        reserve.removeAll { $0.id == id }
+    }
+
 }
 
 /// Which screen edge a ring swipe starts from — equivalently, which side of the current ring the
@@ -179,10 +344,62 @@ extension ContainerType {
         )
     }
 
-    /// Demo ring: all 15 catalog types, plus extra instances of type 6 so six 6's exist.
-    static func demoPool() -> [ContainerType] {
-        var pool = catalog()
-        for _ in 0..<5 { pool.append(entry(kind: 6)) }
-        return pool
+    static let swipePresetKind = 0
+    static let dragPresetKind = -1
+    static let blankPresetKind = -2
+    static let spreadPresetKind = -3
+    static let pinchPresetKind = -4
+
+    /// "Swipe?" — teaches the lane swipe with a horizontal idle bounce; retires once swiped.
+    static func onboardingSwipe(id: UUID = UUID()) -> ContainerType {
+        ContainerType(
+            id: id, kind: swipePresetKind, title: "Swipe?", color: .black,
+            content: .resolve(kind: swipePresetKind),
+            idle: .horizontalBounce, doneTitle: "Swiped."
+        )
     }
+
+    /// "Drag?" — label rides the divider gap it teaches; bounces vertically. Once dragged, it
+    /// morphs into the spread lesson (its half of the zoom teaching).
+    static func onboardingDrag(id: UUID = UUID()) -> ContainerType {
+        ContainerType(
+            id: id, kind: dragPresetKind, title: "Drag?", color: .black,
+            content: .resolve(kind: dragPresetKind),
+            idle: .gapReach, doneTitle: "Dragged."
+        )
+    }
+
+    /// "Spread?" — same gap label; the two-finger spread opens a new lane, which arrives already
+    /// holding the pinch lesson. Afterwards this container goes blank.
+    static func onboardingSpread(id: UUID = UUID()) -> ContainerType {
+        ContainerType(
+            id: id, kind: spreadPresetKind, title: "Spread?", color: .black,
+            content: .resolve(kind: spreadPresetKind),
+            idle: .gapBreathe, doneTitle: "Spread."
+        )
+    }
+
+    /// "Pinch?" — pulses slightly smaller; pinching its lane closed removes it for good.
+    static func onboardingPinch(id: UUID = UUID()) -> ContainerType {
+        ContainerType(
+            id: id, kind: pinchPresetKind, title: "Pinch?", color: .black,
+            content: .resolve(kind: pinchPresetKind),
+            idle: .shrinkPulse, doneTitle: "Pinched."
+        )
+    }
+
+    /// Unlabeled filler for the onboarding ring, so the tutorial reads clean and isolated.
+    static func onboardingBlank(id: UUID = UUID()) -> ContainerType {
+        ContainerType(
+            id: id, kind: blankPresetKind, title: "", color: .black,
+            content: .resolve(kind: blankPresetKind)
+        )
+    }
+
+    /// The onboarding chain: what fills a lane when a preset is swiped away, instead of pulling
+    /// from the reserve. Swiping "Swipe?" away brings in "Drag?"; everything else returns `nil`.
+    static func fillIn(after outgoing: ContainerType) -> ContainerType? {
+        outgoing.kind == swipePresetKind ? .onboardingDrag() : nil
+    }
+
 }

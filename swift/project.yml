@@ -16,13 +16,17 @@ targets:
           - Fonts
       - path: Mouse/Fonts/IBMPlexMono-Bold.ttf
         buildPhase: resources
+    # UIAppFonts has no INFOPLIST_KEY_* build setting, so it must come from a real Info.plist;
+    # Xcode merges this file with the generated one.
+    info:
+      path: Mouse/Info.plist
+      properties:
+        UIAppFonts: [IBMPlexMono-Bold.ttf]
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.reagentsystems.mouse.swift
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
-      INFOPLIST_KEY_UIAppFonts:
-        - IBMPlexMono-Bold.ttf
       ENABLE_PREVIEWS: YES
       TARGETED_DEVICE_FAMILY: "1,2"
       ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
