@@ -517,36 +517,60 @@ struct CarouselLane: View {
         let done: Bool
     }
 
+    /// One visible panel: the lane's current container or a reserve/preview edge beside it.
+    private struct SlotEntry {
+        let container: ContainerType
+        /// Where the panel rests relative to the lane (−w left edge, 0 current, +w right edge).
+        let restingOffset: CGFloat
+        let isCurrent: Bool
+    }
+
+    /// The visible trio, deduplicated by container id (a one-container reserve is both edges;
+    /// `ForEach` identity must stay unique).
+    private func slotEntries(width w: CGFloat) -> [SlotEntry] {
+        // A preset lane previews its chain successor at both edges (that's what a swipe will
+        // bring in — two distinct preview instances); ordinary lanes preview the reserve edges.
+        let leftEdge = ContainerType.fillIn(after: lane.current) ?? deck.reserve.last
+        let rightEdge = ContainerType.fillIn(after: lane.current) ?? deck.reserve.first
+        var entries: [SlotEntry] = []
+        if let leftEdge {
+            entries.append(SlotEntry(container: leftEdge, restingOffset: -w, isCurrent: false))
+        }
+        if let rightEdge, rightEdge.id != leftEdge?.id {
+            entries.append(SlotEntry(container: rightEdge, restingOffset: w, isCurrent: false))
+        }
+        // Current goes last so it draws above the edges. Never a duplicate: an instance lives in
+        // exactly one place (a lane or the reserve).
+        entries.append(SlotEntry(container: lane.current, restingOffset: 0, isCurrent: true))
+        return entries
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            // A preset lane previews its chain successor at both edges (that's what a swipe will
-            // bring in); ordinary lanes preview the ring's reserve edges.
-            let fill = ContainerType.fillIn(after: lane.current)
-            let rightEdge = fill ?? deck.reserve.first
-            let leftEdge = fill ?? deck.reserve.last
-
             let spreadRole = deck.gapRole(of: lane.id, lessonKind: ContainerType.spreadPresetKind)
             let dragRole = deck.gapRole(of: lane.id, lessonKind: ContainerType.dragPresetKind)
 
             ZStack {
-                if let leftEdge {
-                    panel(leftEdge, width: w, height: h).offset(x: drag - w)
+                // Identity follows the CONTAINER, not the slot: when a commit moves a container
+                // between slots (edge preview → current → outgoing edge), the same view instance
+                // just changes offset, keeping its loaded state — no unload flash at release.
+                // One uniform modifier chain for every slot, so identity survives the move.
+                ForEach(slotEntries(width: w), id: \.container.id) { entry in
+                    panel(entry.container, width: w, height: h)
+                        .scaleEffect(entry.isCurrent ? pulse : 1)
+                        // Spread: both sides of the gap retreat in OPPOSITE directions.
+                        .scaleEffect(x: 1, y: entry.isCurrent && spreadRole == .lesson ? deck.spreadPulse : 1, anchor: .bottom)
+                        .scaleEffect(x: 1, y: entry.isCurrent && spreadRole == .above ? deck.spreadPulse : 1, anchor: .top)
+                        // Drag: both sides move the SAME direction (the boundary itself travels).
+                        .scaleEffect(x: 1, y: entry.isCurrent && dragRole == .lesson ? (h + deck.dragPulse) / max(h, 1) : 1, anchor: .bottom)
+                        .scaleEffect(x: 1, y: entry.isCurrent && dragRole == .above ? (h - deck.dragPulse) / max(h, 1) : 1, anchor: .top)
+                        .offset(
+                            x: drag + (entry.isCurrent ? nudge.width : entry.restingOffset),
+                            y: entry.isCurrent ? nudge.height : 0
+                        )
                 }
-                if let rightEdge {
-                    panel(rightEdge, width: w, height: h).offset(x: drag + w)
-                }
-                panel(lane.current, width: w, height: h)
-                    .scaleEffect(pulse)
-                    // Spread: both sides of the gap retreat in OPPOSITE directions (gap widens).
-                    .scaleEffect(x: 1, y: spreadRole == .lesson ? deck.spreadPulse : 1, anchor: .bottom)
-                    .scaleEffect(x: 1, y: spreadRole == .above ? deck.spreadPulse : 1, anchor: .top)
-                    // Drag: both sides move the SAME direction (the boundary itself travels up):
-                    // the lesson's top edge reaches up while the lane above shrinks upward.
-                    .scaleEffect(x: 1, y: dragRole == .lesson ? (h + deck.dragPulse) / max(h, 1) : 1, anchor: .bottom)
-                    .scaleEffect(x: 1, y: dragRole == .above ? (h - deck.dragPulse) / max(h, 1) : 1, anchor: .top)
-                    .offset(x: drag + nudge.width, y: nudge.height)
 
                 if lane.current.usesGapLabel {
                     // The drag lesson's word rides the boundary as it travels; the spread word
@@ -573,7 +597,11 @@ struct CarouselLane: View {
             // drag if we merely queue behind it. The gesture enforces the law itself: it locks to
             // an axis at first movement and stands down for vertical drags, so content scrolls
             // vertically while horizontal swipes move the lane — from anywhere on the container.
-            .simultaneousGesture(swipe(width: w, hasLeft: leftEdge != nil, hasRight: rightEdge != nil))
+            .simultaneousGesture(swipe(
+                width: w,
+                hasLeft: ContainerType.fillIn(after: lane.current) != nil || !deck.reserve.isEmpty,
+                hasRight: ContainerType.fillIn(after: lane.current) != nil || !deck.reserve.isEmpty
+            ))
             .task(id: BounceKey(
                 container: lane.current.id,
                 idle: lane.current.idle,
