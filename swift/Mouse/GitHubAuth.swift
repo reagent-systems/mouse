@@ -25,6 +25,9 @@ final class GitHubAuth {
 
     private(set) var phase: Phase
 
+    /// The stored token, for other GitHub-backed features (repo downloads, later pushes).
+    var accessToken: String? { Keychain.string(for: "access-token") }
+
     private var signInTask: Task<Void, Never>?
 
     private init() {

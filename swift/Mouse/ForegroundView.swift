@@ -493,6 +493,10 @@ struct CarouselLane: View {
     }
 
     @State private var drag: CGFloat = 0
+    /// Which axis this drag locked to at first movement (the gesture-law arbiter).
+    @State private var dragAxis: DragAxis = .undecided
+
+    private enum DragAxis { case undecided, horizontal, vertical }
     /// Idle-bounce offset, driven by `runIdleBounce`. Kept separate from `drag` and always summed
     /// into the offset, so a drag can take over mid-nudge with no jump.
     @State private var nudge: CGSize = .zero
@@ -559,7 +563,11 @@ struct CarouselLane: View {
             .contentShape(Rectangle())
             // Gutter changes (edge lesson) glide instead of popping.
             .animation(.spring(response: 0.4, dampingFraction: 0.82), value: horizontalInset)
-            .gesture(swipe(width: w, hasLeft: leftEdge != nil, hasRight: rightEdge != nil))
+            // Simultaneous, because UIScrollView-backed content (Files tree, Viewer) claims every
+            // drag if we merely queue behind it. The gesture enforces the law itself: it locks to
+            // an axis at first movement and stands down for vertical drags, so content scrolls
+            // vertically while horizontal swipes move the lane — from anywhere on the container.
+            .simultaneousGesture(swipe(width: w, hasLeft: leftEdge != nil, hasRight: rightEdge != nil))
             .task(id: BounceKey(
                 container: lane.current.id,
                 idle: lane.current.idle,
@@ -618,7 +626,7 @@ struct CarouselLane: View {
     }
 
     private func panel(_ type: ContainerType, width: CGFloat, height: CGFloat) -> some View {
-        Panel(type: type, cornerRadius: cornerRadius)
+        Panel(type: type, cornerRadius: cornerRadius, deck: deck)
             .padding(.horizontal, horizontalInset)
             .frame(width: width, height: height)
     }
@@ -626,6 +634,14 @@ struct CarouselLane: View {
     private func swipe(width w: CGFloat, hasLeft: Bool, hasRight: Bool) -> some Gesture {
         DragGesture(minimumDistance: 10)
             .onChanged { value in
+                // Lock the drag to an axis at first movement: horizontal-dominant drags are lane
+                // swipes; vertical-dominant drags belong to the content (tree/file scrolling) and
+                // this gesture stands down for their whole duration.
+                if dragAxis == .undecided {
+                    dragAxis = abs(value.translation.width) >= abs(value.translation.height)
+                        ? .horizontal : .vertical
+                }
+                guard dragAxis == .horizontal else { return }
                 if nudge != .zero { withAnimation(.easeOut(duration: 0.15)) { nudge = .zero } }
                 if deck.spreadPulse != 1 { withAnimation(.easeOut(duration: 0.15)) { deck.spreadPulse = 1 } }
                 if deck.dragPulse != 0 { withAnimation(.easeOut(duration: 0.15)) { deck.dragPulse = 0 } }
@@ -637,6 +653,9 @@ struct CarouselLane: View {
                 }
             }
             .onEnded { value in
+                let axis = dragAxis
+                dragAxis = .undecided
+                guard axis == .horizontal else { return }
                 let threshold = w * 0.22
                 let t = value.translation.width
                 // The swipe preset retires once swiped away (after the slide settles); other
@@ -678,6 +697,8 @@ struct CarouselLane: View {
 struct Panel: View {
     let type: ContainerType
     let cornerRadius: CGFloat
+    /// The ring this panel belongs to, for containers that are windows onto its workspace.
+    var deck: CarouselDeck? = nil
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -687,6 +708,12 @@ struct Panel: View {
                 // doesn't move with idle animations); the panel itself stays blank for those.
                 if type.kind == ContainerType.gitHubKind {
                     GitHubSignInView()
+                } else if type.kind == ContainerType.filesKind, let deck {
+                    FilesContainerView(deck: deck)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.viewerKind {
+                    ViewerContainerView(workspace: deck?.workspace)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if !type.usesGapLabel {
                     Text(type.displayTitle)
                         .font(type.isOnboardingPreset

@@ -129,6 +129,9 @@ final class CarouselDeck {
     /// Set while the pinch lesson is scheduled but not yet on stage (the blank beat after
     /// "Spread." leaves), so the edge lesson can't jump the queue in between. Transient.
     var pinchLessonStaged = false
+    /// The ring's project. Containers are windows onto it: Files browses it, Viewer shows its
+    /// open file, and later Source Control and the terminal operate on it.
+    var workspace: Workspace?
     /// Extra divider height while a gap-label lesson needs room for its word. Animated model
     /// state (not derived at render time) so divider growth and the compensating lane re-fit
     /// share one transaction — the stack's total height never wavers. Set by the view layer.
@@ -338,14 +341,22 @@ extension ContainerType {
         return ContainerType(
             id: id,
             kind: k,
-            title: k == gitHubKind ? "GitHub" : "\(k)",
-            color: palette[(k - 1) % palette.count],
+            title: realTitles[k] ?? "\(k)",
+            color: realKinds.contains(k) ? .black : palette[(k - 1) % palette.count],
             content: .resolve(kind: k)
         )
     }
 
     /// Catalog kind 1 is the GitHub sign-in container (`GitHubSignInView` / `GitHubAuth`).
     static let gitHubKind = 1
+    /// Catalog kind 2 is the Files container: repo picker, then the working tree.
+    static let filesKind = 2
+    /// Catalog kind 3 is the Viewer container: the workspace's open file.
+    static let viewerKind = 3
+
+    /// Containers with real surfaces (they render their own content, terminal-styled black).
+    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind]
+    static let realTitles: [Int: String] = [gitHubKind: "GitHub", filesKind: "Files", viewerKind: "Viewer"]
 
     static let swipePresetKind = 0
     static let dragPresetKind = -1
