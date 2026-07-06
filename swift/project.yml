@@ -27,6 +27,11 @@ targets:
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+      # iPhone is portrait-locked (the layout is a vertical lane stack). iPad supports all
+      # orientations — required for multitasking — and clamps its window to an iPhone-sized
+      # minimum via UIWindowScene.sizeRestrictions (see MouseApp).
+      INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+      INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
       ENABLE_PREVIEWS: YES
       TARGETED_DEVICE_FAMILY: "1,2"
       ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES

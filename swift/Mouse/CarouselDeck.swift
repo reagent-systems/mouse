@@ -353,10 +353,14 @@ extension ContainerType {
     static let filesKind = 2
     /// Catalog kind 3 is the Viewer container: the workspace's open file.
     static let viewerKind = 3
+    /// Catalog kind 4 is the Graph container: the workspace's commit graph.
+    static let graphKind = 4
 
     /// Containers with real surfaces (they render their own content, terminal-styled black).
-    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind]
-    static let realTitles: [Int: String] = [gitHubKind: "GitHub", filesKind: "Files", viewerKind: "Viewer"]
+    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind, graphKind]
+    static let realTitles: [Int: String] = [
+        gitHubKind: "GitHub", filesKind: "Files", viewerKind: "Viewer", graphKind: "Graph",
+    ]
 
     static let swipePresetKind = 0
     static let dragPresetKind = -1

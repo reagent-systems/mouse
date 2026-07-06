@@ -346,8 +346,14 @@ struct ForegroundView: View {
     // MARK: - Height bookkeeping (keeps the deck filling `availableHeight`)
 
     private func configure(for height: CGFloat) {
+        let previous = availableHeight
         availableHeight = height
-        guard !didInit else { return }
+        if didInit {
+            // iPad rotation or a multitasking resize changed the window: re-fit the current ring
+            // proportionally (off-screen rings re-fit when they next slide in, via makeAdjacent).
+            if abs(previous - height) > 0.5 { refitLanes(in: deck) }
+            return
+        }
         // A restored ring may come back mid-lesson; its divider boost is view policy, so it's
         // re-derived here rather than persisted.
         deck.dividerBoost = deck.hasGapLabelLesson ? lessonDividerHeight - dividerHeight : 0
@@ -713,6 +719,9 @@ struct Panel: View {
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if type.kind == ContainerType.viewerKind {
                     ViewerContainerView(workspace: deck?.workspace)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.graphKind {
+                    GitGraphContainerView(workspace: deck?.workspace)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if !type.usesGapLabel {
                     Text(type.displayTitle)
