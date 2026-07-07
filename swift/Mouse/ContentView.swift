@@ -7,6 +7,10 @@ struct ContentView: View {
 
             ForegroundView()
         }
+        // The keyboard never moves the app: containers that take text input handle the keyboard
+        // themselves (the in-place editor scrolls its caret into view). Must sit at the root —
+        // any ancestor that respects the keyboard safe area would shift everything up.
+        .ignoresSafeArea(.keyboard)
     }
 }
 

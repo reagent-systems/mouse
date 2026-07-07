@@ -16,8 +16,9 @@ import SwiftUI
 /// that side, the swipe mints a fresh single-lane ring instead, so edge swipes both create rings
 /// and travel back to existing ones.
 ///
-/// Sizing uses `containerRelativeFrame` (measures the real window); a `GeometryReader` here reports
-/// an inflated size from the oversized ASCII art sibling in the `ZStack`.
+/// Sizing comes from the view's own proposal via `GeometryReader` — deliberately NOT
+/// `containerRelativeFrame`, which measures the window container that the keyboard shrinks at the
+/// source (bypassing `ignoresSafeArea` and shifting the whole app when typing begins).
 ///
 /// The strip persists across launches (`StripPersistence`): restored here at init, saved whenever
 /// the scene leaves the active phase.
@@ -78,30 +79,38 @@ struct ForegroundView: View {
     private let removeThreshold: CGFloat = 0.83
 
     var body: some View {
-        ZStack {
-            if let adjacent {
-                laneStack(for: adjacent.ring)
-                    .offset(x: ringDrag + (adjacent.side == .right ? availableWidth : -availableWidth))
+        // Sized by our own proposal (GeometryReader), NOT containerRelativeFrame: the latter
+        // measures the window's container, which the keyboard shrinks at the source — bypassing
+        // every ignoresSafeArea and shifting the whole app up. Our proposal comes through the
+        // keyboard-ignoring root in ContentView, so it never changes when the keyboard rises;
+        // rotation and iPad window resizes still flow through normally.
+        GeometryReader { geo in
+            ZStack {
+                if let adjacent {
+                    laneStack(for: adjacent.ring)
+                        .offset(x: ringDrag + (adjacent.side == .right ? availableWidth : -availableWidth))
+                }
+                laneStack(for: deck)
+                    .offset(x: ringDrag + edgeNudge)
             }
-            laneStack(for: deck)
-                .offset(x: ringDrag + edgeNudge)
-        }
-        .containerRelativeFrame([.horizontal, .vertical]) { length, axis in
-            if axis == .vertical, availableHeight != length {
-                DispatchQueue.main.async { configure(for: length) }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .simultaneousGesture(magnifyGesture)
+            .overlay(alignment: .leading) { edgeStrip(.left) }
+            .overlay(alignment: .trailing) { edgeStrip(.right) }
+            .task(id: edgeLessonVisible) { await runEdgeLessonNudge() }
+            .onAppear {
+                availableWidth = geo.size.width
+                configure(for: geo.size.height)
             }
-            if axis == .horizontal, availableWidth != length {
-                DispatchQueue.main.async { availableWidth = length }
+            .onChange(of: geo.size) { _, size in
+                if availableWidth != size.width { availableWidth = size.width }
+                configure(for: size.height)
             }
-            return length
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { StripPersistence.save(strip) }
+            }
         }
-        .simultaneousGesture(magnifyGesture)
-        .overlay(alignment: .leading) { edgeStrip(.left) }
-        .overlay(alignment: .trailing) { edgeStrip(.right) }
-        .task(id: edgeLessonVisible) { await runEdgeLessonNudge() }
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { StripPersistence.save(strip) }
-        }
+        .ignoresSafeArea(.keyboard)
     }
 
     /// Bring a ring's divider boost in line with its lessons and re-fit lane heights, in ONE

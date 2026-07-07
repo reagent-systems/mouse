@@ -208,63 +208,50 @@ private struct FileTreeView: View {
     }
 }
 
-/// The Viewer container (kind 3): shows the workspace's open file — mono, line numbers, wrapped
-/// lines (the gesture law leaves no horizontal panning, so lines wrap instead). Read-only in
-/// phase 1; syntax colors and editing come with the editor phase.
+/// The Viewer container (kind 3): the workspace's open file, edited in place. Tapping the text
+/// puts the caret there and raises the keyboard — no overlay, no mode; you're editing right in
+/// the lane. Changes autosave (debounced) and flush on file switches and backgrounding; drag
+/// the text downward to dismiss the keyboard. Vertical scroll and taps only, per the gesture
+/// law; lines wrap; the spacebar-trackpad steers the caret.
 struct ViewerContainerView: View {
     let workspace: Workspace?
 
-    @State private var document: Document?
+    @Environment(\.scenePhase) private var scenePhase
 
-    private struct Document {
-        let path: String
-        let lines: [String]
-        let note: String?
-    }
+    @State private var text = ""
+    @State private var note: String?
+    @State private var loadedURL: URL?
+    @State private var dirty = false
+    @State private var saveTask: Task<Void, Never>?
 
     var body: some View {
         Group {
             if let workspace, let path = workspace.openFilePath {
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
                     Text(path)
                         .font(.custom(AppFont.asciiName, size: 11))
                         .opacity(0.55)
                         .lineLimit(1)
-                        .padding(.bottom, 8)
-                    if let document, document.path == path {
-                        if let note = document.note {
-                            Text(note)
-                                .font(.custom(AppFont.asciiName, size: 13))
-                                .opacity(0.6)
-                                .padding(.top, 8)
-                        } else {
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 0) {
-                                    ForEach(document.lines.indices, id: \.self) { i in
-                                        HStack(alignment: .top, spacing: 10) {
-                                            Text("\(i + 1)")
-                                                .font(.custom(AppFont.asciiName, size: 11))
-                                                .opacity(0.3)
-                                                .frame(width: 34, alignment: .trailing)
-                                            Text(document.lines[i].isEmpty ? " " : document.lines[i])
-                                                .font(.custom(AppFont.asciiName, size: 12))
-                                                .opacity(0.92)
-                                        }
-                                    }
-                                }
-                                .padding(.bottom, 12)
-                            }
-                        }
-                    } else {
-                        Text("loading…")
+                    if let note {
+                        Text(note)
                             .font(.custom(AppFont.asciiName, size: 13))
-                            .opacity(0.55)
-                            .padding(.top, 8)
+                            .opacity(0.6)
+                        Spacer(minLength: 0)
+                    } else {
+                        TextEditor(text: $text)
+                            .font(.custom(AppFont.asciiName, size: 12))
+                            .foregroundStyle(.white)
+                            .scrollContentBackground(.hidden)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .keyboardType(.asciiCapable)
+                            .scrollDismissesKeyboard(.interactively)
+                            .onChange(of: text) { _, _ in markDirtyAndScheduleSave() }
                     }
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .task(id: workspace.root.path + "::" + path) { document = load(path, from: workspace) }
+                .task(id: workspace.root.path + "::" + path) { open(path, in: workspace) }
             } else {
                 Text("open a file in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))
@@ -273,27 +260,45 @@ struct ViewerContainerView: View {
             }
         }
         .foregroundStyle(.white)
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { flush() }
+        }
     }
 
-    private func load(_ path: String, from workspace: Workspace) -> Document {
+    private func open(_ path: String, in workspace: Workspace) {
+        flush()  // pending edits to the previous file land before switching
+        saveTask?.cancel()
         let url = workspace.root.appendingPathComponent(path)
         guard let data = try? Data(contentsOf: url) else {
-            return Document(path: path, lines: [], note: "couldn't read the file")
+            loadedURL = nil; note = "couldn't read the file"; return
         }
         guard data.count < 1_500_000 else {
-            return Document(path: path, lines: [], note: "file is too large to view (\(data.count / 1024) KB)")
+            loadedURL = nil; note = "file is too large to view (\(data.count / 1024) KB)"; return
         }
-        guard let text = String(data: data, encoding: .utf8)
+        guard let content = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1) else {
-            return Document(path: path, lines: [], note: "binary file")
+            loadedURL = nil; note = "binary file"; return
         }
-        var lines = text.components(separatedBy: "\n")
-        var note: String? = nil
-        if lines.count > 5000 {
-            lines = Array(lines.prefix(5000))
-            note = nil  // truncation is annotated on the last line instead
-            lines.append("… truncated at 5000 lines")
+        note = nil
+        text = content
+        dirty = false
+        loadedURL = url
+    }
+
+    private func markDirtyAndScheduleSave() {
+        guard loadedURL != nil else { return }
+        dirty = true
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .seconds(0.8))
+            guard !Task.isCancelled else { return }
+            flush()
         }
-        return Document(path: path, lines: lines, note: note)
+    }
+
+    private func flush() {
+        guard dirty, let loadedURL else { return }
+        try? text.write(to: loadedURL, atomically: true, encoding: .utf8)
+        dirty = false
     }
 }
