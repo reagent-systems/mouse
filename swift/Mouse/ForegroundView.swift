@@ -316,7 +316,12 @@ struct ForegroundView: View {
 
     /// Remove the lane whose center is closest to `y`; remaining lanes grow to refill the space.
     private func removeLane(nearY y: CGFloat) {
-        guard deck.lanes.count > 1 else { return }
+        // Pinching the LAST lane closes the whole ring (the strip's counterpart to edge swipes
+        // creating rings). The onboarding ring is exempt — its lessons manage their own lanes.
+        guard deck.lanes.count > 1 else {
+            removeCurrentRing()
+            return
+        }
         let removeIndex = nearestLaneIndex(toY: y)
         let released = deck.lanes[removeIndex].current
         let isPinchLesson = released.kind == ContainerType.pinchPresetKind
@@ -341,6 +346,24 @@ struct ForegroundView: View {
         } else {
             perform()
         }
+    }
+
+    /// Remove the current ring from the strip, landing on its left neighbour. The strip always
+    /// keeps at least one ring: removing the final one replaces it with a fresh ring.
+    private func removeCurrentRing() {
+        guard !deck.isOnboarding else { return }
+        let removed = strip.currentIndex
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
+            strip.rings.remove(at: removed)
+            if strip.rings.isEmpty {
+                strip.rings = [CarouselDeck.fresh()]
+                strip.currentIndex = 0
+            } else {
+                strip.currentIndex = min(max(removed - 1, 0), strip.rings.count - 1)
+            }
+        }
+        // The ring we landed on (or the fresh one) fits itself to the current window.
+        refitLanes(in: deck)
     }
 
     // MARK: - Height bookkeeping (keeps the deck filling `availableHeight`)
@@ -751,6 +774,9 @@ struct Panel: View {
                 } else if type.kind == ContainerType.graphKind {
                     GitGraphContainerView(workspace: deck?.workspace)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.terminalKind {
+                    TerminalContainerView(workspace: deck?.workspace)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if !type.usesGapLabel {
                     Text(type.displayTitle)
                         .font(type.isOnboardingPreset
@@ -764,6 +790,15 @@ struct Panel: View {
                 if type.isOnboardingPreset {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                // The container action stack: icons appear as their prerequisites are met.
+                // Nudged slightly further off the right edge than the top, by request.
+                if !type.isOnboardingPreset, let deck {
+                    ContainerActionsRow(deck: deck, cornerRadius: cornerRadius)
+                        .padding(.top, ContainerActionsRow.inset)
+                        .padding(.trailing, ContainerActionsRow.inset + 8)
                 }
             }
     }

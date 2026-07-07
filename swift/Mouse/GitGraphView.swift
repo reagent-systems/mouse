@@ -170,7 +170,7 @@ struct GitGraphContainerView: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .task(id: workspace.repoFullName) { await load(workspace.repoFullName) }
+                .task(id: workspace.repoFullName + "::t\(workspace.treeVersion)") { await load(workspace.repoFullName) }
             } else {
                 Text("open a repo in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))

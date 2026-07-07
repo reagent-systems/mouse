@@ -110,6 +110,8 @@ private struct RepoPickerView: View {
         Task {
             do {
                 try await Workspace.fetchAndExtract(repo.fullName, token: token)
+                let sha = try? await Workspace.remoteHeadSha(repo.fullName, token: token)
+                workspace.markSynced(to: sha)
                 workspace.finishReady()
             } catch {
                 workspace.finishFailed(error.localizedDescription)
@@ -221,7 +223,13 @@ struct ViewerContainerView: View {
     @State private var text = ""
     @State private var note: String?
     @State private var loadedURL: URL?
+    /// Which workspace/path `loadedURL` belongs to, so saves can mark the file as modified.
+    @State private var loadedWorkspace: Workspace?
+    @State private var loadedPath: String?
     @State private var dirty = false
+    /// Set when `text` is about to be assigned programmatically (loading a file), so the change
+    /// isn't mistaken for a user edit — viewing a file must never mark it modified.
+    @State private var suppressNextChange = false
     @State private var saveTask: Task<Void, Never>?
 
     var body: some View {
@@ -251,7 +259,7 @@ struct ViewerContainerView: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .task(id: workspace.root.path + "::" + path) { open(path, in: workspace) }
+                .task(id: workspace.root.path + "::" + path + "::t\(workspace.treeVersion)") { open(path, in: workspace) }
             } else {
                 Text("open a file in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))
@@ -268,6 +276,8 @@ struct ViewerContainerView: View {
     private func open(_ path: String, in workspace: Workspace) {
         flush()  // pending edits to the previous file land before switching
         saveTask?.cancel()
+        loadedWorkspace = workspace
+        loadedPath = path
         let url = workspace.root.appendingPathComponent(path)
         guard let data = try? Data(contentsOf: url) else {
             loadedURL = nil; note = "couldn't read the file"; return
@@ -280,12 +290,17 @@ struct ViewerContainerView: View {
             loadedURL = nil; note = "binary file"; return
         }
         note = nil
+        suppressNextChange = true
         text = content
         dirty = false
         loadedURL = url
     }
 
     private func markDirtyAndScheduleSave() {
+        if suppressNextChange {
+            suppressNextChange = false
+            return
+        }
         guard loadedURL != nil else { return }
         dirty = true
         saveTask?.cancel()
@@ -300,5 +315,189 @@ struct ViewerContainerView: View {
         guard dirty, let loadedURL else { return }
         try? text.write(to: loadedURL, atomically: true, encoding: .utf8)
         dirty = false
+        // The edit is on disk: surface the push action in the containers' icon row.
+        if let loadedWorkspace, let loadedPath { loadedWorkspace.markModified(loadedPath) }
+    }
+}
+
+/// The container's top-right action stack: a horizontal row of small round buttons tucked into
+/// the corner, each appearing only when its prerequisites are met. Actions so far: commit & push
+/// local edits (∧, shown once the workspace has modified files) and pull the latest tree from
+/// GitHub (∨, shown whenever a ready workspace and a GitHub session exist).
+struct ContainerActionsRow: View {
+    let deck: CarouselDeck
+    let cornerRadius: CGFloat
+
+    /// Inset from the container's corner.
+    static let inset: CGFloat = 8
+
+    @State private var askingPush = false
+    @State private var askingPull = false
+    @State private var commitMessage = ""
+
+    private var chipDiameter: CGFloat { 22 }
+
+    var body: some View {
+        if let workspace = deck.workspace, case .ready = workspace.phase,
+           case .signedIn = GitHubAuth.shared.phase {
+            HStack(spacing: 8) {
+                if workspace.hasChanges {
+                    pushButton(workspace)
+                }
+                if workspace.upstreamAvailable {
+                    pullButton(workspace)
+                }
+            }
+            .task(id: "\(workspace.repoFullName)#\(workspace.treeVersion)") {
+                // Discover upstream commits (throttled inside); decides the pull chip's fate.
+                if let token = GitHubAuth.shared.accessToken {
+                    await workspace.refreshUpstream(token: token)
+                }
+            }
+        }
+    }
+
+    // MARK: - Push (∧)
+
+    private func pushButton(_ workspace: Workspace) -> some View {
+        Button {
+            commitMessage = ""
+            askingPush = true
+        } label: {
+            chip(state: workspace.pushState, pointingUp: true)
+        }
+        .disabled(isBusy(workspace.pushState))
+        .alert(pushTitle(workspace), isPresented: $askingPush) {
+            TextField("Commit message", text: $commitMessage)
+                .textInputAutocapitalization(.sentences)
+            Button("Commit & Push") { push(workspace) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if case .failed(let reason) = workspace.pushState {
+                Text("Last attempt failed: \(reason)")
+            }
+        }
+    }
+
+    private func pushTitle(_ workspace: Workspace) -> String {
+        let count = workspace.modifiedPaths.count
+        return "Commit \(count) file\(count == 1 ? "" : "s") to \(workspace.repoFullName)"
+    }
+
+    private func push(_ workspace: Workspace) {
+        guard let token = GitHubAuth.shared.accessToken else { return }
+        let count = workspace.modifiedPaths.count
+        let message = commitMessage.isEmpty
+            ? "Edit \(count) file\(count == 1 ? "" : "s") from Mouse"
+            : commitMessage
+        let paths = Array(workspace.modifiedPaths)
+        workspace.pushState = .pushing
+        Task {
+            do {
+                let commitSha = try await GitHubPush.push(
+                    repo: workspace.repoFullName,
+                    root: workspace.root,
+                    paths: paths,
+                    message: message,
+                    token: token
+                )
+                workspace.clearModified()
+                workspace.markSynced(to: commitSha)
+                workspace.pushState = .idle
+            } catch {
+                workspace.pushState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: - Pull (∨)
+
+    private func pullButton(_ workspace: Workspace) -> some View {
+        Button {
+            askingPull = true
+        } label: {
+            chip(state: workspace.pullState, pointingUp: false)
+        }
+        .disabled(isBusy(workspace.pullState))
+        .alert(pullTitle(workspace), isPresented: $askingPull) {
+            Button(workspace.hasChanges ? "Discard & Pull" : "Pull", role: workspace.hasChanges ? .destructive : nil) {
+                pull(workspace)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if case .failed(let reason) = workspace.pullState {
+                Text("Last attempt failed: \(reason)")
+            } else if workspace.hasChanges {
+                Text("Replaces the working tree — your \(workspace.modifiedPaths.count) unpushed edit\(workspace.modifiedPaths.count == 1 ? "" : "s") will be lost.")
+            }
+        }
+    }
+
+    private func pullTitle(_ workspace: Workspace) -> String {
+        "Pull the latest \(workspace.repoFullName)"
+    }
+
+    private func pull(_ workspace: Workspace) {
+        guard let token = GitHubAuth.shared.accessToken else { return }
+        workspace.pullState = .pushing
+        Task {
+            do {
+                try await Workspace.fetchAndExtract(workspace.repoFullName, token: token)
+                let sha = try? await Workspace.remoteHeadSha(workspace.repoFullName, token: token)
+                workspace.markSynced(to: sha)
+                workspace.clearModified()
+                workspace.treeVersion += 1  // file views reload against the new tree
+                workspace.pullState = .idle
+            } catch {
+                workspace.pullState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: - Chip
+
+    private func isBusy(_ state: Workspace.PushState) -> Bool {
+        if case .pushing = state { return true }
+        return false
+    }
+
+    private func chip(state: Workspace.PushState, pointingUp: Bool) -> some View {
+        Group {
+            switch state {
+            case .pushing:
+                ProgressView().tint(.white).scaleEffect(0.5)
+            case .failed:
+                ChevronGlyph(pointingUp: pointingUp)
+                    .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(.red)
+                    .frame(width: 7.5, height: 4.5)
+            case .idle:
+                ChevronGlyph(pointingUp: pointingUp)
+                    .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(.white)
+                    .frame(width: 7.5, height: 4.5)
+            }
+        }
+        .frame(width: chipDiameter, height: chipDiameter)
+        .background(.white.opacity(0.16), in: Circle())
+    }
+}
+
+/// A hand-drawn /\ (or \/) — two strokes meeting at a point, matching the app's ascii language.
+struct ChevronGlyph: Shape {
+    let pointingUp: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        if pointingUp {
+            path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        } else {
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        }
+        return path
     }
 }

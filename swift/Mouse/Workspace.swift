@@ -14,6 +14,28 @@ final class Workspace {
     let root: URL
     /// Path (relative to `root`) of the file the ring's viewer container shows.
     var openFilePath: String?
+    /// Relative paths edited locally since the last successful push — the prerequisite that
+    /// surfaces the push action in the containers' top-right icon row. Persisted.
+    private(set) var modifiedPaths: Set<String> = []
+    /// The push action's in-flight state (never persisted).
+    var pushState: PushState = .idle
+    /// The pull action's in-flight state (never persisted).
+    var pullState: PushState = .idle
+    /// Bumped when the working tree is replaced wholesale (a pull), so file views reload.
+    var treeVersion = 0
+    /// The ring's terminal session — scrollback and cwd live with the project.
+    let terminal: TerminalSession
+    /// The remote head sha the local tree was last synced to (download, pull, or our own push).
+    private(set) var syncedSha: String?
+    /// True when the remote has commits we haven't pulled — the pull chip's prerequisite.
+    private(set) var upstreamAvailable = false
+    private var lastUpstreamCheck: Date?
+
+    enum PushState {
+        case idle
+        case pushing
+        case failed(String)
+    }
 
     enum Phase {
         case downloading
@@ -23,13 +45,53 @@ final class Workspace {
 
     private(set) var phase: Phase
 
+    var hasChanges: Bool { !modifiedPaths.isEmpty }
+
+    /// The local tree now matches this remote sha; nothing upstream until proven otherwise.
+    func markSynced(to sha: String?) {
+        syncedSha = sha
+        upstreamAvailable = false
+        lastUpstreamCheck = nil
+    }
+
+    /// Compare the remote head against `syncedSha` (throttled to once a minute).
+    @MainActor
+    func refreshUpstream(token: String) async {
+        if let last = lastUpstreamCheck, Date().timeIntervalSince(last) < 60 { return }
+        lastUpstreamCheck = Date()
+        guard let head = try? await Workspace.remoteHeadSha(repoFullName, token: token) else { return }
+        upstreamAvailable = head != syncedSha
+    }
+
+    /// The sha of the default branch's latest commit.
+    static func remoteHeadSha(_ repoFullName: String, token: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repoFullName)/commits?per_page=1")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw TarGz.ExtractError("GitHub returned \(http.statusCode) checking the remote head")
+        }
+        guard let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let sha = list.first?["sha"] as? String else {
+            throw TarGz.ExtractError("couldn't read the remote head")
+        }
+        return sha
+    }
+
+    func markModified(_ path: String) { modifiedPaths.insert(path) }
+    func clearModified() { modifiedPaths = [] }
+
     /// Reopen an already-downloaded workspace (the restore path). Fails if the tree is gone.
-    init?(existing repoFullName: String, openFilePath: String? = nil) {
+    init?(existing repoFullName: String, openFilePath: String? = nil, modifiedPaths: [String] = [], syncedSha: String? = nil) {
         let dir = Self.directory(for: repoFullName)
         guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
         self.repoFullName = repoFullName
         self.root = dir
         self.openFilePath = openFilePath
+        self.modifiedPaths = Set(modifiedPaths)
+        self.syncedSha = syncedSha
+        self.terminal = TerminalSession(root: dir)
         self.phase = .ready
     }
 
@@ -37,6 +99,7 @@ final class Workspace {
     init(downloading repoFullName: String) {
         self.repoFullName = repoFullName
         self.root = Self.directory(for: repoFullName)
+        self.terminal = TerminalSession(root: Self.directory(for: repoFullName))
         self.phase = .downloading
     }
 

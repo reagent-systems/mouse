@@ -355,11 +355,14 @@ extension ContainerType {
     static let viewerKind = 3
     /// Catalog kind 4 is the Graph container: the workspace's commit graph.
     static let graphKind = 4
+    /// Catalog kind 5 is the Terminal container: a native command dispatcher on the workspace.
+    static let terminalKind = 5
 
     /// Containers with real surfaces (they render their own content, terminal-styled black).
-    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind, graphKind]
+    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind, graphKind, terminalKind]
     static let realTitles: [Int: String] = [
         gitHubKind: "GitHub", filesKind: "Files", viewerKind: "Viewer", graphKind: "Graph",
+        terminalKind: "Terminal",
     ]
 
     static let swipePresetKind = 0
