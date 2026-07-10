@@ -527,6 +527,12 @@ struct CarouselLane: View {
     @State private var drag: CGFloat = 0
     /// Which axis this drag locked to at first movement (the gesture-law arbiter).
     @State private var dragAxis: DragAxis = .undecided
+    /// True from the moment a swipe locks horizontal until its settle animation finishes. Edge
+    /// panels render only while this is set: at rest each lane costs ONE live panel, not three.
+    /// Real containers (trees, editors, graphs) are heavy, and every lane previews the same
+    /// reserve edges — mounting them all permanently multiplied the whole ring's view count by
+    /// three (and an edge swipe, which renders a second ring, by six).
+    @State private var edgesMounted = false
 
     private enum DragAxis { case undecided, horizontal, vertical }
     /// Idle-bounce offset, driven by `runIdleBounce`. Kept separate from `drag` and always summed
@@ -552,8 +558,14 @@ struct CarouselLane: View {
     }
 
     /// The visible trio, deduplicated by container id (a one-container reserve is both edges;
-    /// `ForEach` identity must stay unique).
+    /// `ForEach` identity must stay unique). At rest only the current panel is realized; the
+    /// edges join when a swipe starts and leave once it settles. The current container keeps its
+    /// identity through a commit either way, so the no-reload-flash guarantee is untouched — an
+    /// incoming edge mounts at the first drag tick, while it's still a full width off screen.
     private func slotEntries(width w: CGFloat) -> [SlotEntry] {
+        guard edgesMounted else {
+            return [SlotEntry(container: lane.current, restingOffset: 0, isCurrent: true)]
+        }
         // A preset lane previews its chain successor at both edges (that's what a swipe will
         // bring in — two distinct preview instances); ordinary lanes preview the reserve edges.
         let leftEdge = ContainerType.fillIn(after: lane.current) ?? deck.reserve.last
@@ -702,6 +714,7 @@ struct CarouselLane: View {
                         ? .horizontal : .vertical
                 }
                 guard dragAxis == .horizontal else { return }
+                if !edgesMounted { edgesMounted = true }
                 if nudge != .zero { withAnimation(.easeOut(duration: 0.15)) { nudge = .zero } }
                 if deck.spreadPulse != 1 { withAnimation(.easeOut(duration: 0.15)) { deck.spreadPulse = 1 } }
                 if deck.dragPulse != 0 { withAnimation(.easeOut(duration: 0.15)) { deck.dragPulse = 0 } }
@@ -726,7 +739,12 @@ struct CarouselLane: View {
                 } else if t >= threshold, hasLeft {
                     commit(restingAt: drag - w, retiring: retiring) { deck.retreat(laneID: lane.id) }
                 } else {
-                    withAnimation(.snappy(duration: 0.2)) { drag = 0 }
+                    withAnimation(.snappy(duration: 0.2), completionCriteria: .logicallyComplete) {
+                        drag = 0
+                    } completion: {
+                        // Skip the unmount if a fresh drag took over mid-settle.
+                        if drag == 0 { edgesMounted = false }
+                    }
                 }
             }
     }
@@ -749,6 +767,9 @@ struct CarouselLane: View {
                 drag = 0
             } completion: {
                 if let retiring { deck.removeFromReserve(retiring) }
+                // Skip the unmount if a fresh drag took over mid-settle (out-swiping the
+                // animation); the new gesture's own settle handles it.
+                if drag == 0 { edgesMounted = false }
             }
         }
     }

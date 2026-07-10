@@ -182,6 +182,14 @@ Changes to the ring/lane system this branch needed:
   right edge) renders through a `ForEach` keyed on **container id** with one uniform modifier
   chain — a swipe commit moves the same view instances to new offsets instead of rebuilding
   them, so loaded state (tree, file, graph) survives and nothing flashes at release.
+- **Lazy edge panels** (working tree): the trio's edges mount only while a swipe is in flight
+  (`edgesMounted` — set when a drag locks horizontal, cleared when the settle finishes). At
+  rest a lane costs one live panel instead of three; since every lane previews the same
+  reserve edges, permanent mounting had multiplied the ring's live view count (trees, text
+  editors, graphs) by three — and an edge swipe, which renders a second ring beside the
+  current one, by six. That was the edge-swipe memory doubling and hitch. An incoming edge
+  mounts at the first drag tick, a full width off screen, and shared `FileBuffer`s /
+  `Workspace` caches make its content appearance instant, so the no-flash guarantee holds.
 - **Axis-locked lane swipes** (`e6bb111`): UIScrollView-backed content claims every drag, so
   the lane swipe attaches as a *simultaneous* gesture and arbitrates itself — each drag locks
   to an axis at first movement; horizontal drives the lane, vertical stands down for content
