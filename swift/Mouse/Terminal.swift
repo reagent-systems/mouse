@@ -30,7 +30,7 @@ final class TerminalSession {
         (cwd.isEmpty ? "~" : "~/" + cwd) + " $"
     }
 
-    func run(_ raw: String, workspace: Workspace?) {
+    func run(_ raw: String, workspace: Workspace?, deck: CarouselDeck?) {
         let command = raw.trimmingCharacters(in: .whitespaces)
         append("\(prompt) \(command)", .command)
         guard !command.isEmpty else { return }
@@ -54,7 +54,7 @@ final class TerminalSession {
         case "tail": headTail(parts, fromStart: false)
         case "find": find(parts.first)
         case "grep": grep(parts)
-        case "open": open(parts.first, workspace: workspace)
+        case "open": open(parts.first, workspace: workspace, deck: deck)
         case "git", "npm", "pnpm", "node", "npx":
             append("\(name): not built yet — the native \(name == "git" ? "git" : "package") engine is on the roadmap", .error)
         default:
@@ -236,14 +236,14 @@ final class TerminalSession {
         append(results.isEmpty ? "no matches" : results.joined(separator: "\n"), .output)
     }
 
-    private func open(_ arg: String?, workspace: Workspace?) {
+    private func open(_ arg: String?, workspace: Workspace?, deck: CarouselDeck?) {
         guard let arg, let target = resolve(arg) else { return badPath(arg) }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: target.url.path, isDirectory: &isDirectory),
               !isDirectory.boolValue else {
             return append("open: not a file: \(display(target.rel))", .error)
         }
-        workspace?.openFilePath = target.rel
+        deck?.openFile(target.rel)
         append("opened \(display(target.rel)) in the viewer", .output)
     }
 
@@ -277,14 +277,15 @@ final class TerminalSession {
 }
 
 struct TerminalContainerView: View {
-    let workspace: Workspace?
+    let deck: CarouselDeck?
 
     @State private var promptFocused = false
 
     var body: some View {
         Group {
-            if let workspace {
-                let terminal = workspace.terminal
+            if let deck, let workspace = deck.workspace {
+                // The ring's OWN session: rings sharing a repo get separate terminals.
+                let terminal = deck.terminal(for: workspace)
                 VStack(alignment: .leading, spacing: 6) {
                     // Bottom-anchored like a chat: content sticks to the bottom as output
                     // arrives, with no manual scrollTo to miscompute against unlaid-out lines
@@ -305,7 +306,7 @@ struct TerminalContainerView: View {
                             .font(.custom(AppFont.asciiName, size: 12))
                             .opacity(0.7)
                         TerminalPromptField(isFocused: $promptFocused) { command in
-                            terminal.run(command, workspace: workspace)
+                            terminal.run(command, workspace: workspace, deck: deck)
                         }
                         .frame(maxWidth: .infinity)
                         .frame(height: 22)

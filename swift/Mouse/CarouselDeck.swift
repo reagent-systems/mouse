@@ -130,8 +130,32 @@ final class CarouselDeck {
     /// "Spread." leaves), so the edge lesson can't jump the queue in between. Transient.
     var pinchLessonStaged = false
     /// The ring's project. Containers are windows onto it: Files browses it, Viewer shows its
-    /// open file, and later Source Control and the terminal operate on it.
+    /// open file, and later Source Control and the terminal operate on it. Workspaces are shared
+    /// (one per repo, app-wide) — project truth lives there; VIEWPORT state lives on the ring.
     var workspace: Workspace?
+    /// Which file THIS ring's viewer shows. Per-ring by design: rings sharing a repo share
+    /// files/git/graph but keep their own open file, so swiping between rings is switching
+    /// between editors on the same project.
+    var openFilePath: String?
+    @ObservationIgnored private var ringTerminal: TerminalSession?
+
+    /// Choose the file this ring's viewer shows; the shared buffer for it loads immediately
+    /// (off screen), so the viewer renders complete on its first frame.
+    func openFile(_ path: String?) {
+        openFilePath = path
+        if let path, let workspace {
+            _ = FileBuffer.shared(for: workspace, path: path)
+        }
+    }
+
+    /// This ring's own terminal session on the (possibly shared) workspace — separate scrollback
+    /// and cwd per ring. Memoized; rebuilt if the ring later opens a different repo.
+    func terminal(for workspace: Workspace) -> TerminalSession {
+        if let ringTerminal, ringTerminal.root == workspace.root { return ringTerminal }
+        let session = TerminalSession(root: workspace.root)
+        ringTerminal = session
+        return session
+    }
     /// Extra divider height while a gap-label lesson needs room for its word. Animated model
     /// state (not derived at render time) so divider growth and the compensating lane re-fit
     /// share one transaction — the stack's total height never wavers. Set by the view layer.

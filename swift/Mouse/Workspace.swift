@@ -1,8 +1,9 @@
 import Foundation
 import Compression
 
-/// A ring's project: a working tree on local disk plus the cross-container state that makes the
-/// ring's containers windows onto one thing (the file the viewer shows, later git state).
+/// A project: a working tree on local disk plus the shared project state (dirty set, sync
+/// state, graph cache). One instance per repo, app-wide — rings VIEW workspaces; per-ring
+/// viewport state (open file, terminal session) lives on `CarouselDeck`.
 ///
 /// Phase 1 acquires the working tree from GitHub's tarball API (authenticated by `GitHubAuth`) and
 /// extracts it natively — no git binary dependency yet. The Source Control phase brings libgit2,
@@ -12,8 +13,6 @@ import Compression
 final class Workspace {
     let repoFullName: String
     let root: URL
-    /// Path (relative to `root`) of the file the ring's viewer container shows.
-    var openFilePath: String?
     /// Relative paths edited locally since the last successful push — the prerequisite that
     /// surfaces the push action in the containers' top-right icon row. Persisted.
     private(set) var modifiedPaths: Set<String> = []
@@ -23,8 +22,13 @@ final class Workspace {
     var pullState: PushState = .idle
     /// Bumped when the working tree is replaced wholesale (a pull), so file views reload.
     var treeVersion = 0
-    /// The ring's terminal session — scrollback and cwd live with the project.
-    let terminal: TerminalSession
+    /// Commit-graph data, loaded in the background (fully off screen) so the Graph container
+    /// renders instantly on swipe-in. Refreshed when the tree or the synced head changes.
+    private(set) var graphRows: [GraphRow]?
+    private(set) var graphTips: [String: String] = [:]
+    private(set) var graphError: String?
+    private var historyStamp: String?
+    private var historyInFlight = false
     /// The remote head sha the local tree was last synced to (download, pull, or our own push).
     private(set) var syncedSha: String?
     /// True when the remote has commits we haven't pulled — the pull chip's prerequisite.
@@ -47,11 +51,89 @@ final class Workspace {
 
     var hasChanges: Bool { !modifiedPaths.isEmpty }
 
+    // MARK: - One workspace per repo, shared across rings
+
+    /// One `Workspace` per repo, app-wide: rings that open the same repo hold the SAME object,
+    /// so the tree, dirty set, sync state, and graph cache stay in step — while each ring keeps
+    /// its own open file and terminal (viewport state, on the deck). Same pattern as
+    /// `ContainerContent`'s synced kinds and `GitHubAuth.shared`. Main-thread only.
+    nonisolated(unsafe) private static var byRepo: [String: Workspace] = [:]
+
+    /// The shared workspace for a repo: the live instance if any ring already has it, else a
+    /// ready one if its tree is on disk from before, else a fresh one awaiting download.
+    static func shared(for repoFullName: String) -> Workspace {
+        if let live = byRepo[repoFullName] { return live }
+        let fresh = Workspace(existing: repoFullName) ?? Workspace(downloading: repoFullName)
+        byRepo[repoFullName] = fresh
+        return fresh
+    }
+
+    /// Restore path: the shared workspace, seeded with persisted state if it isn't live yet
+    /// (a second ring restoring the same repo just gets the first ring's instance).
+    static func shared(
+        existing repoFullName: String,
+        modifiedPaths: [String],
+        syncedSha: String?
+    ) -> Workspace? {
+        if let live = byRepo[repoFullName] { return live }
+        guard let fresh = Workspace(
+            existing: repoFullName,
+            modifiedPaths: modifiedPaths,
+            syncedSha: syncedSha
+        ) else { return nil }
+        byRepo[repoFullName] = fresh
+        return fresh
+    }
+
+    /// True while a tree download is running (a second ring attaching mid-download shares it).
+    private(set) var fetchInFlight = false
+
+    /// Download (or retry) the tree into this shared workspace. No-op when already ready or
+    /// when a fetch is in flight.
+    @MainActor
+    func startDownload(token: String) {
+        if case .ready = phase { return }
+        guard !fetchInFlight else { return }
+        fetchInFlight = true
+        phase = .downloading
+        Task {
+            do {
+                try await Workspace.fetchAndExtract(repoFullName, token: token)
+                let sha = try? await Workspace.remoteHeadSha(repoFullName, token: token)
+                markSynced(to: sha)
+                phase = .ready
+            } catch {
+                phase = .failed(error.localizedDescription)
+            }
+            fetchInFlight = false
+        }
+    }
+
     /// The local tree now matches this remote sha; nothing upstream until proven otherwise.
     func markSynced(to sha: String?) {
         syncedSha = sha
         upstreamAvailable = false
         lastUpstreamCheck = nil
+    }
+
+    /// Fetch and lay out the commit graph if the cached copy is missing or stale (the tree or
+    /// synced head moved since it was built). Runs regardless of whether the Graph is visible.
+    @MainActor
+    func refreshHistory(token: String) async {
+        let stamp = "\(treeVersion)|\(syncedSha ?? "?")"
+        guard !historyInFlight else { return }
+        guard historyStamp != stamp || graphRows == nil else { return }
+        historyInFlight = true
+        defer { historyInFlight = false }
+        do {
+            let history = try await GitGraph.fetchHistory(repo: repoFullName, token: token)
+            graphRows = GitGraph.layout(history.commits)
+            graphTips = history.branchTips
+            graphError = nil
+            historyStamp = stamp
+        } catch {
+            if graphRows == nil { graphError = error.localizedDescription }
+        }
     }
 
     /// Compare the remote head against `syncedSha` (throttled to once a minute).
@@ -82,29 +164,24 @@ final class Workspace {
     func markModified(_ path: String) { modifiedPaths.insert(path) }
     func clearModified() { modifiedPaths = [] }
 
-    /// Reopen an already-downloaded workspace (the restore path). Fails if the tree is gone.
-    init?(existing repoFullName: String, openFilePath: String? = nil, modifiedPaths: [String] = [], syncedSha: String? = nil) {
+    /// Reopen an already-downloaded workspace. Fails if the tree is gone. Private: all creation
+    /// goes through the shared registry above.
+    private init?(existing repoFullName: String, modifiedPaths: [String] = [], syncedSha: String? = nil) {
         let dir = Self.directory(for: repoFullName)
         guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
         self.repoFullName = repoFullName
         self.root = dir
-        self.openFilePath = openFilePath
         self.modifiedPaths = Set(modifiedPaths)
         self.syncedSha = syncedSha
-        self.terminal = TerminalSession(root: dir)
         self.phase = .ready
     }
 
-    /// A workspace whose download is in flight; call `finishReady`/`finishFailed` when it lands.
-    init(downloading repoFullName: String) {
+    /// A workspace awaiting download. Private: all creation goes through the shared registry.
+    private init(downloading repoFullName: String) {
         self.repoFullName = repoFullName
         self.root = Self.directory(for: repoFullName)
-        self.terminal = TerminalSession(root: Self.directory(for: repoFullName))
         self.phase = .downloading
     }
-
-    @MainActor func finishReady() { phase = .ready }
-    @MainActor func finishFailed(_ message: String) { phase = .failed(message) }
 
     static func directory(for repoFullName: String) -> URL {
         let safe = repoFullName.replacingOccurrences(of: "/", with: "__")

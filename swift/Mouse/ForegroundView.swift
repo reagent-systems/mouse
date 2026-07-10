@@ -100,7 +100,10 @@ struct ForegroundView: View {
         .overlay(alignment: .trailing) { edgeStrip(.right) }
         .task(id: edgeLessonVisible) { await runEdgeLessonNudge() }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { StripPersistence.save(strip) }
+            if phase != .active {
+                FileBuffer.flushAll()  // pending edits in every open buffer, any ring
+                StripPersistence.save(strip)
+            }
         }
     }
 
@@ -769,13 +772,13 @@ struct Panel: View {
                     FilesContainerView(deck: deck)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if type.kind == ContainerType.viewerKind {
-                    ViewerContainerView(workspace: deck?.workspace)
+                    ViewerContainerView(deck: deck)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if type.kind == ContainerType.graphKind {
                     GitGraphContainerView(workspace: deck?.workspace)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if type.kind == ContainerType.terminalKind {
-                    TerminalContainerView(workspace: deck?.workspace)
+                    TerminalContainerView(deck: deck)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if !type.usesGapLabel {
                     Text(type.displayTitle)

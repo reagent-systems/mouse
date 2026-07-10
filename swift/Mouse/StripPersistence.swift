@@ -84,7 +84,7 @@ extension CarouselDeck {
             removedStack: removedStack,
             isOnboarding: isOnboarding ? true : nil,
             workspaceRepo: workspace?.repoFullName,
-            openFile: workspace?.openFilePath,
+            openFile: openFilePath,
             workspaceDirty: workspace.map { Array($0.modifiedPaths).sorted() },
             workspaceSyncedSha: workspace?.syncedSha
         )
@@ -100,12 +100,12 @@ extension CarouselDeck {
         // Reattach the workspace if its tree is still on disk; otherwise the Files container
         // falls back to the repo picker.
         if let repo = snapshot.workspaceRepo {
-            workspace = Workspace(
+            workspace = Workspace.shared(
                 existing: repo,
-                openFilePath: snapshot.openFile,
                 modifiedPaths: snapshot.workspaceDirty ?? [],
                 syncedSha: snapshot.workspaceSyncedSha
             )
+            openFile(snapshot.openFile)
         }
     }
 }

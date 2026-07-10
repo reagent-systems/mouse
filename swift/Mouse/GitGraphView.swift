@@ -139,10 +139,6 @@ enum GitGraph {
 struct GitGraphContainerView: View {
     let workspace: Workspace?
 
-    @State private var rows: [GraphRow]?
-    @State private var branchTips: [String: String] = [:]
-    @State private var loadError: String?
-
     private let laneWidth: CGFloat = 14
     private let rowHeight: CGFloat = 34
 
@@ -154,13 +150,18 @@ struct GitGraphContainerView: View {
                         .font(.custom(AppFont.asciiName, size: 11))
                         .opacity(0.55)
                         .padding(.bottom, 8)
-                    if let loadError {
-                        Text(loadError)
+                    if let rows = workspace.graphRows {
+                        graph(rows, tips: workspace.graphTips)
+                    } else if let error = workspace.graphError {
+                        Text(error)
                             .font(.custom(AppFont.asciiName, size: 13))
                             .opacity(0.85)
                             .padding(.top, 8)
-                    } else if let rows {
-                        graph(rows)
+                    } else if GitHubAuth.shared.accessToken == nil {
+                        Text("sign in with the GitHub container first")
+                            .font(.custom(AppFont.asciiName, size: 13))
+                            .opacity(0.55)
+                            .padding(.top, 8)
                     } else {
                         Text("loading…")
                             .font(.custom(AppFont.asciiName, size: 13))
@@ -170,7 +171,13 @@ struct GitGraphContainerView: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .task(id: workspace.repoFullName + "::t\(workspace.treeVersion)") { await load(workspace.repoFullName) }
+                .task(id: workspace.repoFullName + "::t\(workspace.treeVersion)") {
+                    // Fallback kick (deduped inside) — normally the action row has already
+                    // loaded this long before the Graph is on screen.
+                    if let token = GitHubAuth.shared.accessToken {
+                        await workspace.refreshHistory(token: token)
+                    }
+                }
             } else {
                 Text("open a repo in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))
@@ -181,7 +188,7 @@ struct GitGraphContainerView: View {
         .foregroundStyle(.white)
     }
 
-    private func graph(_ rows: [GraphRow]) -> some View {
+    private func graph(_ rows: [GraphRow], tips: [String: String]) -> some View {
         let laneCount = min(rows.map { max($0.lanesBefore.count, $0.lanesAfter.count) }.max() ?? 1, 8)
         let railsWidth = CGFloat(laneCount) * laneWidth + 4
         return ScrollView {
@@ -192,7 +199,7 @@ struct GitGraphContainerView: View {
                             .frame(width: railsWidth, height: rowHeight)
                         VStack(alignment: .leading, spacing: 1) {
                             HStack(spacing: 6) {
-                                if let tip = branchTips[row.commit.sha] {
+                                if let tip = tips[row.commit.sha] {
                                     Text(tip)
                                         .font(.custom(AppFont.asciiName, size: 10))
                                         .padding(.horizontal, 6)
@@ -270,17 +277,4 @@ struct GitGraphContainerView: View {
         }
     }
 
-    private func load(_ repo: String) async {
-        guard let token = GitHubAuth.shared.accessToken else {
-            loadError = "sign in with the GitHub container first"
-            return
-        }
-        do {
-            let history = try await GitGraph.fetchHistory(repo: repo, token: token)
-            rows = GitGraph.layout(history.commits)
-            branchTips = history.branchTips
-        } catch {
-            loadError = error.localizedDescription
-        }
-    }
 }
