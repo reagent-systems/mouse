@@ -204,33 +204,14 @@ private struct FileTreeView: View {
     }
 }
 
-/// A live document: one buffer per file, app-wide, shared by every view of it. Rings opening
-/// the same file bind to the SAME buffer, so a keystroke in one ring is instantly the other's
-/// content — Google-Docs behavior with zero merge machinery, because on one device there is
-/// only one replica (OT/CRDTs earn their keep only when devices sync over a network). Loaded
-/// the moment a file is CHOSEN (tree tap, terminal `open`, restore), never when a view appears,
-/// so edge-swiped rings render complete on their first frame. Owns dirty state and autosave.
-/// Main-thread only; `@unchecked Sendable` exists solely so the debounced-save Task may capture
-/// it — the task body hops back to the main actor.
+/// A ring's editor buffer: the open file's contents, loaded the moment the file is CHOSEN
+/// (tree tap, terminal `open`, restore) rather than when the viewer appears — so edge-swiping
+/// a ring on screen shows the file instantly, with the load already done off screen. Also owns
+/// dirty state and the debounced autosave, which now survive the view unmounting.
+/// Main-thread only (all access is from SwiftUI / the deck); `@unchecked Sendable` exists solely
+/// so the debounced-save Task may capture it — the task body hops back to the main actor.
 @Observable
-final class FileBuffer: @unchecked Sendable {
-    /// One buffer per (workspace, file), app-wide. Never evicts, like the other registries.
-    nonisolated(unsafe) private static var byFile: [String: FileBuffer] = [:]
-
-    /// The shared buffer for a file, loading it on first request.
-    static func shared(for workspace: Workspace, path: String) -> FileBuffer {
-        let key = workspace.root.path + "::" + path
-        if let live = byFile[key] { return live }
-        let fresh = FileBuffer()
-        fresh.load(path: path, workspace: workspace)
-        byFile[key] = fresh
-        return fresh
-    }
-
-    /// Pending edits in every open buffer land on disk (backgrounding, any ring, mounted or not).
-    static func flushAll() {
-        byFile.values.forEach { $0.flush() }
-    }
+final class RingFileBuffer: @unchecked Sendable {
     var text = ""
     private(set) var note: String?
     private(set) var loadedURL: URL?
@@ -277,15 +258,11 @@ final class FileBuffer: @unchecked Sendable {
         loadedURL = url
     }
 
-    /// Defensive sync for the viewer: reload when the tree was replaced by a pull (discarding
-    /// local edits — the pull already warned about that; flushing first would overwrite the
-    /// pulled file with stale text) or, defensively, when the selection changed without `load`.
+    /// Defensive sync for the viewer: (re)load if the selection changed without `load` (or the
+    /// tree was replaced by a pull since this buffer loaded). No-op when already current.
     func ensure(path: String, workspace: Workspace) {
-        if workspace.treeVersion != loadedTreeVersion, loadedPath == path, loadedWorkspace === workspace {
-            dirty = false
-            saveTask?.cancel()
-            load(path: path, workspace: workspace)
-        } else if loadedPath != path || loadedWorkspace !== workspace {
+        if loadedPath != path || loadedWorkspace !== workspace
+            || workspace.treeVersion != loadedTreeVersion {
             load(path: path, workspace: workspace)
         }
     }
@@ -326,7 +303,7 @@ struct ViewerContainerView: View {
     var body: some View {
         Group {
             if let deck, let workspace = deck.workspace, let path = deck.openFilePath {
-                @Bindable var buffer = FileBuffer.shared(for: workspace, path: path)
+                @Bindable var buffer = deck.fileBuffer
                 VStack(alignment: .leading, spacing: 8) {
                     Text(path)
                         .font(.custom(AppFont.asciiName, size: 11))
@@ -365,7 +342,7 @@ struct ViewerContainerView: View {
         }
         .foregroundStyle(.white)
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { FileBuffer.flushAll() }
+            if phase != .active { deck?.fileBuffer.flush() }
         }
     }
 }
