@@ -100,7 +100,10 @@ struct ForegroundView: View {
         .overlay(alignment: .trailing) { edgeStrip(.right) }
         .task(id: edgeLessonVisible) { await runEdgeLessonNudge() }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { StripPersistence.save(strip) }
+            if phase != .active {
+                FileBuffer.flushAll()  // pending edits in every open buffer, any ring
+                StripPersistence.save(strip)
+            }
         }
     }
 
@@ -316,7 +319,12 @@ struct ForegroundView: View {
 
     /// Remove the lane whose center is closest to `y`; remaining lanes grow to refill the space.
     private func removeLane(nearY y: CGFloat) {
-        guard deck.lanes.count > 1 else { return }
+        // Pinching the LAST lane closes the whole ring (the strip's counterpart to edge swipes
+        // creating rings). The onboarding ring is exempt — its lessons manage their own lanes.
+        guard deck.lanes.count > 1 else {
+            removeCurrentRing()
+            return
+        }
         let removeIndex = nearestLaneIndex(toY: y)
         let released = deck.lanes[removeIndex].current
         let isPinchLesson = released.kind == ContainerType.pinchPresetKind
@@ -343,11 +351,35 @@ struct ForegroundView: View {
         }
     }
 
+    /// Remove the current ring from the strip, landing on its left neighbour. The strip always
+    /// keeps at least one ring: removing the final one replaces it with a fresh ring.
+    private func removeCurrentRing() {
+        guard !deck.isOnboarding else { return }
+        let removed = strip.currentIndex
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
+            strip.rings.remove(at: removed)
+            if strip.rings.isEmpty {
+                strip.rings = [CarouselDeck.fresh()]
+                strip.currentIndex = 0
+            } else {
+                strip.currentIndex = min(max(removed - 1, 0), strip.rings.count - 1)
+            }
+        }
+        // The ring we landed on (or the fresh one) fits itself to the current window.
+        refitLanes(in: deck)
+    }
+
     // MARK: - Height bookkeeping (keeps the deck filling `availableHeight`)
 
     private func configure(for height: CGFloat) {
+        let previous = availableHeight
         availableHeight = height
-        guard !didInit else { return }
+        if didInit {
+            // iPad rotation or a multitasking resize changed the window: re-fit the current ring
+            // proportionally (off-screen rings re-fit when they next slide in, via makeAdjacent).
+            if abs(previous - height) > 0.5 { refitLanes(in: deck) }
+            return
+        }
         // A restored ring may come back mid-lesson; its divider boost is view policy, so it's
         // re-derived here rather than persisted.
         deck.dividerBoost = deck.hasGapLabelLesson ? lessonDividerHeight - dividerHeight : 0
@@ -493,6 +525,10 @@ struct CarouselLane: View {
     }
 
     @State private var drag: CGFloat = 0
+    /// Which axis this drag locked to at first movement (the gesture-law arbiter).
+    @State private var dragAxis: DragAxis = .undecided
+
+    private enum DragAxis { case undecided, horizontal, vertical }
     /// Idle-bounce offset, driven by `runIdleBounce`. Kept separate from `drag` and always summed
     /// into the offset, so a drag can take over mid-nudge with no jump.
     @State private var nudge: CGSize = .zero
@@ -507,36 +543,60 @@ struct CarouselLane: View {
         let done: Bool
     }
 
+    /// One visible panel: the lane's current container or a reserve/preview edge beside it.
+    private struct SlotEntry {
+        let container: ContainerType
+        /// Where the panel rests relative to the lane (−w left edge, 0 current, +w right edge).
+        let restingOffset: CGFloat
+        let isCurrent: Bool
+    }
+
+    /// The visible trio, deduplicated by container id (a one-container reserve is both edges;
+    /// `ForEach` identity must stay unique).
+    private func slotEntries(width w: CGFloat) -> [SlotEntry] {
+        // A preset lane previews its chain successor at both edges (that's what a swipe will
+        // bring in — two distinct preview instances); ordinary lanes preview the reserve edges.
+        let leftEdge = ContainerType.fillIn(after: lane.current) ?? deck.reserve.last
+        let rightEdge = ContainerType.fillIn(after: lane.current) ?? deck.reserve.first
+        var entries: [SlotEntry] = []
+        if let leftEdge {
+            entries.append(SlotEntry(container: leftEdge, restingOffset: -w, isCurrent: false))
+        }
+        if let rightEdge, rightEdge.id != leftEdge?.id {
+            entries.append(SlotEntry(container: rightEdge, restingOffset: w, isCurrent: false))
+        }
+        // Current goes last so it draws above the edges. Never a duplicate: an instance lives in
+        // exactly one place (a lane or the reserve).
+        entries.append(SlotEntry(container: lane.current, restingOffset: 0, isCurrent: true))
+        return entries
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            // A preset lane previews its chain successor at both edges (that's what a swipe will
-            // bring in); ordinary lanes preview the ring's reserve edges.
-            let fill = ContainerType.fillIn(after: lane.current)
-            let rightEdge = fill ?? deck.reserve.first
-            let leftEdge = fill ?? deck.reserve.last
-
             let spreadRole = deck.gapRole(of: lane.id, lessonKind: ContainerType.spreadPresetKind)
             let dragRole = deck.gapRole(of: lane.id, lessonKind: ContainerType.dragPresetKind)
 
             ZStack {
-                if let leftEdge {
-                    panel(leftEdge, width: w, height: h).offset(x: drag - w)
+                // Identity follows the CONTAINER, not the slot: when a commit moves a container
+                // between slots (edge preview → current → outgoing edge), the same view instance
+                // just changes offset, keeping its loaded state — no unload flash at release.
+                // One uniform modifier chain for every slot, so identity survives the move.
+                ForEach(slotEntries(width: w), id: \.container.id) { entry in
+                    panel(entry.container, width: w, height: h)
+                        .scaleEffect(entry.isCurrent ? pulse : 1)
+                        // Spread: both sides of the gap retreat in OPPOSITE directions.
+                        .scaleEffect(x: 1, y: entry.isCurrent && spreadRole == .lesson ? deck.spreadPulse : 1, anchor: .bottom)
+                        .scaleEffect(x: 1, y: entry.isCurrent && spreadRole == .above ? deck.spreadPulse : 1, anchor: .top)
+                        // Drag: both sides move the SAME direction (the boundary itself travels).
+                        .scaleEffect(x: 1, y: entry.isCurrent && dragRole == .lesson ? (h + deck.dragPulse) / max(h, 1) : 1, anchor: .bottom)
+                        .scaleEffect(x: 1, y: entry.isCurrent && dragRole == .above ? (h - deck.dragPulse) / max(h, 1) : 1, anchor: .top)
+                        .offset(
+                            x: drag + (entry.isCurrent ? nudge.width : entry.restingOffset),
+                            y: entry.isCurrent ? nudge.height : 0
+                        )
                 }
-                if let rightEdge {
-                    panel(rightEdge, width: w, height: h).offset(x: drag + w)
-                }
-                panel(lane.current, width: w, height: h)
-                    .scaleEffect(pulse)
-                    // Spread: both sides of the gap retreat in OPPOSITE directions (gap widens).
-                    .scaleEffect(x: 1, y: spreadRole == .lesson ? deck.spreadPulse : 1, anchor: .bottom)
-                    .scaleEffect(x: 1, y: spreadRole == .above ? deck.spreadPulse : 1, anchor: .top)
-                    // Drag: both sides move the SAME direction (the boundary itself travels up):
-                    // the lesson's top edge reaches up while the lane above shrinks upward.
-                    .scaleEffect(x: 1, y: dragRole == .lesson ? (h + deck.dragPulse) / max(h, 1) : 1, anchor: .bottom)
-                    .scaleEffect(x: 1, y: dragRole == .above ? (h - deck.dragPulse) / max(h, 1) : 1, anchor: .top)
-                    .offset(x: drag + nudge.width, y: nudge.height)
 
                 if lane.current.usesGapLabel {
                     // The drag lesson's word rides the boundary as it travels; the spread word
@@ -559,7 +619,15 @@ struct CarouselLane: View {
             .contentShape(Rectangle())
             // Gutter changes (edge lesson) glide instead of popping.
             .animation(.spring(response: 0.4, dampingFraction: 0.82), value: horizontalInset)
-            .gesture(swipe(width: w, hasLeft: leftEdge != nil, hasRight: rightEdge != nil))
+            // Simultaneous, because UIScrollView-backed content (Files tree, Viewer) claims every
+            // drag if we merely queue behind it. The gesture enforces the law itself: it locks to
+            // an axis at first movement and stands down for vertical drags, so content scrolls
+            // vertically while horizontal swipes move the lane — from anywhere on the container.
+            .simultaneousGesture(swipe(
+                width: w,
+                hasLeft: ContainerType.fillIn(after: lane.current) != nil || !deck.reserve.isEmpty,
+                hasRight: ContainerType.fillIn(after: lane.current) != nil || !deck.reserve.isEmpty
+            ))
             .task(id: BounceKey(
                 container: lane.current.id,
                 idle: lane.current.idle,
@@ -618,7 +686,7 @@ struct CarouselLane: View {
     }
 
     private func panel(_ type: ContainerType, width: CGFloat, height: CGFloat) -> some View {
-        Panel(type: type, cornerRadius: cornerRadius)
+        Panel(type: type, cornerRadius: cornerRadius, deck: deck)
             .padding(.horizontal, horizontalInset)
             .frame(width: width, height: height)
     }
@@ -626,6 +694,24 @@ struct CarouselLane: View {
     private func swipe(width w: CGFloat, hasLeft: Bool, hasRight: Bool) -> some Gesture {
         DragGesture(minimumDistance: 10)
             .onChanged { value in
+                // Lock the drag to an axis at first movement: horizontal-dominant drags are lane
+                // swipes; vertical-dominant drags belong to the content (tree/file scrolling) and
+                // this gesture stands down for their whole duration.
+                if dragAxis == .undecided {
+                    // The gesture law's keyboard clause: while the editor is focused, every drag
+                    // on it is a text interaction (selection handles, caret) — the shell stands
+                    // down whatever the direction. Without this, dragging a highlight also drove
+                    // the lane: a full stack re-render per frame and a container swap at release.
+                    // Other lanes and the screen-edge strips keep their swipes; tapping outside
+                    // dismisses the keyboard and returns this lane's swipe to the shell.
+                    if deck.editorFocused && lane.current.kind == ContainerType.viewerKind {
+                        dragAxis = .vertical
+                    } else {
+                        dragAxis = abs(value.translation.width) >= abs(value.translation.height)
+                            ? .horizontal : .vertical
+                    }
+                }
+                guard dragAxis == .horizontal else { return }
                 if nudge != .zero { withAnimation(.easeOut(duration: 0.15)) { nudge = .zero } }
                 if deck.spreadPulse != 1 { withAnimation(.easeOut(duration: 0.15)) { deck.spreadPulse = 1 } }
                 if deck.dragPulse != 0 { withAnimation(.easeOut(duration: 0.15)) { deck.dragPulse = 0 } }
@@ -637,6 +723,9 @@ struct CarouselLane: View {
                 }
             }
             .onEnded { value in
+                let axis = dragAxis
+                dragAxis = .undecided
+                guard axis == .horizontal else { return }
                 let threshold = w * 0.22
                 let t = value.translation.width
                 // The swipe preset retires once swiped away (after the slide settles); other
@@ -678,6 +767,8 @@ struct CarouselLane: View {
 struct Panel: View {
     let type: ContainerType
     let cornerRadius: CGFloat
+    /// The ring this panel belongs to, for containers that are windows onto its workspace.
+    var deck: CarouselDeck? = nil
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -685,7 +776,21 @@ struct Panel: View {
             .overlay {
                 // Gap-label lessons render their label in the lane (outside the container, so it
                 // doesn't move with idle animations); the panel itself stays blank for those.
-                if !type.usesGapLabel {
+                if type.kind == ContainerType.gitHubKind {
+                    GitHubSignInView()
+                } else if type.kind == ContainerType.filesKind, let deck {
+                    FilesContainerView(deck: deck)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.viewerKind {
+                    ViewerContainerView(deck: deck)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.graphKind {
+                    GitGraphContainerView(workspace: deck?.workspace)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.terminalKind {
+                    TerminalContainerView(deck: deck)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if !type.usesGapLabel {
                     Text(type.displayTitle)
                         .font(type.isOnboardingPreset
                             ? .custom(AppFont.asciiName, size: 28)
@@ -698,6 +803,15 @@ struct Panel: View {
                 if type.isOnboardingPreset {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .strokeBorder(.white.opacity(0.35), lineWidth: 1)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                // The container action stack: icons appear as their prerequisites are met.
+                // Nudged slightly further off the right edge than the top, by request.
+                if !type.isOnboardingPreset, let deck {
+                    ContainerActionsRow(deck: deck, cornerRadius: cornerRadius)
+                        .padding(.top, ContainerActionsRow.inset)
+                        .padding(.trailing, ContainerActionsRow.inset + 8)
                 }
             }
     }

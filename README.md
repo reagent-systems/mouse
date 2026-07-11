@@ -1,105 +1,110 @@
 # Mouse
 
-**Mouse** is a mobile and desktop client for working in **GitHub Codespaces** with AI agents: sign in with GitHub, pick or create a Codespace, connect through a small **relay**, and use an in-app terminal plus agent composer.
+**A coding IDE built for a phone — not shrunk from a desktop.**
 
-Repository: **[github.com/reagent-systems/mouse](https://github.com/reagent-systems/mouse)**
-
-## Features
-
-- **GitHub device flow** — Sign in from the phone or desktop without embedding secrets in the app.
-- **Codespaces** — List, create, start, and connect to Codespaces backed by your GitHub App or classic OAuth app.
-- **Terminal** — xterm.js session over WebSocket, bridged by [`@mouse-app/relay`](https://www.npmjs.com/package/@mouse-app/relay) running inside the Codespace.
-- **AI agents** — Composer and stack UI for agents (e.g. OpenCode) relayed through the same connection.
-- **Native shells** — **Capacitor** for iOS/Android (including native HTTP for GitHub APIs in the WebView) and **Electron** for desktop.
-
-## Stack
-
-| Layer | Technology |
-| ----- | ---------- |
-| UI & logic | TypeScript, Vite |
-| Terminal | xterm.js |
-| Mobile | Capacitor 8 (`@capacitor/ios`, `@capacitor/android`) |
-| Desktop | Electron |
-| Auth | GitHub Device Flow (`src/auth/GitHubAuth.ts`) |
-| Codespaces API | REST (`src/codespaces/CodespacesApi.ts`) |
-
-## Prerequisites
-
-- **Node.js 18+**
-- **npm**
-- For **iOS**: Xcode and CocoaPods / SPM as required by Capacitor
-- For **Android**: Android Studio / SDK as required by Capacitor
-- A **GitHub account** with **Codespaces** access and a configured **GitHub App** (or OAuth app) for the client — see below
-
-## Quick start
-
-This project uses **pnpm** (pinned via `packageManager`; supply-chain hardened —
-dependency build scripts are blocked unless allow-listed in `pnpm-workspace.yaml`).
-
-```bash
-git clone https://github.com/reagent-systems/mouse.git
-cd mouse
-corepack enable           # activates the pinned pnpm version
-pnpm install
-cp .env.example .env
-# Edit .env: VITE_GITHUB_CLIENT_ID, VITE_GITHUB_APP_SLUG (for GitHub App mode), etc.
-pnpm run dev
-```
-
-Open the URL Vite prints (typically `http://localhost:5173`).
-
-### GitHub configuration
-
-Mouse needs a **Client ID** and, for **GitHub App** sign-in, an app **install** on your account and **`VITE_GITHUB_APP_SLUG`** so the in-app install step can open the right GitHub URL.
-
-Copy **`.env.example`** to **`.env`**, fill in the variables, then restart dev or rebuild:
-
-```bash
-npm run build
-```
-
-Details and troubleshooting (Codespaces permissions, `Resource not accessible by integration`, OAuth vs GitHub App) are documented in **`.env.example`**.
-
-### Codespaces & the relay
-
-GitHub does not expose a raw terminal stream to arbitrary third-party apps. Mouse connects to **`@mouse-app/relay`** on port **2222** inside the Codespace (forwarded to `*.app.github.dev`).
-
-- **npm package:** [`@mouse-app/relay`](https://www.npmjs.com/package/@mouse-app/relay) — see [`relay/README.md`](relay/README.md).
-- **Auto-start:** This repo includes [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json) so the relay can start automatically when you open a Codespace for **this** repository. For other projects, merge the snippet from the app’s “Relay” setup screen or the relay README into your own `.devcontainer`.
-
-## Scripts
-
-| Command | Description |
-| ------- | ----------- |
-| `npm run dev` | Vite dev server |
-| `npm run build` | Typecheck + production bundle to `dist/` |
-| `npm run preview` | Preview the production build |
-| `npm run electron:dev` | Electron + Vite (desktop dev) |
-| `npm run electron:dist` | Build a desktop installer (see `electron-builder` config in `package.json`) |
-| `npm run cap:sync` | Build + `cap sync` (web assets into `ios/` / `android/`) |
-| `npm run cap:ios:sim` | Sync + build and run on a pinned iOS Simulator (see `package.json`) |
-| `npm run cap:open:ios` / `cap:open:android` | Open native projects in Xcode / Android Studio |
-
-## Project layout
+Mouse is a native iOS app where an entire development environment lives in a
+gesture-driven shell: you swipe between editors, pinch workspaces open and
+closed, and edit files with the file itself, right in place. It talks to
+GitHub directly — sign in, clone, edit, commit, push, pull — with no server,
+no git binary, and no dependencies beyond the platform.
 
 ```
-src/
-  app.ts              # App shell: auth → codespace picker → main (stack + bottom bar)
-  auth/               # GitHub device flow, install gate, AuthGate UI
-  codespaces/         # Codespace picker, GitHub API helpers, relay snippet
-  terminal/           # Relay WebSocket, xterm view
-  modules/            # Module stack, agent modules, code editor view
-  components/         # Bottom bar, etc.
-relay/                # Publishable @mouse-app/relay package (PTY WebSocket bridge)
-electron/             # Electron main process
-ios/ / android/       # Capacitor native projects (generated/synced)
+　C・プ
+＼(　）
+  ｀｀
 ```
 
-## Contributing
+## The interaction model
 
-Issues and pull requests are welcome in this repository. For UI work, follow the
-design system in [`STYLEGUIDE.md`](STYLEGUIDE.md).
+The screen is a window onto a **ring** of containers, split into horizontal
+**lanes**. A strip of rings extends off both edges of the screen. One law
+decides every input conflict between the shell and container content:
+
+> **One-finger horizontal drags and all two-finger gestures belong to the
+> shell, everywhere. Content gets taps, vertical scrolling, and the keyboard.**
+
+| Gesture | What it does |
+|---|---|
+| Horizontal drag on a lane | Swipe to the next/previous container on the ring |
+| Drag from a screen edge | Swipe the whole ring — travel between rings, or mint a new one |
+| Drag a divider | Resize the two adjacent lanes |
+| Two-finger spread / pinch | Open / close a lane; pinching the last lane closes the ring |
+| Tap, vertical scroll, keyboard | The container's — trees scroll, editors edit, terminals type |
+
+A ring holds one project (a **workspace**). Its containers are windows onto
+that project: Files browses it, the Viewer edits its open file, the Graph
+shows its history, the Terminal runs commands in it. Two rings on the same
+repo share one workspace — same tree, same git state — but keep their own
+open file and terminal, so swiping between rings is switching between editors
+on the same project. Two rings on the same **file** share one live document:
+keystrokes in one are instantly the other's content.
+
+The full interaction and architecture reference lives in
+[swift/README.md](swift/README.md).
+
+## What works today
+
+- **Onboarding ring** — the gestures teach themselves; motion is the arrow
+- **GitHub sign-in** — OAuth Device Flow, tokens in the Keychain
+- **Workspaces** — clone any of your repos via the tarball API, extracted by
+  a from-scratch native tar/gzip reader
+- **Files** — lazy tree, tap to open
+- **Editor** — in-place editing with a floating keyboard that never shifts
+  the app, debounced autosave, live shared buffers across rings
+- **Commit graph** — branch rails, merges, tips, drawn like a desktop client
+- **Terminal** — native command dispatcher (`ls`, `cat`, `grep`, `open`, …)
+  scoped to the workspace
+- **Push & pull** — corner action chips: one real commit via the Git Data
+  API; pull with upstream detection
+- **Persistence** — the whole strip survives force-quit and relaunch
+- iPhone (portrait) and iPad (all orientations, iPhone-sized minimum window)
+
+## Building
+
+Requirements: macOS with **Xcode 16+** and **[xcodegen](https://github.com/yonaskolb/XcodeGen)**
+(`brew install xcodegen`).
+
+```sh
+cd swift
+xcodegen generate      # regenerates Mouse.xcodeproj from project.yml
+open Mouse.xcodeproj   # build & run the Mouse scheme
+```
+
+Or headless:
+
+```sh
+xcodebuild -project swift/Mouse.xcodeproj -scheme Mouse \
+  -destination 'generic/platform=iOS Simulator' build
+```
+
+The project file is generated — edit [swift/project.yml](swift/project.yml),
+never the `.xcodeproj`, and re-run `xcodegen generate` after adding, removing,
+or renaming source files.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| [swift/](swift/) | The app. `project.yml` is the project definition; `Mouse/` is all sources |
+| [swift/README.md](swift/README.md) | Deep reference: gestures, containers, architecture |
+| [DESIGN.md](DESIGN.md) | The design language — surfaces, type, motion, voice |
+| [ROADMAP.md](ROADMAP.md) | The vision: product branches, each absorbing a desktop product |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to work on Mouse |
+| [AGENTS.md](AGENTS.md) | The contract for AI agents (and a landmine map for humans) |
+| [sketches/](sketches/) | Design history — screenshots of the idea finding its shape |
+
+## Status & direction
+
+Pre-release and moving fast. The shell, GitHub round-trip, and editing are
+real and daily-drivable; git is still API-backed (libgit2 is next). The
+larger vision is a gesture shell that absorbs the jobs of whole desktop
+products — VS Code first (that's this branch), then Cursor, n8n, Figma, and
+more — each developed on its own **product branch**. The map is in
+[ROADMAP.md](ROADMAP.md).
+
+Mouse is **iOS/iPadOS native only**, by decision: no Android port, no web
+build, no cross-platform framework. Expect sharp edges.
 
 ## License
 
-No `LICENSE` file is present in the tree yet; add one to make terms explicit for contributors and distributors.
+[MIT](LICENSE) © Reagent Systems and Mouse contributors.

@@ -28,6 +28,13 @@ struct RingSnapshot: Codable {
     var removedStack: [UUID]
     /// Set for the dedicated onboarding ring. Absent for ordinary rings.
     var isOnboarding: Bool?
+    /// The ring's workspace repo ("owner/name") and its open file, when a project is attached.
+    var workspaceRepo: String?
+    var openFile: String?
+    /// Locally edited paths not yet pushed to GitHub.
+    var workspaceDirty: [String]?
+    /// The remote head sha the tree was last synced to.
+    var workspaceSyncedSha: String?
 }
 
 struct LaneSnapshot: Codable {
@@ -75,7 +82,11 @@ extension CarouselDeck {
             lanes: lanes.map { LaneSnapshot(container: $0.current.snapshot(), height: $0.height) },
             reserve: reserve.map { $0.snapshot() },
             removedStack: removedStack,
-            isOnboarding: isOnboarding ? true : nil
+            isOnboarding: isOnboarding ? true : nil,
+            workspaceRepo: workspace?.repoFullName,
+            openFile: openFilePath,
+            workspaceDirty: workspace.map { Array($0.modifiedPaths).sorted() },
+            workspaceSyncedSha: workspace?.syncedSha
         )
     }
 
@@ -86,6 +97,16 @@ extension CarouselDeck {
             removedStack: snapshot.removedStack,
             isOnboarding: snapshot.isOnboarding ?? false
         )
+        // Reattach the workspace if its tree is still on disk; otherwise the Files container
+        // falls back to the repo picker.
+        if let repo = snapshot.workspaceRepo {
+            workspace = Workspace.shared(
+                existing: repo,
+                modifiedPaths: snapshot.workspaceDirty ?? [],
+                syncedSha: snapshot.workspaceSyncedSha
+            )
+            openFile(snapshot.openFile)
+        }
     }
 }
 
