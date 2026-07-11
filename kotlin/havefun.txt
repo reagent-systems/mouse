@@ -1,4 +1,9 @@
 Hey guys, a small message for you
-I just want to thank you all for helping me make this a real project for real developers. I truly believe we can make an app thats so good and so powerful, we can do ALL development from our phones wherever we are. There's not much in this project as of writing this message, but I know in the coming weeks there will be a lot. So ahead of time, thank you. :) Have fun and always make cool stuff!
+I just want to thank you all for helping me make this a real project for real developers. 
+I truly believe we can make an app thats so good and so powerful, we can do ALL development 
+from our phones wherever we are. There's not much in this project as of writing this message, 
+but I know in the coming weeks there will be a lot. So ahead of time, thank you. :) 
+
+Have fun and always make cool stuff!
 
 -ThyFriendlyFox & Team Reagent
