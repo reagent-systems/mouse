@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Leftover tooling
+node_modules/
+
+# Secrets & local config
+.env
+.env.*
+.claude/settings.local.json
