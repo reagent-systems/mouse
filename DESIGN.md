@@ -7,9 +7,9 @@ see and feel.
 
 ## 1. Principles
 
-- **Mobile-first, one-handed.** Designed for a phone held in one hand;
+- **Mobile-first, one-handed or two handed.** Designed for a phone held in one hand;
   every control reachable, every gesture performable with a thumb. iPad is
-  a bigger window, not a different app.
+  a bigger window, not a different app. With two hands you can type easier, but it would be cool to add voice controlled UI for accessibility. "Go to this project" or "Run this command in the terminal for me." are some examples.
 - **Motion is the arrow.** Nothing points, pulses a tutorial overlay, or
   draws a coach mark. When the UI wants to teach a gesture, it *performs a
   hint of the gesture*: the swipe lesson nudges sideways, the pinch lesson
@@ -21,7 +21,7 @@ see and feel.
   stacks. Every capability lives inside a container or on its surface
   (corner chips), and the shell's gestures are the only navigation.
 - **Calm, physical motion.** Springs everywhere, sized to feel like the
-  surfaces have mass. Nothing teleports; things that leave slide or settle.
+  surfaces have mass. Nothing teleports; things that leave slide or settle. We shouldn't have any flickering, or any lag that causes jitter-like motion. 
 
 ## 2. Surfaces
 

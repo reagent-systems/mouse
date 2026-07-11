@@ -9,8 +9,9 @@ GitHub directly — sign in, clone, edit, commit, push, pull — with no server,
 no git binary, and no dependencies beyond the platform.
 
 ```
-              c ・プ
-              \( )
+　C・プ
+＼(　）
+  ｀｀
 ```
 
 ## The interaction model
