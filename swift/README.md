@@ -16,6 +16,13 @@ One law decides every input conflict between the shell and container content:
 
 > **One-finger horizontal drags and all two-finger gestures belong to the shell, everywhere. Content gets taps, vertical scrolling, and the keyboard.**
 
+One refinement to "the keyboard": while the editor is **focused**, every drag on it is a text
+interaction — extending a selection by its handles, steering the caret — so the shell stands
+down on that container, whatever the drag's direction. (Without this, dragging a highlight also
+drove the lane: a full re-render per frame — CPU pegged — and a container swap on release.)
+Other lanes and the screen-edge strips keep their swipes; tap outside to dismiss the keyboard
+and the lane's swipe returns to the shell.
+
 The shell's vocabulary (unchanged no matter what a container shows):
 
 | Gesture | Owner | Meaning |
@@ -34,7 +41,7 @@ Per container:
 - **Viewer** — the open file, **edited in place**: tap the text and the caret lands under your finger, the keyboard rises, and you're editing right in the lane — no overlay, no mode. The spacebar-trackpad steers the caret; drag the text downward to dismiss the keyboard. Changes autosave (debounced ~0.8s) and flush on file switches and backgrounding. Lines wrap instead of panning horizontally (horizontal is the shell's), and text can't pinch-zoom (pinch is lane management) — font size will be a setting. The deck ignores the keyboard; the editor scrolls its caret into view within its own container. (A possible future refinement: stretch the editing container while the keyboard is up.)
 - **Terminal** — tap anywhere in it to focus the prompt and raise the keyboard; typing goes to the prompt (spacebar-trackpad steers); scrollback is a vertical scroll that follows new output; output wraps like a real terminal, so it never wants horizontal panning.
 
-**How the law is enforced** (`CarouselLane.swipe`): scrollable content is UIScrollView-backed, and UIScrollView claims every drag that starts on it — so the lane swipe attaches as a *simultaneous* gesture (which scroll views can't block) and arbitrates itself: at first movement each drag locks to an axis, horizontal-dominant drags drive the lane while the gesture stands down entirely for vertical ones. Result: vertical scrolls content, horizontal swipes the lane, from anywhere on any container.
+**How the law is enforced** (`CarouselLane.swipe`): scrollable content is UIScrollView-backed, and UIScrollView claims every drag that starts on it — so the lane swipe attaches as a *simultaneous* gesture (which scroll views can't block) and arbitrates itself: at first movement each drag locks to an axis, horizontal-dominant drags drive the lane while the gesture stands down entirely for vertical ones. Result: vertical scrolls content, horizontal swipes the lane, from anywhere on any container. The focused-editor stand-down rides the same arbitration: the Viewer mirrors its focus onto the deck (`@FocusState` → `deck.editorFocused`, reset on keyboard-hide as a backstop), and while it's set, drags on the viewer lane lock to the content side unconditionally.
 
 Other consequences the law creates: the keyboard shrinking the deck is shell behavior (lanes re-fit, same as divider changes); the edge strips must yield drags that are clearly vertical so tree-scrolls starting near the screen edge aren't eaten (known gap, to fix with the terminal phase); text-selection handle drags belong to UIKit's text interactions, which sit deeper than the lane gesture.
 

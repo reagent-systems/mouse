@@ -299,6 +299,9 @@ struct ViewerContainerView: View {
     let deck: CarouselDeck?
 
     @Environment(\.scenePhase) private var scenePhase
+    /// Mirrored onto the deck so the shell knows when drags on this container belong to the
+    /// text (selection handles, caret) rather than the lane. Reflects first-responder status.
+    @FocusState private var editorFocused: Bool
 
     var body: some View {
         Group {
@@ -323,6 +326,14 @@ struct ViewerContainerView: View {
                             .textInputAutocapitalization(.never)
                             .keyboardType(.asciiCapable)
                             .scrollDismissesKeyboard(.interactively)
+                            .focused($editorFocused)
+                            .onChange(of: editorFocused) { _, focused in deck.editorFocused = focused }
+                            // Belt and braces: keyboard gone = editing over, whatever hid it
+                            // (tap-outside resigns the UITextView directly; FocusState can lag).
+                            .onReceive(NotificationCenter.default.publisher(
+                                for: UIResponder.keyboardWillHideNotification)) { _ in
+                                deck.editorFocused = false
+                            }
                             .onChange(of: buffer.text) { _, _ in buffer.textDidChange() }
                     } else {
                         Spacer(minLength: 0)

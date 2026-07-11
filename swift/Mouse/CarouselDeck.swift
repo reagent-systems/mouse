@@ -139,6 +139,11 @@ final class CarouselDeck {
     var openFilePath: String?
     /// This ring's editor buffer — loaded at selection time so the viewer never load-flickers.
     let fileBuffer = RingFileBuffer()
+    /// True while this ring's editor owns the keyboard. The shell's lane swipe stands down on
+    /// the viewer then: horizontal drags there are text interactions (selection handles, the
+    /// caret) — without this, dragging a highlight also dragged the lane, re-rendering the
+    /// whole stack every frame (CPU) and threatening a container swap on release.
+    var editorFocused = false
     @ObservationIgnored private var ringTerminal: TerminalSession?
 
     /// Choose the file this ring's viewer shows; the buffer loads immediately (off screen).

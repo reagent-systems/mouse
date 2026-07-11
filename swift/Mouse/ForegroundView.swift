@@ -698,8 +698,18 @@ struct CarouselLane: View {
                 // swipes; vertical-dominant drags belong to the content (tree/file scrolling) and
                 // this gesture stands down for their whole duration.
                 if dragAxis == .undecided {
-                    dragAxis = abs(value.translation.width) >= abs(value.translation.height)
-                        ? .horizontal : .vertical
+                    // The gesture law's keyboard clause: while the editor is focused, every drag
+                    // on it is a text interaction (selection handles, caret) — the shell stands
+                    // down whatever the direction. Without this, dragging a highlight also drove
+                    // the lane: a full stack re-render per frame and a container swap at release.
+                    // Other lanes and the screen-edge strips keep their swipes; tapping outside
+                    // dismisses the keyboard and returns this lane's swipe to the shell.
+                    if deck.editorFocused && lane.current.kind == ContainerType.viewerKind {
+                        dragAxis = .vertical
+                    } else {
+                        dragAxis = abs(value.translation.width) >= abs(value.translation.height)
+                            ? .horizontal : .vertical
+                    }
                 }
                 guard dragAxis == .horizontal else { return }
                 if nudge != .zero { withAnimation(.easeOut(duration: 0.15)) { nudge = .zero } }
