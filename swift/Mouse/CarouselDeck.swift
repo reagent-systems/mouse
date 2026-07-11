@@ -137,8 +137,6 @@ final class CarouselDeck {
     /// files/git/graph but keep their own open file, so swiping between rings is switching
     /// between editors on the same project.
     var openFilePath: String?
-    /// This ring's editor buffer — loaded at selection time so the viewer never load-flickers.
-    let fileBuffer = RingFileBuffer()
     /// True while this ring's editor owns the keyboard. The shell's lane swipe stands down on
     /// the viewer then: horizontal drags there are text interactions (selection handles, the
     /// caret) — without this, dragging a highlight also dragged the lane, re-rendering the
@@ -146,10 +144,13 @@ final class CarouselDeck {
     var editorFocused = false
     @ObservationIgnored private var ringTerminal: TerminalSession?
 
-    /// Choose the file this ring's viewer shows; the buffer loads immediately (off screen).
+    /// Choose the file this ring's viewer shows; the shared buffer for it loads immediately
+    /// (off screen), so the viewer renders complete on its first frame.
     func openFile(_ path: String?) {
         openFilePath = path
-        fileBuffer.load(path: path, workspace: workspace)
+        if let path, let workspace {
+            _ = FileBuffer.shared(for: workspace, path: path)
+        }
     }
 
     /// This ring's own terminal session on the (possibly shared) workspace — separate scrollback

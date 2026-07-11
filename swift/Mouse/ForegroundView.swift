@@ -101,7 +101,7 @@ struct ForegroundView: View {
         .task(id: edgeLessonVisible) { await runEdgeLessonNudge() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
-                strip.rings.forEach { $0.fileBuffer.flush() }  // pending edits, any ring
+                FileBuffer.flushAll()  // pending edits in every open buffer, any ring
                 StripPersistence.save(strip)
             }
         }
