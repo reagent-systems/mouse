@@ -14,10 +14,13 @@ order of attack.
 
 ## Platform stance
 
-**iOS/iPadOS native only.** No Android port, no web build, no cross-platform
-framework — the earlier Capacitor/web incarnation was removed deliberately
-and is not coming back. The gesture shell *is* the product, and it's built
-against one platform's touch system, done properly.
+**Native per platform, no bridges.** Two apps sharing one spec and one
+design language: `swift/` (iOS/iPadOS, the lead platform) and `kotlin/`
+(Android, seeded with the terminal). No web builds and no cross-platform
+frameworks — the earlier Capacitor/web incarnation was removed deliberately
+and is not coming back. Each platform gets the gesture shell built against
+its own touch system, done properly — and each keeps its honest advantages
+(Android apps may run the system shell; iOS gets the from-scratch `msh`).
 
 ## Product branches
 
@@ -35,6 +38,8 @@ plate:
   reusing the native tar/gzip extractor) and dev-server engine
   (statically-linked esbuild, `dev`/`build`), LAN hosting, and a Preview
   container — projects you can *run*, not just edit
+- More terminal engines behind the switcher: ssh, and `git`/`npm` becoming
+  real commands inside `msh` as their engines land
 
 ### `cursor` — the AI pair
 
@@ -93,7 +98,12 @@ The `vs-code` direction's first wave, all on `main`:
 - GitHub Device Flow sign-in (Keychain), repo download via tarball API with
   a from-scratch native tar/gzip extractor
 - Files tree; in-place editor (floating keyboard, autosave, shared live
-  buffers across rings); commit graph; native terminal built-ins
+  buffers across rings); commit graph
+- `msh`, a from-scratch shell (quoting, variables, pipes, redirection,
+  globs, `&&`/`||`, history) plus a JavaScriptCore engine, behind the
+  terminal's engine switcher
+- The Android seed (`kotlin/`): Mouse-styled terminal running the real
+  system shell as a persistent process
 - Push (Git Data API, one real commit) and pull with upstream detection
 - iPad multitasking with an iPhone-sized minimum window
 

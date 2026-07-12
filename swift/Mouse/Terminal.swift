@@ -1,9 +1,17 @@
 import SwiftUI
+import JavaScriptCore
 
 /// The Terminal container (kind 5): a real terminal in look and feel — prompt, scrollback,
-/// mono — whose commands are implemented natively against the ring's workspace (the a-Shell
-/// model; iOS has no fork/exec). Filesystem built-ins ship first; `git` arrives with the
-/// libgit2 engine and `npm`/`pnpm` with the package engine. Output wraps, scrollback scrolls
+/// mono — with switchable ENGINES behind one prompt (the top-left chip cycles them):
+///
+///   msh — Mouse's from-scratch POSIX-flavored shell (`Shell.swift`): pipes, redirection,
+///         quoting, variables, globs, history. iOS has no fork/exec, so a native shell is
+///         the honest terminal (the a-Shell model); `git`/`npm` engines arrive per roadmap.
+///   js  — JavaScriptCore REPL (system framework): evaluate JS with a persistent context,
+///         `console.log` captured to scrollback.
+///
+/// Engines that need real processes (ssh; Android's `/system/bin/sh` in the Kotlin app)
+/// join the same switcher rather than living inside msh. Output wraps, scrollback scrolls
 /// vertically, taps focus the prompt — all per the gesture law.
 @Observable
 final class TerminalSession {
@@ -17,257 +25,66 @@ final class TerminalSession {
         let kind: Kind
     }
 
+    enum Engine: String, CaseIterable {
+        case msh
+        case js
+    }
+
     let root: URL
-    /// Current directory, relative to `root` ("" = repo root). Never escapes the workspace.
-    private(set) var cwd = ""
     private(set) var lines: [Line] = []
+    var engine: Engine = .msh
+
+    let shell = MouseShell()
+    @ObservationIgnored private lazy var javascript = JSEngine()
 
     init(root: URL) {
         self.root = root
     }
 
     var prompt: String {
-        (cwd.isEmpty ? "~" : "~/" + cwd) + " $"
+        switch engine {
+        case .msh: (shell.cwd.isEmpty ? "~" : "~/" + shell.cwd) + " $"
+        case .js: "js>"
+        }
+    }
+
+    /// Cycle to the next engine (the switcher chip's action).
+    func switchEngine() {
+        let all = Engine.allCases
+        engine = all[(all.firstIndex(of: engine)! + 1) % all.count]
+        append("[engine: \(engine == .msh ? "msh — mouse shell" : "js — JavaScriptCore")]", .output)
     }
 
     func run(_ raw: String, workspace: Workspace?, deck: CarouselDeck?) {
         let command = raw.trimmingCharacters(in: .whitespaces)
         append("\(prompt) \(command)", .command)
         guard !command.isEmpty else { return }
-        var parts = command.split(separator: " ").map(String.init)
-        let name = parts.removeFirst()
-
-        switch name {
-        case "help": help()
-        case "clear": lines = []
-        case "pwd": append("/" + cwd, .output)
-        case "ls": ls(parts.first)
-        case "cd": cd(parts.first)
-        case "cat": cat(parts.first)
-        case "echo": append(parts.joined(separator: " "), .output)
-        case "mkdir": mkdir(parts.first)
-        case "touch": touch(parts.first, workspace: workspace)
-        case "rm": rm(parts)
-        case "mv": moveOrCopy(parts, copy: false, workspace: workspace)
-        case "cp": moveOrCopy(parts.filter { $0 != "-r" }, copy: true, workspace: workspace)
-        case "head": headTail(parts, fromStart: true)
-        case "tail": headTail(parts, fromStart: false)
-        case "find": find(parts.first)
-        case "grep": grep(parts)
-        case "open": open(parts.first, workspace: workspace, deck: deck)
-        case "git", "npm", "pnpm", "node", "npx":
-            append("\(name): not built yet — the native \(name == "git" ? "git" : "package") engine is on the roadmap", .error)
-        default:
-            append("command not found: \(name) (type help)", .error)
+        switch engine {
+        case .msh: runShell(command, workspace: workspace, deck: deck)
+        case .js: runJavaScript(command)
         }
     }
 
-    // MARK: - Built-ins
-
-    private func help() {
-        append("""
-        built-ins:
-          ls [path]      cd [path]      pwd            cat <file>
-          echo [text]    mkdir <dir>    touch <file>   rm [-r] <path>
-          mv <a> <b>     cp <a> <b>     head/tail [-n N] <file>
-          find <name>    grep <text> <file>             open <file>
-          clear          help
-        """, .output)
-    }
-
-    private func ls(_ arg: String?) {
-        guard let target = resolve(arg ?? ".") else { return badPath(arg) }
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: target.url, includingPropertiesForKeys: [.isDirectoryKey]) else {
-            return append("ls: not a directory: \(display(target.rel))", .error)
+    private func runShell(_ command: String, workspace: Workspace?, deck: CarouselDeck?) {
+        let context = MouseShell.Context(
+            root: root,
+            markModified: { workspace?.markModified($0) },
+            openFile: { deck?.openFile($0) },
+            clear: { [weak self] in self?.lines = [] }
+        )
+        let result = shell.execute(command, context: context)
+        if let echo = result.echoExpansion {
+            append("\(prompt) \(echo)", .command)
         }
-        let names = entries
-            .map { url -> (String, Bool) in
-                (url.lastPathComponent, (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false)
-            }
-            .sorted { lhs, rhs in
-                if lhs.1 != rhs.1 { return lhs.1 }
-                return lhs.0.localizedCaseInsensitiveCompare(rhs.0) == .orderedAscending
-            }
-            .map { $0.1 ? $0.0 + "/" : $0.0 }
-        append(names.isEmpty ? "(empty)" : names.joined(separator: "  "), .output)
-    }
-
-    private func cd(_ arg: String?) {
-        guard let target = resolve(arg ?? "/") else { return badPath(arg) }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: target.url.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            return append("cd: not a directory: \(display(target.rel))", .error)
-        }
-        cwd = target.rel
-    }
-
-    private func cat(_ arg: String?) {
-        guard let arg, let target = resolve(arg) else { return badPath(arg) }
-        guard let data = try? Data(contentsOf: target.url) else {
-            return append("cat: no such file: \(display(target.rel))", .error)
-        }
-        guard data.count < 200_000 else {
-            return append("cat: file too large (\(data.count / 1024) KB)", .error)
-        }
-        guard let text = String(data: data, encoding: .utf8) else {
-            return append("cat: binary file", .error)
-        }
-        append(text.hasSuffix("\n") ? String(text.dropLast()) : text, .output)
-    }
-
-    private func mkdir(_ arg: String?) {
-        guard let arg, let target = resolve(arg) else { return badPath(arg) }
-        do {
-            try FileManager.default.createDirectory(at: target.url, withIntermediateDirectories: true)
-        } catch {
-            append("mkdir: \(error.localizedDescription)", .error)
+        for output in result.outputs {
+            append(output.text, output.isError ? .error : .output)
         }
     }
 
-    private func touch(_ arg: String?, workspace: Workspace?) {
-        guard let arg, let target = resolve(arg) else { return badPath(arg) }
-        if !FileManager.default.fileExists(atPath: target.url.path) {
-            FileManager.default.createFile(atPath: target.url.path, contents: Data())
-            workspace?.markModified(target.rel)
+    private func runJavaScript(_ command: String) {
+        for output in javascript.evaluate(command) {
+            append(output.text, output.isError ? .error : .output)
         }
-    }
-
-    private func rm(_ args: [String]) {
-        let recursive = args.contains("-r")
-        guard let arg = args.first(where: { $0 != "-r" }), let target = resolve(arg) else { return badPath(args.first) }
-        guard !target.rel.isEmpty else { return append("rm: refusing to remove the workspace root", .error) }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: target.url.path, isDirectory: &isDirectory) else {
-            return append("rm: no such path: \(display(target.rel))", .error)
-        }
-        if isDirectory.boolValue && !recursive {
-            return append("rm: is a directory (use rm -r): \(display(target.rel))", .error)
-        }
-        do {
-            try FileManager.default.removeItem(at: target.url)
-        } catch {
-            append("rm: \(error.localizedDescription)", .error)
-        }
-    }
-
-    private func moveOrCopy(_ args: [String], copy: Bool, workspace: Workspace?) {
-        let name = copy ? "cp" : "mv"
-        guard args.count >= 2,
-              let source = resolve(args[0]),
-              let destination = resolve(args[1]) else {
-            return append("\(name): usage: \(name) <source> <destination>", .error)
-        }
-        do {
-            if copy {
-                try FileManager.default.copyItem(at: source.url, to: destination.url)
-            } else {
-                try FileManager.default.moveItem(at: source.url, to: destination.url)
-            }
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: destination.url.path, isDirectory: &isDirectory),
-               !isDirectory.boolValue {
-                workspace?.markModified(destination.rel)
-            }
-        } catch {
-            append("\(name): \(error.localizedDescription)", .error)
-        }
-    }
-
-    private func headTail(_ args: [String], fromStart: Bool) {
-        var count = 10
-        var fileArg: String?
-        var iterator = args.makeIterator()
-        while let arg = iterator.next() {
-            if arg == "-n", let value = iterator.next() { count = Int(value) ?? 10 }
-            else { fileArg = arg }
-        }
-        guard let fileArg, let target = resolve(fileArg) else { return badPath(fileArg) }
-        guard let text = try? String(contentsOf: target.url, encoding: .utf8) else {
-            return append("\(fromStart ? "head" : "tail"): can't read \(display(target.rel))", .error)
-        }
-        let allLines = text.components(separatedBy: "\n")
-        let slice = fromStart ? allLines.prefix(count) : allLines.suffix(count)
-        append(slice.joined(separator: "\n"), .output)
-    }
-
-    private func find(_ arg: String?) {
-        guard let arg else { return append("find: usage: find <name>", .error) }
-        guard let start = resolve(".") else { return }
-        let fm = FileManager.default
-        var matches: [String] = []
-        if let enumerator = fm.enumerator(at: start.url, includingPropertiesForKeys: nil) {
-            for case let url as URL in enumerator {
-                let component = url.lastPathComponent
-                if component == ".git" || component == "node_modules" {
-                    enumerator.skipDescendants()
-                    continue
-                }
-                if component.localizedCaseInsensitiveContains(arg) {
-                    let rel = url.path.replacingOccurrences(of: root.path + "/", with: "")
-                    matches.append(rel)
-                    if matches.count >= 200 {
-                        matches.append("… stopped at 200 matches")
-                        break
-                    }
-                }
-            }
-        }
-        append(matches.isEmpty ? "no matches" : matches.joined(separator: "\n"), .output)
-    }
-
-    private func grep(_ args: [String]) {
-        guard args.count >= 2, let target = resolve(args[1]) else {
-            return append("grep: usage: grep <text> <file>", .error)
-        }
-        guard let text = try? String(contentsOf: target.url, encoding: .utf8) else {
-            return append("grep: can't read \(display(target.rel))", .error)
-        }
-        let pattern = args[0]
-        var results: [String] = []
-        for (index, line) in text.components(separatedBy: "\n").enumerated() where line.contains(pattern) {
-            results.append("\(index + 1): \(line)")
-            if results.count >= 100 {
-                results.append("… stopped at 100 matches")
-                break
-            }
-        }
-        append(results.isEmpty ? "no matches" : results.joined(separator: "\n"), .output)
-    }
-
-    private func open(_ arg: String?, workspace: Workspace?, deck: CarouselDeck?) {
-        guard let arg, let target = resolve(arg) else { return badPath(arg) }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: target.url.path, isDirectory: &isDirectory),
-              !isDirectory.boolValue else {
-            return append("open: not a file: \(display(target.rel))", .error)
-        }
-        deck?.openFile(target.rel)
-        append("opened \(display(target.rel)) in the viewer", .output)
-    }
-
-    // MARK: - Plumbing
-
-    /// Resolve a path argument against the cwd. `/`-prefixed means the workspace root; `..` is
-    /// clamped at the root, so the workspace can never be escaped.
-    private func resolve(_ arg: String) -> (rel: String, url: URL)? {
-        var components = arg.hasPrefix("/") ? [] : cwd.split(separator: "/").map(String.init)
-        for piece in arg.split(separator: "/") {
-            switch piece {
-            case ".", "": continue
-            case "..": if !components.isEmpty { components.removeLast() }
-            default: components.append(String(piece))
-            }
-        }
-        let rel = components.joined(separator: "/")
-        return (rel, rel.isEmpty ? root : root.appendingPathComponent(rel))
-    }
-
-    private func display(_ rel: String) -> String { rel.isEmpty ? "/" : rel }
-
-    private func badPath(_ arg: String?) {
-        append("invalid path: \(arg ?? "")", .error)
     }
 
     private func append(_ text: String, _ kind: Line.Kind) {
@@ -387,5 +204,64 @@ private struct TerminalPromptField: UIViewRepresentable {
         func textFieldDidEndEditing(_ textField: UITextField) {
             DispatchQueue.main.async { self.parent.isFocused = false }
         }
+    }
+}
+
+/// The `js` engine: a persistent JavaScriptCore context (state survives between lines, like a
+/// browser console). `console.log` is captured into the scrollback; exceptions print as
+/// errors; a statement's value prints unless it's undefined.
+final class JSEngine {
+    private let context = JSContext()!
+    private var logged: [String] = []
+
+    init() {
+        let log: @convention(block) (String) -> Void = { [weak self] message in
+            self?.logged.append(message)
+        }
+        context.setObject(log, forKeyedSubscript: "__mouseLog" as NSString)
+        context.evaluateScript("""
+            var console = { log: function() {
+                __mouseLog(Array.prototype.map.call(arguments, String).join(' '));
+            }};
+            console.error = console.warn = console.info = console.log;
+        """)
+    }
+
+    func evaluate(_ source: String) -> [(text: String, isError: Bool)] {
+        logged = []
+        var outputs: [(String, Bool)] = []
+        context.exceptionHandler = { _, exception in
+            outputs.append((exception?.toString() ?? "exception", true))
+        }
+        let result = context.evaluateScript(source)
+        context.exceptionHandler = nil
+        outputs.insert(contentsOf: logged.map { ($0, false) }, at: 0)
+        if outputs.allSatisfy({ !$0.1 }), let result, !result.isUndefined {
+            outputs.append((result.toString() ?? "", false))
+        }
+        return outputs.map { (text: $0.0, isError: $0.1) }
+    }
+}
+
+/// The engine switcher: a small capsule in the terminal container's top-LEFT corner showing
+/// the active engine's name; tapping cycles engines. The counterpart of the top-right action
+/// chips, in the same drawn-not-symboled language.
+struct TerminalEngineChip: View {
+    let session: TerminalSession
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        Button {
+            session.switchEngine()
+        } label: {
+            Text(session.engine.rawValue)
+                .font(.custom(AppFont.asciiName, size: 10))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .overlay(Capsule().strokeBorder(.white.opacity(0.35), lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }

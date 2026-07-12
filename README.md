@@ -52,8 +52,9 @@ The full interaction and architecture reference lives in
 - **Editor** — in-place editing with a floating keyboard that never shifts
   the app, debounced autosave, live shared buffers across rings
 - **Commit graph** — branch rails, merges, tips, drawn like a desktop client
-- **Terminal** — native command dispatcher (`ls`, `cat`, `grep`, `open`, …)
-  scoped to the workspace
+- **Terminal** — `msh`, a from-scratch shell scoped to the workspace:
+  pipes, redirection, quoting, variables, globs, `&&`/`||`, history — plus
+  a JavaScriptCore engine behind a top-left engine switcher
 - **Push & pull** — corner action chips: one real commit via the Git Data
   API; pull with upstream detection
 - **Persistence** — the whole strip survives force-quit and relaunch
@@ -85,7 +86,8 @@ or renaming source files.
 
 | Path | What it is |
 |---|---|
-| [swift/](swift/) | The app. `project.yml` is the project definition; `Mouse/` is all sources |
+| [swift/](swift/) | The iOS app (lead platform). `project.yml` is the project definition; `Mouse/` is all sources |
+| [kotlin/](kotlin/) | The Android app — native Kotlin + Compose, seeded with a real-shell terminal |
 | [swift/README.md](swift/README.md) | Deep reference: gestures, containers, architecture |
 | [DESIGN.md](DESIGN.md) | The design language — surfaces, type, motion, voice |
 | [ROADMAP.md](ROADMAP.md) | The vision: product branches, each absorbing a desktop product |
@@ -102,8 +104,9 @@ products — VS Code first (that's this branch), then Cursor, n8n, Figma, and
 more — each developed on its own **product branch**. The map is in
 [ROADMAP.md](ROADMAP.md).
 
-Mouse is **iOS/iPadOS native only**, by decision: no Android port, no web
-build, no cross-platform framework. Expect sharp edges.
+Mouse is **native per platform**, by decision: a Swift app for iOS/iPadOS
+(the lead platform) and a Kotlin app for Android — no web builds, no
+cross-platform frameworks. Expect sharp edges.
 
 ## License
 

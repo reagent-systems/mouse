@@ -814,6 +814,15 @@ struct Panel: View {
                         .padding(.trailing, ContainerActionsRow.inset + 8)
                 }
             }
+            .overlay(alignment: .topLeading) {
+                // The terminal's engine switcher — the top-left counterpart of the action
+                // chips: shows the active engine (msh, js), tap to cycle.
+                if type.kind == ContainerType.terminalKind, let deck, let workspace = deck.workspace {
+                    TerminalEngineChip(session: deck.terminal(for: workspace), cornerRadius: cornerRadius)
+                        .padding(.top, ContainerActionsRow.inset)
+                        .padding(.leading, ContainerActionsRow.inset + 8)
+                }
+            }
     }
 }
 
