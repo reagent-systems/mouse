@@ -23,7 +23,11 @@ compile it with a scratch `main.swift` of assertions via `swiftc` and run.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
-the `kotlin/` folder directly.
+the `kotlin/` folder directly. It's a full parity app (Compose), not a
+seed: mirror any iOS feature change here too, or note in the PR why not.
+The two apps share no code (no cross-platform bridge) — parity is by
+faithful re-implementation, file-for-file where it helps
+(`Shell.swift`↔`MouseShell.kt`, `CarouselDeck.swift`↔`Model.kt`, etc.).
 
 ## Invariants
 
@@ -87,6 +91,12 @@ the `kotlin/` folder directly.
   "sending self" errors in the restore paths. This was tried; it fights back.
 - App-global singletons follow `GitHubAuth`: `@MainActor @Observable final
   class` with `static let shared`.
+- `TerminalSession` and `MouseShell` are `@MainActor` (not the FileBuffer
+  `@unchecked Sendable` pattern): they're inherently UI-thread state and run
+  async streaming commands, so main-actor isolation is correct and avoids
+  sending app types into the run `Task`. Background socket I/O is isolated in
+  `ICMPPinger` (`@unchecked Sendable`, `DispatchQueue` + continuations
+  returning Sendable values) — the one place that leaves the main actor.
 
 ## Persistence discipline
 
@@ -138,7 +148,7 @@ it, and force-quit-relaunch to prove it.
 | `GitGraphView.swift` | Commit-graph layout + rendering, history fetch |
 | `GitHubAuth.swift` | Device Flow, Keychain, sign-in container |
 | `GitHubPush.swift` | Git Data API push (blobs → tree → commit → ref) |
-| `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, all built-ins |
+| `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins, and `ICMPPinger` (real ping) |
 | `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field |
 | `StripPersistence.swift` | Snapshot/restore DTOs for the whole strip |
 | `AsciiArt*.swift`, `AppFont.swift` | Backdrop art, type constants |

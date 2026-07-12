@@ -13,6 +13,7 @@ import JavaScriptCore
 /// Engines that need real processes (ssh; Android's `/system/bin/sh` in the Kotlin app)
 /// join the same switcher rather than living inside msh. Output wraps, scrollback scrolls
 /// vertically, taps focus the prompt — all per the gesture law.
+@MainActor
 @Observable
 final class TerminalSession {
     struct Line: Identifiable {
@@ -33,9 +34,13 @@ final class TerminalSession {
     let root: URL
     private(set) var lines: [Line] = []
     var engine: Engine = .msh
+    /// True while a command is executing. Streaming commands (ping) hold this for their whole
+    /// run; any keypress at the prompt interrupts — the phone's Ctrl-C.
+    private(set) var isRunning = false
 
     let shell = MouseShell()
     @ObservationIgnored private lazy var javascript = JSEngine()
+    @ObservationIgnored private var runningTask: Task<Void, Never>?
 
     init(root: URL) {
         self.root = root
@@ -55,14 +60,28 @@ final class TerminalSession {
         append("[engine: \(engine == .msh ? "msh — mouse shell" : "js — JavaScriptCore")]", .output)
     }
 
-    func run(_ raw: String, workspace: Workspace?, deck: CarouselDeck?) {
+    /// Returns false when the input was refused (a command is already running) so the prompt
+    /// field can keep its text.
+    @discardableResult
+    func run(_ raw: String, workspace: Workspace?, deck: CarouselDeck?) -> Bool {
+        guard !isRunning else { return false }
         let command = raw.trimmingCharacters(in: .whitespaces)
         append("\(prompt) \(command)", .command)
-        guard !command.isEmpty else { return }
+        guard !command.isEmpty else { return true }
         switch engine {
         case .msh: runShell(command, workspace: workspace, deck: deck)
         case .js: runJavaScript(command)
         }
+        return true
+    }
+
+    /// Interrupt a running command (any keypress triggers this). Prints the classic ^C
+    /// immediately; the command's own cancellation cleanup (ping's statistics line) follows
+    /// as it winds down.
+    func interrupt() {
+        guard isRunning else { return }
+        append("^C", .command)
+        runningTask?.cancel()
     }
 
     private func runShell(_ command: String, workspace: Workspace?, deck: CarouselDeck?) {
@@ -70,14 +89,22 @@ final class TerminalSession {
             root: root,
             markModified: { workspace?.markModified($0) },
             openFile: { deck?.openFile($0) },
-            clear: { [weak self] in self?.lines = [] }
+            clear: { [weak self] in self?.lines = [] },
+            emit: { [weak self] output in
+                self?.append(output.text, output.isError ? .error : .output)
+            }
         )
-        let result = shell.execute(command, context: context)
-        if let echo = result.echoExpansion {
-            append("\(prompt) \(echo)", .command)
-        }
-        for output in result.outputs {
-            append(output.text, output.isError ? .error : .output)
+        isRunning = true
+        runningTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await self.shell.execute(command, context: context)
+            if let echo = result.echoExpansion {
+                self.append("\(self.prompt) \(echo)", .command)
+            }
+            for output in result.outputs {
+                self.append(output.text, output.isError ? .error : .output)
+            }
+            self.isRunning = false
         }
     }
 
@@ -122,9 +149,14 @@ struct TerminalContainerView: View {
                         Text(terminal.prompt)
                             .font(.custom(AppFont.asciiName, size: 12))
                             .opacity(0.7)
-                        TerminalPromptField(isFocused: $promptFocused) { command in
-                            terminal.run(command, workspace: workspace, deck: deck)
-                        }
+                        TerminalPromptField(
+                            isFocused: $promptFocused,
+                            onCommand: { command in
+                                terminal.run(command, workspace: workspace, deck: deck)
+                            },
+                            onInterrupt: { terminal.interrupt() },
+                            isBusy: { terminal.isRunning }
+                        )
                         .frame(maxWidth: .infinity)
                         .frame(height: 22)
                     }
@@ -156,9 +188,16 @@ struct TerminalContainerView: View {
 /// UIKit-backed prompt: pressing return runs the command WITHOUT resigning first responder
 /// (returning `false` from `textFieldShouldReturn`), so the keyboard never dips between
 /// commands — SwiftUI's TextField unavoidably dismisses on submit, which flickered it.
+///
+/// It also carries the interrupt: while a command is running, any keypress is swallowed and
+/// routed to `onInterrupt` instead of being inserted — the phone's Ctrl-C. (New input is
+/// refused during a run anyway, so a keystroke can only mean "stop".)
 private struct TerminalPromptField: UIViewRepresentable {
     @Binding var isFocused: Bool
-    let onCommand: (String) -> Void
+    /// Returns true if the command was accepted (clear the field) or false if refused (busy).
+    let onCommand: (String) -> Bool
+    let onInterrupt: () -> Void
+    let isBusy: () -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -191,9 +230,22 @@ private struct TerminalPromptField: UIViewRepresentable {
         var parent: TerminalPromptField
         init(_ parent: TerminalPromptField) { self.parent = parent }
 
+        func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+            // While a command runs, any keypress interrupts it (the phone's Ctrl-C). New input
+            // is refused during a run anyway, so a keystroke can only mean "stop" — the key is
+            // swallowed rather than typed.
+            if !string.isEmpty, parent.isBusy() {
+                parent.onInterrupt()
+                return false
+            }
+            return true
+        }
+
         func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-            parent.onCommand(textField.text ?? "")
-            textField.text = ""
+            // Refused while busy (except the interrupt path above); keep the typed text.
+            if parent.onCommand(textField.text ?? "") {
+                textField.text = ""
+            }
             return false  // keep first responder: the keyboard never leaves mid-session
         }
 

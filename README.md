@@ -1,12 +1,15 @@
 # Mouse
 
+[![CI](https://github.com/reagent-systems/mouse/actions/workflows/ci.yml/badge.svg)](https://github.com/reagent-systems/mouse/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
+
 **A coding IDE built for a phone — not shrunk from a desktop.**
 
-Mouse is a native iOS app where an entire development environment lives in a
-gesture-driven shell: you swipe between editors, pinch workspaces open and
-closed, and edit files with the file itself, right in place. It talks to
-GitHub directly — sign in, clone, edit, commit, push, pull — with no server,
-no git binary, and no dependencies beyond the platform.
+Mouse is a native mobile app (iOS and Android) where an entire development
+environment lives in a gesture-driven shell: you swipe between editors, pinch
+workspaces open and closed, and edit files with the file itself, right in
+place. It talks to GitHub directly — sign in, clone, edit, commit, push,
+pull — with no server, no git binary, and no dependencies beyond the platform.
 
 ```
 　C・プ
@@ -60,7 +63,11 @@ The full interaction and architecture reference lives in
 - **Persistence** — the whole strip survives force-quit and relaunch
 - iPhone (portrait) and iPad (all orientations, iPhone-sized minimum window)
 
-## Building
+## Building & running
+
+Two native apps, built independently.
+
+### iOS (`swift/`)
 
 Requirements: macOS with **Xcode 16+** and **[xcodegen](https://github.com/yonaskolb/XcodeGen)**
 (`brew install xcodegen`).
@@ -68,30 +75,65 @@ Requirements: macOS with **Xcode 16+** and **[xcodegen](https://github.com/yonas
 ```sh
 cd swift
 xcodegen generate      # regenerates Mouse.xcodeproj from project.yml
-open Mouse.xcodeproj   # build & run the Mouse scheme
+open Mouse.xcodeproj    # ⌘R to build & run the Mouse scheme
 ```
 
-Or headless:
+Run in the **iOS Simulator** from the command line:
 
 ```sh
-xcodebuild -project swift/Mouse.xcodeproj -scheme Mouse \
-  -destination 'generic/platform=iOS Simulator' build
+cd swift && xcodegen generate
+xcodebuild -project Mouse.xcodeproj -scheme Mouse \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' build
+xcrun simctl boot 'iPhone 16 Pro' && open -a Simulator
+xcrun simctl install booted "$(xcodebuild -project Mouse.xcodeproj -scheme Mouse \
+  -showBuildSettings 2>/dev/null | awk '/ BUILT_PRODUCTS_DIR /{print $3}')/Mouse.app"
+xcrun simctl launch booted com.reagentsystems.mouse.swift
 ```
 
 The project file is generated — edit [swift/project.yml](swift/project.yml),
 never the `.xcodeproj`, and re-run `xcodegen generate` after adding, removing,
 or renaming source files.
 
+### Android (`kotlin/`)
+
+Requirements: **JDK 21** and the **Android SDK** (Android Studio installs
+both). Open the `kotlin/` folder in Android Studio, or from the CLI:
+
+```sh
+cd kotlin
+./gradlew assembleDebug            # build the APK
+```
+
+Run on an **emulator** (create an AVD in Android Studio, or use one you have):
+
+```sh
+emulator -list-avds                                   # pick one
+emulator -avd Pixel_9 &                                # boot it
+adb wait-for-device
+adb install -r kotlin/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.reagentsystems.mouse/.MainActivity
+```
+
+(`emulator`/`adb` live in `$ANDROID_HOME/emulator` and `.../platform-tools`.)
+
+### Releases
+
+Prebuilt apps are attached to each [GitHub Release](https://github.com/reagent-systems/mouse/releases):
+a sideloadable Android APK and an iOS **Simulator** build. See
+[RELEASING.md](RELEASING.md) for how releases are cut.
+
 ## Repository layout
 
 | Path | What it is |
 |---|---|
 | [swift/](swift/) | The iOS app (lead platform). `project.yml` is the project definition; `Mouse/` is all sources |
-| [kotlin/](kotlin/) | The Android app — native Kotlin + Compose, seeded with a real-shell terminal |
+| [kotlin/](kotlin/) | The Android app — native Kotlin + Compose, at feature parity with iOS |
 | [swift/README.md](swift/README.md) | Deep reference: gestures, containers, architecture |
 | [DESIGN.md](DESIGN.md) | The design language — surfaces, type, motion, voice |
 | [ROADMAP.md](ROADMAP.md) | The vision: product branches, each absorbing a desktop product |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to work on Mouse |
+| [RELEASING.md](RELEASING.md) | How releases are cut and versioned |
+| [CHANGELOG.md](CHANGELOG.md) | What changed, release by release |
 | [AGENTS.md](AGENTS.md) | The contract for AI agents (and a landmine map for humans) |
 | [sketches/](sketches/) | Design history — screenshots of the idea finding its shape |
 
@@ -105,8 +147,8 @@ more — each developed on its own **product branch**. The map is in
 [ROADMAP.md](ROADMAP.md).
 
 Mouse is **native per platform**, by decision: a Swift app for iOS/iPadOS
-(the lead platform) and a Kotlin app for Android — no web builds, no
-cross-platform frameworks. Expect sharp edges.
+(the lead platform) and a Kotlin/Compose app for Android at feature parity —
+no web builds, no cross-platform frameworks. Expect sharp edges.
 
 ## License
 

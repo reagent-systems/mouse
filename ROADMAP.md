@@ -16,7 +16,8 @@ order of attack.
 
 **Native per platform, no bridges.** Two apps sharing one spec and one
 design language: `swift/` (iOS/iPadOS, the lead platform) and `kotlin/`
-(Android, seeded with the terminal). No web builds and no cross-platform
+(Android, at feature parity — same shell, GitHub, workspaces, containers).
+No web builds and no cross-platform
 frameworks — the earlier Capacitor/web incarnation was removed deliberately
 and is not coming back. Each platform gets the gesture shell built against
 its own touch system, done properly — and each keeps its honest advantages
@@ -100,10 +101,15 @@ The `vs-code` direction's first wave, all on `main`:
 - Files tree; in-place editor (floating keyboard, autosave, shared live
   buffers across rings); commit graph
 - `msh`, a from-scratch shell (quoting, variables, pipes, redirection,
-  globs, `&&`/`||`, history) plus a JavaScriptCore engine, behind the
-  terminal's engine switcher
-- The Android seed (`kotlin/`): Mouse-styled terminal running the real
-  system shell as a persistent process
+  globs, `&&`/`||`, history, ~50 built-ins incl. `sed`/`diff`/`base64`/
+  checksums) plus a JavaScriptCore engine, behind the terminal's switcher
+- Real networking in the terminal: `ping` (unprivileged ICMP, streaming,
+  any-keypress interrupt), `curl`/`wget` (URLSession), `sleep` — on the new
+  async streaming-command machinery
+- The Android app (`kotlin/`, Compose): feature parity with iOS — the
+  gesture shell, onboarding, GitHub sign-in, workspaces (native tar/gzip),
+  Files/Viewer/Graph, push/pull, persistence, and a terminal with both
+  `msh` and the real system `sh` behind the switcher
 - Push (Git Data API, one real commit) and pull with upstream detection
 - iPad multitasking with an iPhone-sized minimum window
 

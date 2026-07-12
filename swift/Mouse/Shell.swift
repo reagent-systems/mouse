@@ -1,5 +1,6 @@
-import Foundation
+import CryptoKit
 import Darwin
+import Foundation
 
 /// `msh` — Mouse's shell, written from scratch for platforms with no fork/exec (the a-Shell
 /// model). It speaks the everyday subset of POSIX shell grammar people's fingers expect:
@@ -17,6 +18,7 @@ import Darwin
 /// workspace root — `..` cannot escape it. Everything is synchronous and main-thread (a
 /// command is a keystroke's worth of work); engines that need processes (ssh, the system
 /// shell on Android) plug in beside msh as separate `TerminalSession` engines, not here.
+@MainActor
 final class MouseShell {
 
     /// Wiring to the app: filesystem root plus the side effects a shell can cause.
@@ -25,6 +27,10 @@ final class MouseShell {
         var markModified: (String) -> Void = { _ in }
         var openFile: (String) -> Void = { _ in }
         var clear: () -> Void = {}
+        /// Incremental output from STREAMING commands (ping's once-a-second lines). Streaming
+        /// happens only when a command runs solo — pipelines collect instead, so `ping -c 3 x
+        /// | grep seq` still works as strings.
+        var emit: (Output) -> Void = { _ in }
     }
 
     struct Output {
@@ -42,7 +48,7 @@ final class MouseShell {
 
     /// Run one input line; returns what to print. `echoExpansion` is set when history
     /// expansion (`!!`) rewrote the line, so the session can echo what actually ran.
-    func execute(_ rawLine: String, context: Context) -> (outputs: [Output], echoExpansion: String?) {
+    func execute(_ rawLine: String, context: Context) async -> (outputs: [Output], echoExpansion: String?) {
         var line = rawLine.trimmingCharacters(in: .whitespaces)
         guard !line.isEmpty else { return ([], nil) }
 
@@ -83,7 +89,7 @@ final class MouseShell {
                 index += 1
             }
             if runNext, !pipelineTokens.isEmpty {
-                outputs.append(contentsOf: runPipeline(pipelineTokens, context: context))
+                outputs.append(contentsOf: await runPipeline(pipelineTokens, context: context))
             }
             switch connector {
             case "&&": runNext = runNext && lastStatus == 0
@@ -295,7 +301,7 @@ final class MouseShell {
         var status: Int32 = 0
     }
 
-    private func runPipeline(_ tokens: [Token], context: Context) -> [Output] {
+    private func runPipeline(_ tokens: [Token], context: Context) async -> [Output] {
         // Parse: commands separated by |, each collecting argv + redirects.
         var commands: [Command] = []
         var command = Command()
@@ -346,11 +352,13 @@ final class MouseShell {
                 }
                 stdin = text
             }
-            var io = dispatch(cmd.argv, stdin: stdin, context: context)
+            let isLastCommand = index == commands.count - 1
+            let mayStream = commands.count == 1 && cmd.stdoutFile == nil
+            var io = await dispatch(cmd.argv, stdin: stdin, context: context, streaming: mayStream && isLastCommand)
             if !io.err.isEmpty {
                 outputs.append(Output(text: io.err, isError: true))
             }
-            let isLast = index == commands.count - 1
+            let isLast = isLastCommand
             if let file = cmd.stdoutFile {
                 if let failure = write(io.out, to: file, append: cmd.appendOut, context: context) {
                     outputs.append(Output(text: failure, isError: true))
@@ -386,7 +394,7 @@ final class MouseShell {
 
     // MARK: - Built-ins
 
-    private func dispatch(_ argv: [String], stdin: String, context: Context) -> IO {
+    private func dispatch(_ argv: [String], stdin: String, context: Context, streaming: Bool = false) async -> IO {
         let name = argv[0]
         let args = Array(argv.dropFirst())
         switch name {
@@ -428,6 +436,19 @@ final class MouseShell {
         case "basename": return IO(out: (args.first.map { ($0 as NSString).lastPathComponent } ?? "") + "\n")
         case "dirname": return IO(out: (args.first.map { ($0 as NSString).deletingLastPathComponent.isEmpty ? "." : ($0 as NSString).deletingLastPathComponent } ?? "") + "\n")
         case "open": return open(args, context: context)
+        case "sleep": return await sleepCmd(args)
+        case "ping": return await ping(args, context: context, streaming: streaming)
+        case "curl", "wget": return await curl(args, context: context)
+        case "tee": return tee(args, stdin: stdin, context: context)
+        case "xargs": return await xargs(args, stdin: stdin, context: context)
+        case "rev": return IO(out: joinLines(splitLines(input(args, stdin: stdin, context: context)).map { String($0.reversed()) }))
+        case "tac": return IO(out: joinLines(splitLines(input(args, stdin: stdin, context: context)).reversed()))
+        case "nl": return nl(args, stdin: stdin, context: context)
+        case "base64": return base64Cmd(args, stdin: stdin, context: context)
+        case "md5sum", "md5": return checksum(args, stdin: stdin, context: context, sha: false)
+        case "sha256sum", "shasum": return checksum(args, stdin: stdin, context: context, sha: true)
+        case "sed": return sed(args, stdin: stdin, context: context)
+        case "diff": return diff(args, context: context)
         case "git", "npm", "pnpm", "node", "npx":
             return IO(err: "\(name): not built yet — the native \(name == "git" ? "git" : "package") engine is on the roadmap", status: 127)
         default:
@@ -439,7 +460,8 @@ final class MouseShell {
         "help", "clear", "pwd", "cd", "ls", "cat", "echo", "printf", "mkdir", "touch", "rm",
         "mv", "cp", "head", "tail", "wc", "sort", "uniq", "tr", "cut", "seq", "grep", "find",
         "date", "whoami", "true", "false", "env", "export", "unset", "history", "which",
-        "basename", "dirname", "open",
+        "basename", "dirname", "open", "sleep", "ping", "curl", "wget", "tee", "xargs",
+        "rev", "tac", "nl", "base64", "md5sum", "md5", "sha256sum", "shasum", "sed", "diff",
     ]
 
     private static let helpText = """
@@ -452,7 +474,11 @@ final class MouseShell {
       find <name>      date          env           export NAME=value
       unset NAME       history (!!, !N)            which <name>
       basename/dirname open <file>   clear         help
+      sed 's/re/sub/g' diff <a> <b>  tee [-a]      xargs <cmd>
+      nl               rev / tac     base64 [-d]   md5sum / sha256sum
+      ping [-c N] <host>             curl [-o file] <url>       sleep <s>
     grammar: 'quotes' "with $VARS"  |  > >> <  ;  &&  ||  ~  *  ?  $?
+    a streaming command (ping without -c) stops on any keypress
     """
 
     // MARK: Individual commands
@@ -811,6 +837,235 @@ final class MouseShell {
         return IO(out: "opened \(display(target.rel)) in the viewer\n")
     }
 
+    // MARK: - Streaming & network commands
+
+    private func sleepCmd(_ args: [String]) async -> IO {
+        guard let seconds = args.first.flatMap(Double.init), seconds >= 0, seconds <= 3600 else {
+            return IO(err: "sleep: usage: sleep <seconds>", status: 1)
+        }
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        return IO(status: Task.isCancelled ? 130 : 0)
+    }
+
+    /// Real ICMP echo — an unprivileged ICMP datagram socket, the platform-sanctioned way
+    /// (Apple's SimplePing pattern; no entitlements). Solo it streams a line per second until
+    /// any keypress interrupts; in a pipeline it collects (default -c 4) so `ping | grep` works.
+    private func ping(_ args: [String], context: Context, streaming: Bool) async -> IO {
+        var count: Int? = nil
+        var host: String? = nil
+        var iterator = args.makeIterator()
+        while let arg = iterator.next() {
+            if arg == "-c", let value = iterator.next() { count = Int(value) }
+            else if !arg.hasPrefix("-") { host = arg }
+        }
+        guard let host else { return IO(err: "ping: usage: ping [-c N] <host>", status: 1) }
+        let limit = count ?? (streaming ? Int.max : 4)
+        guard limit > 0 else { return IO(err: "ping: count must be positive", status: 1) }
+        guard let address = await ICMPPinger.resolve(host) else {
+            return IO(err: "ping: cannot resolve \(host)", status: 1)
+        }
+        guard let pinger = ICMPPinger(address: address) else {
+            return IO(err: "ping: icmp socket unavailable here", status: 1)
+        }
+        defer { pinger.shutdown() }
+
+        var collected: [String] = []
+        func line(_ text: String) {
+            if streaming { context.emit(Output(text: text, isError: false)) } else { collected.append(text) }
+        }
+        line("PING \(host) (\(pinger.addressString)): 56 data bytes")
+        var sent = 0
+        var received = 0
+        var sequence: UInt16 = 0
+        while sent < limit, !Task.isCancelled {
+            sequence &+= 1
+            sent += 1
+            let start = Date()
+            let rtt = await pinger.pingOnce(sequence: sequence, timeout: 2.0)
+            if Task.isCancelled { break }
+            if let rtt {
+                received += 1
+                line(String(format: "64 bytes from %@: icmp_seq=%d time=%.2f ms",
+                            pinger.addressString, Int(sequence), rtt * 1000))
+            } else {
+                line("request timeout for icmp_seq \(sequence)")
+            }
+            if sent < limit {
+                let elapsed = Date().timeIntervalSince(start)
+                if elapsed < 1 { try? await Task.sleep(nanoseconds: UInt64(max(0, 1 - elapsed) * 1_000_000_000)) }
+            }
+        }
+        let loss = sent == 0 ? 0 : Int((Double(sent - received) / Double(sent) * 100).rounded())
+        line("--- \(host) ping statistics ---")
+        line("\(sent) packets transmitted, \(received) packets received, \(loss)% packet loss")
+        return IO(out: streaming ? "" : joinLines(collected), status: received > 0 ? 0 : 1)
+    }
+
+    private func curl(_ args: [String], context: Context) async -> IO {
+        var outFile: String? = nil
+        var urlString: String? = nil
+        var iterator = args.makeIterator()
+        while let arg = iterator.next() {
+            if arg == "-o" { outFile = iterator.next() }
+            else if !arg.hasPrefix("-") { urlString = arg }
+        }
+        guard var urlString else { return IO(err: "curl: usage: curl [-o file] <url>", status: 1) }
+        if !urlString.contains("://") { urlString = "https://" + urlString }
+        guard let url = URL(string: urlString) else { return IO(err: "curl: bad url", status: 1) }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let outFile {
+                guard let target = resolve(outFile, context: context), !target.rel.isEmpty else {
+                    return IO(err: "curl: bad output path: \(outFile)", status: 1)
+                }
+                try data.write(to: target.url)
+                context.markModified(target.rel)
+                return IO(out: "saved \(display(target.rel)) (\(data.count) bytes, HTTP \(code))\n",
+                          status: code >= 400 ? 22 : 0)
+            }
+            guard data.count < 400_000 else {
+                return IO(out: "curl: response too large to print (\(data.count / 1024) KB) — use -o <file>\n",
+                          status: code >= 400 ? 22 : 0)
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                return IO(out: "curl: binary response (\(data.count) bytes) — use -o <file>\n",
+                          status: code >= 400 ? 22 : 0)
+            }
+            return IO(out: text, status: code >= 400 ? 22 : 0)
+        } catch {
+            return IO(err: "curl: \(error.localizedDescription)", status: 7)
+        }
+    }
+
+    // MARK: - Text tools
+
+    private func tee(_ args: [String], stdin: String, context: Context) -> IO {
+        let append = args.contains("-a")
+        for file in args.filter({ !$0.hasPrefix("-") }) {
+            if let failure = write(stdin, to: file, append: append, context: context) {
+                return IO(err: failure, status: 1)
+            }
+        }
+        return IO(out: stdin)
+    }
+
+    private func xargs(_ args: [String], stdin: String, context: Context) async -> IO {
+        let base = args.isEmpty ? ["echo"] : args
+        let extra = stdin.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        return await dispatch(base + extra, stdin: "", context: context)
+    }
+
+    private func nl(_ args: [String], stdin: String, context: Context) -> IO {
+        let lines = splitLines(input(args, stdin: stdin, context: context))
+        return IO(out: joinLines(lines.enumerated().map { String(format: "%6d  %@", $0.offset + 1, $0.element) }))
+    }
+
+    private func base64Cmd(_ args: [String], stdin: String, context: Context) -> IO {
+        let decode = args.contains("-d")
+        let text = input(args.filter { $0 != "-d" }, stdin: stdin, context: context)
+        if decode {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let data = Data(base64Encoded: trimmed),
+                  let decoded = String(data: data, encoding: .utf8) else {
+                return IO(err: "base64: invalid input", status: 1)
+            }
+            return IO(out: decoded)
+        }
+        return IO(out: Data(text.utf8).base64EncodedString() + "\n")
+    }
+
+    private func checksum(_ args: [String], stdin: String, context: Context, sha: Bool) -> IO {
+        let files = args.filter { !$0.hasPrefix("-") }
+        func digest(_ data: Data) -> String {
+            sha ? SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                : Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        guard !files.isEmpty else { return IO(out: digest(Data(stdin.utf8)) + "  -\n") }
+        var out: [String] = []
+        for file in files {
+            guard let target = resolve(file, context: context),
+                  let data = try? Data(contentsOf: target.url) else {
+                return IO(err: "\(sha ? "sha256sum" : "md5sum"): can't read \(file)", status: 1)
+            }
+            out.append("\(digest(data))  \(file)")
+        }
+        return IO(out: joinLines(out))
+    }
+
+    /// `sed 's/regex/replacement/[g]'` — substitution only, ICU regex syntax (the honest
+    /// subset; full sed is a language). Any delimiter after `s` works: s|a|b|.
+    private func sed(_ args: [String], stdin: String, context: Context) -> IO {
+        guard let script = args.first, script.hasPrefix("s"), script.count >= 4 else {
+            return IO(err: "sed: usage: sed 's/regex/replacement/[g]' [file]", status: 1)
+        }
+        let delimiter = script[script.index(script.startIndex, offsetBy: 1)]
+        let pieces = script.dropFirst(2).split(separator: delimiter, omittingEmptySubsequences: false)
+        guard pieces.count >= 2 else { return IO(err: "sed: bad substitution: \(script)", status: 1) }
+        let pattern = String(pieces[0])
+        // sed-style \1 backreferences → ICU-style $1
+        var replacement = String(pieces[1])
+        for group in 1...9 {
+            replacement = replacement.replacingOccurrences(of: "\\\(group)", with: "$\(group)")
+        }
+        let global = pieces.count > 2 && pieces[2].contains("g")
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return IO(err: "sed: bad regex: \(pattern)", status: 1)
+        }
+        let text = input(Array(args.dropFirst()), stdin: stdin, context: context)
+        let out = splitLines(text).map { line -> String in
+            let range = NSRange(line.startIndex..., in: line)
+            if global {
+                return regex.stringByReplacingMatches(in: line, range: range, withTemplate: replacement)
+            }
+            guard let match = regex.firstMatch(in: line, range: range) else { return line }
+            let mutable = NSMutableString(string: line)
+            regex.replaceMatches(in: mutable, range: match.range, withTemplate: replacement)
+            return mutable as String
+        }
+        return IO(out: joinLines(out))
+    }
+
+    /// Minimal line diff (LCS): unified-style hunks. Big inputs fall back to a whole-block
+    /// comparison rather than pretending precision.
+    private func diff(_ args: [String], context: Context) -> IO {
+        guard args.count == 2,
+              let a = resolve(args[0], context: context),
+              let b = resolve(args[1], context: context),
+              let textA = try? String(contentsOf: a.url, encoding: .utf8),
+              let textB = try? String(contentsOf: b.url, encoding: .utf8) else {
+            return IO(err: "diff: usage: diff <fileA> <fileB>", status: 1)
+        }
+        let linesA = splitLines(textA)
+        let linesB = splitLines(textB)
+        if linesA == linesB { return IO(status: 0) }
+        guard linesA.count * linesB.count <= 4_000_000 else {
+            return IO(out: "files differ (\(linesA.count) vs \(linesB.count) lines — too large for a line diff)\n", status: 1)
+        }
+        // Classic LCS table, then walk back emitting -/+ lines.
+        var table = [[Int]](repeating: [Int](repeating: 0, count: linesB.count + 1), count: linesA.count + 1)
+        for i in stride(from: linesA.count - 1, through: 0, by: -1) {
+            for j in stride(from: linesB.count - 1, through: 0, by: -1) {
+                table[i][j] = linesA[i] == linesB[j]
+                    ? table[i + 1][j + 1] + 1
+                    : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        var out: [String] = []
+        var i = 0, j = 0
+        while i < linesA.count || j < linesB.count {
+            if i < linesA.count, j < linesB.count, linesA[i] == linesB[j] {
+                i += 1; j += 1
+            } else if j == linesB.count || (i < linesA.count && table[i + 1][j] >= table[i][j + 1]) {
+                out.append("- \(linesA[i])"); i += 1
+            } else {
+                out.append("+ \(linesB[j])"); j += 1
+            }
+            if out.count > 500 { out.append("… diff truncated at 500 lines"); break }
+        }
+        return IO(out: joinLines(out), status: 1)
+    }
+
     // MARK: - Helpers
 
     /// Stdin, or the concatenation of any file arguments (for text filters).
@@ -849,4 +1104,111 @@ final class MouseShell {
     }
 
     private func display(_ rel: String) -> String { rel.isEmpty ? "/" : rel }
+}
+
+/// Unprivileged ICMP echo on Apple platforms: `SOCK_DGRAM` + `IPPROTO_ICMP` needs no
+/// entitlements (the SimplePing pattern). The kernel rewrites the identifier on these
+/// sockets, so replies are matched by sequence number. Socket I/O runs on a background
+/// queue — the shell awaits each round trip without blocking the main actor.
+final class ICMPPinger: @unchecked Sendable {
+    private let fd: Int32
+    private let address: sockaddr_in
+    let addressString: String
+
+    init?(address: sockaddr_in) {
+        fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+        guard fd >= 0 else { return nil }
+        self.address = address
+        var mutable = address
+        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        inet_ntop(AF_INET, &mutable.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN))
+        addressString = String(cString: buffer)
+    }
+
+    func shutdown() {
+        close(fd)
+    }
+
+    static func resolve(_ host: String) async -> sockaddr_in? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var hints = addrinfo()
+                hints.ai_family = AF_INET
+                hints.ai_socktype = SOCK_DGRAM
+                var result: UnsafeMutablePointer<addrinfo>?
+                guard getaddrinfo(host, nil, &hints, &result) == 0, let info = result else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                defer { freeaddrinfo(result) }
+                let resolved = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                continuation.resume(returning: resolved)
+            }
+        }
+    }
+
+    /// One echo round trip: send, wait up to `timeout` for the matching reply, return RTT.
+    func pingOnce(sequence: UInt16, timeout: Double) async -> Double? {
+        let fd = self.fd
+        let target = address
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var destination = target
+                // Echo request: 8-byte header + 56-byte pattern payload = classic 64 bytes.
+                var packet = [UInt8](repeating: 0, count: 64)
+                packet[0] = 8   // ICMP_ECHO
+                packet[6] = UInt8(sequence >> 8)
+                packet[7] = UInt8(sequence & 0xff)
+                for i in 8..<packet.count { packet[i] = UInt8(i) }
+                let sum = Self.checksum(packet)
+                packet[2] = UInt8(sum >> 8)
+                packet[3] = UInt8(sum & 0xff)
+
+                let start = Date()
+                let sent = packet.withUnsafeBytes { raw in
+                    withUnsafePointer(to: &destination) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                            sendto(fd, raw.baseAddress, raw.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+                }
+                guard sent == packet.count else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let deadline = start.addingTimeInterval(timeout)
+                var pollTarget = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                while Date() < deadline {
+                    let remaining = Int32(max(1, deadline.timeIntervalSinceNow * 1000))
+                    guard poll(&pollTarget, 1, remaining) > 0 else { break }
+                    var buffer = [UInt8](repeating: 0, count: 1024)
+                    let received = recv(fd, &buffer, buffer.count, 0)
+                    guard received > 0 else { break }
+                    // Darwin prepends the IP header on these sockets; skip it by IHL.
+                    var offset = 0
+                    if received >= 20, buffer[0] >> 4 == 4 { offset = Int(buffer[0] & 0x0f) * 4 }
+                    guard received - offset >= 8, buffer[offset] == 0 else { continue }   // ICMP_ECHOREPLY
+                    let replySequence = UInt16(buffer[offset + 6]) << 8 | UInt16(buffer[offset + 7])
+                    guard replySequence == sequence else { continue }
+                    continuation.resume(returning: Date().timeIntervalSince(start))
+                    return
+                }
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    /// RFC 1071 internet checksum: ones' complement of the ones' complement sum.
+    private static func checksum(_ bytes: [UInt8]) -> UInt16 {
+        var sum: UInt32 = 0
+        var i = 0
+        while i + 1 < bytes.count {
+            sum &+= UInt32(bytes[i]) << 8 | UInt32(bytes[i + 1])
+            i += 2
+        }
+        if i < bytes.count { sum &+= UInt32(bytes[i]) << 8 }
+        while sum > 0xFFFF { sum = (sum & 0xFFFF) &+ (sum >> 16) }
+        return ~UInt16(sum & 0xFFFF)
+    }
 }
