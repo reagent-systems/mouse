@@ -47,6 +47,7 @@ class ContainerType(
     var done by mutableStateOf(false)
 
     val isOnboardingPreset get() = Kind.isOnboardingPreset(kind)
+    val isLessonPreset get() = kind == Kind.swipe || kind == Kind.drag || kind == Kind.spread || kind == Kind.pinch
     val usesGapLabel get() = kind == Kind.drag || kind == Kind.spread
     val displayTitle: String get() = if (done && doneTitle != null) doneTitle else title
 
@@ -96,6 +97,18 @@ class CarouselDeck(
     var openFilePath by mutableStateOf<String?>(null)
     var editorFocused by mutableStateOf(false)
     var dividerBoost by mutableStateOf(0f)
+    /// Set once the onboarding's pinch lesson is done — the ring now waits to be edge-swiped
+    /// away (its graduation). Only meaningful while `isOnboarding`.
+    var edgeLessonActive by mutableStateOf(false)
+
+    /// The onboarding lesson currently on stage (the middle lane), if any.
+    val onStageLesson: ContainerType? get() = lanes.map { it.current }.firstOrNull { it.isLessonPreset }
+
+    /// Swap the on-stage lesson for the next one in the chain (drag→spread→pinch→blank).
+    fun morphOnStageLesson(next: ContainerType) {
+        val lane = lanes.firstOrNull { it.current.isLessonPreset } ?: return
+        lane.current = next
+    }
 
     private var ringTerminal: TerminalSession? = null
     fun terminal(workspace: Workspace): TerminalSession {

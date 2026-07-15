@@ -4,10 +4,12 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -35,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -78,10 +81,49 @@ fun ForegroundView(base: File) {
         var adjacent by remember { mutableStateOf<Pair<CarouselDeck, Boolean>?>(null) } // ring, isRight
 
         Box(Modifier.fillMaxSize().pointerInput(deck) {
-            // Pinch anywhere: spread adds a lane, squeeze removes one.
-            detectTransformGestures { _, _, zoom, _ ->
-                if (zoom > 1.2f) addLane(deck, availableHeightPx, dividerPx, minLanePx)
-                else if (zoom < 0.83f) removeLane(deck, strip, availableHeightPx, dividerPx)
+            // Two-finger pinch adds/removes a lane. Detected in the INITIAL pass so it can
+            // intercept before the lanes' own drag detectors, and it CONSUMES only while ≥2
+            // fingers are down — single-finger touches fall straight through to lane swipes and
+            // divider drags. `detectTransformGestures` was wrong here twice: it reports
+            // incremental zoom per frame (never crossing the 1.2/0.83 thresholds) and it fought
+            // the children for single-finger drags (which broke divider resize).
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                var totalZoom = 1f
+                var wasPinch = false
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    if (event.changes.count { it.pressed } >= 2) {
+                        wasPinch = true
+                        val zoom = event.calculateZoom()
+                        if (zoom != 1f) {
+                            totalZoom *= zoom
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                    if (event.changes.none { it.pressed }) break
+                }
+                if (wasPinch) {
+                    val lesson = deck.onStageLesson
+                    when {
+                        // Onboarding lessons advance instead of adding/removing (the ring has no
+                        // reserve): spread → Pinch?, pinch → done (then the edge lesson).
+                        deck.isOnboarding && lesson?.kind == Kind.spread && totalZoom > 1.2f -> {
+                            lesson.done = true
+                            scope.launch { kotlinx.coroutines.delay(700); deck.morphOnStageLesson(ContainerType.onboardingPinch()) }
+                        }
+                        deck.isOnboarding && lesson?.kind == Kind.pinch && totalZoom < 0.83f -> {
+                            lesson.done = true
+                            scope.launch {
+                                kotlinx.coroutines.delay(500)
+                                deck.morphOnStageLesson(ContainerType.onboardingBlank())
+                                deck.edgeLessonActive = true
+                            }
+                        }
+                        totalZoom > 1.2f -> addLane(deck, availableHeightPx, dividerPx, minLanePx)
+                        totalZoom < 0.83f -> removeLane(deck, strip, availableHeightPx, dividerPx)
+                    }
+                }
             }
         }) {
             adjacent?.let { (ring, isRight) ->
@@ -93,6 +135,12 @@ fun ForegroundView(base: File) {
         // Edge strips: a drag from either edge swipes the whole ring.
         EdgeStrip(true, Modifier.align(Alignment.CenterEnd)) { delta, done -> ringSwipe(delta, done, isRight = true, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
         EdgeStrip(false, Modifier.align(Alignment.CenterStart)) { delta, done -> ringSwipe(delta, done, isRight = false, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
+
+        // The onboarding's final lesson: once pinch is done, hint the edge swipe that graduates.
+        if (deck.isOnboarding && deck.edgeLessonActive) {
+            BasicText("Edge Swipe?", Modifier.align(Alignment.Center),
+                style = TextStyle(fontFamily = Theme.mono, fontSize = Theme.lessonSize, color = Theme.onContainer))
+        }
     }
 
     // Flush edits + persist when this composable leaves (approximate scenePhase departure).
@@ -186,11 +234,25 @@ private fun DividerHandle(ring: CarouselDeck, index: Int) {
     val density = LocalDensity.current
     val minLanePx = with(density) { 80.dp.toPx() }
     Box(Modifier.fillMaxWidth().height(Theme.dividerGap).pointerInput(index) {
-        detectVerticalDragGestures { _, dragAmount ->
+        var acc = 0f
+        detectVerticalDragGestures(
+            onDragStart = { acc = 0f },
+            onDragEnd = {
+                // Onboarding: a finished Drag? lesson lingers as "Dragged." then morphs to Spread?.
+                val lesson = ring.onStageLesson
+                if (ring.isOnboarding && lesson?.kind == Kind.drag && lesson.done) {
+                    scope.launch { kotlinx.coroutines.delay(700); ring.morphOnStageLesson(ContainerType.onboardingSpread()) }
+                }
+            },
+        ) { _, dragAmount ->
             if (index + 1 >= ring.lanes.size) return@detectVerticalDragGestures
             val top = ring.lanes[index]; val bottom = ring.lanes[index + 1]
             val newTop = top.height + dragAmount; val newBottom = bottom.height - dragAmount
             if (newTop >= minLanePx && newBottom >= minLanePx) { top.height = newTop; bottom.height = newBottom }
+            // The Drag? lesson flips to past tense once this is clearly a drag.
+            acc += dragAmount
+            val lesson = ring.onStageLesson
+            if (ring.isOnboarding && lesson?.kind == Kind.drag && abs(acc) > 20f) lesson.done = true
         }
     }, contentAlignment = Alignment.Center) {
         Box(Modifier.width(40.dp).height(5.dp).background(Color(0x73FFFFFF), RoundedCornerShape(3.dp)))
@@ -229,7 +291,10 @@ private fun LessonPanel(type: ContainerType) {
 
 @Composable
 private fun EdgeStrip(right: Boolean, modifier: Modifier, onDrag: (delta: Float, done: Boolean) -> Unit) {
-    Box(modifier.fillMaxHeight().width(Theme.edgeZoneWidth).pointerInput(right) {
+    // Claim this edge band from Android's system back-gesture (API 29+), so an edge swipe reaches
+    // the shell instead of navigating back/home. The iOS app has no such conflict — the screen
+    // edge is already the app's.
+    Box(modifier.fillMaxHeight().width(Theme.edgeZoneWidth).systemGestureExclusion().pointerInput(right) {
         detectHorizontalDragGestures(
             onDragEnd = { onDrag(0f, true) },
         ) { _, dragAmount -> onDrag(dragAmount, false) }
@@ -250,6 +315,7 @@ private fun ringSwipe(
     } else {
         val threshold = widthPx * 0.22f
         val crossed = abs(ringDrag.value) >= threshold
+        val outgoing = strip.current
         scope.launch {
             if (crossed && adjacent != null) {
                 val (ring, right) = adjacent
@@ -260,6 +326,14 @@ private fun ringSwipe(
                 } else strip.currentIndex = existingIndex
             }
             ringDrag.animateTo(0f); setAdjacent(null)
+            // Graduation: an onboarding ring retires once you edge-swipe away from it.
+            if (crossed && outgoing.isOnboarding && outgoing !== strip.current) {
+                val idx = strip.rings.indexOf(outgoing)
+                if (idx >= 0) {
+                    strip.rings.removeAt(idx)
+                    if (idx < strip.currentIndex) strip.currentIndex -= 1
+                }
+            }
         }
     }
 }

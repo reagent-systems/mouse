@@ -7,7 +7,16 @@ platform, per the no-cross-platform-frameworks rule.
 
 ## Building
 
+Requirements: **JDK 21** and the **Android SDK** (Android Studio installs both).
+
 Android Studio: open this `kotlin/` folder. CLI:
+
+```sh
+cd kotlin
+./gradlew assembleDebug
+```
+
+On macOS, if Gradle can't find the SDK:
 
 ```sh
 ANDROID_HOME=~/Library/Android/sdk ./gradlew assembleDebug
@@ -18,6 +27,48 @@ minSdk 26 / target 35. Zero third-party libraries beyond the platform +
 Compose + coroutines — even tar/gzip (`GZIPInputStream` + a hand-written tar
 reader), JSON (`org.json`), HTTP (`HttpURLConnection`), and checksums
 (`MessageDigest`) are the SDK's own.
+
+## Running on an emulator
+
+### Android Studio (easiest)
+
+1. Install [Android Studio](https://developer.android.com/studio).
+2. **File → Open** → select this `kotlin/` folder (not the repo root).
+3. **Tools → Device Manager → Create Device** — pick a phone (e.g. Pixel 9)
+   and a recent system image (API 35 or similar). Start the virtual device.
+4. Click **Run** (green play button). Android Studio builds, installs, and
+   launches the app on the emulator.
+
+### CLI
+
+Build the APK (see above), then boot an emulator and install:
+
+```sh
+# macOS — add SDK tools to PATH if needed
+export ANDROID_HOME=~/Library/Android/sdk
+export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
+
+# List virtual devices, then boot one (use a name from the list)
+emulator -list-avds
+emulator -avd Pixel_9 &
+
+adb wait-for-device
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.reagentsystems.mouse/.MainActivity
+```
+
+On Windows (PowerShell), set `ANDROID_HOME` to
+`$env:LOCALAPPDATA\Android\Sdk` and add `\emulator` and `\platform-tools`
+to `PATH` before the same `adb` / `emulator` commands.
+
+### If something fails
+
+| Problem | Fix |
+|---|---|
+| `emulator` or `adb` not found | Add `$ANDROID_HOME/emulator` and `.../platform-tools` to `PATH` |
+| No AVDs listed | Create one in Android Studio → Device Manager |
+| Gradle / SDK errors | Open `kotlin/` in Android Studio once; let it sync and download SDK components |
+| Emulator won't start | Enable CPU virtualization in BIOS, or use a physical device with USB debugging |
 
 ## Parity
 
@@ -37,6 +88,17 @@ Feature parity with the iOS app, built natively in Compose:
 - **Terminal** — two engines behind the switcher: `msh` (the same
   from-scratch shell as iOS, ported) and the device's **real
   `/system/bin/sh`** as a persistent process — Android's honest advantage
+
+## Known Android nuances
+
+- **Edge-swipe vs. the system back gesture.** On gesture-navigation devices,
+  Android reserves the screen edges for the back gesture. The ring edge-swipe
+  claims those bands with `Modifier.systemGestureExclusion()` (the standard
+  API), but the OS caps exclusion at 200 dp per edge, so on gesture-nav a
+  swipe from the extreme edge may still go back. This is inherently a
+  real-device / real-finger behavior (`adb input` near the edge is
+  intercepted by the system's back-gesture handler and can't test it
+  faithfully). No conflict on 3-button navigation.
 
 ## Platform differences (by design)
 
