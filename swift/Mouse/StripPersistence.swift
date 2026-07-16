@@ -171,7 +171,7 @@ enum StripPersistence {
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(strip.snapshot()).write(to: url, options: .atomic)
         } catch {
-            print("StripPersistence: save failed — \(error)")
+            print("StripPersistence: save failed: \(error)")
         }
     }
 

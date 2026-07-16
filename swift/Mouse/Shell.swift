@@ -450,7 +450,7 @@ final class MouseShell {
         case "sed": return sed(args, stdin: stdin, context: context)
         case "diff": return diff(args, context: context)
         case "git", "npm", "pnpm", "node", "npx":
-            return IO(err: "\(name): not built yet — the native \(name == "git" ? "git" : "package") engine is on the roadmap", status: 127)
+            return IO(err: "\(name): not built yet", status: 127)
         default:
             return IO(err: "msh: command not found: \(name) (type help)", status: 127)
         }
@@ -925,11 +925,11 @@ final class MouseShell {
                           status: code >= 400 ? 22 : 0)
             }
             guard data.count < 400_000 else {
-                return IO(out: "curl: response too large to print (\(data.count / 1024) KB) — use -o <file>\n",
+                return IO(out: "curl: response too large to print (\(data.count / 1024) KB), use -o <file>\n",
                           status: code >= 400 ? 22 : 0)
             }
             guard let text = String(data: data, encoding: .utf8) else {
-                return IO(out: "curl: binary response (\(data.count) bytes) — use -o <file>\n",
+                return IO(out: "curl: binary response (\(data.count) bytes), use -o <file>\n",
                           status: code >= 400 ? 22 : 0)
             }
             return IO(out: text, status: code >= 400 ? 22 : 0)
@@ -1040,7 +1040,7 @@ final class MouseShell {
         let linesB = splitLines(textB)
         if linesA == linesB { return IO(status: 0) }
         guard linesA.count * linesB.count <= 4_000_000 else {
-            return IO(out: "files differ (\(linesA.count) vs \(linesB.count) lines — too large for a line diff)\n", status: 1)
+            return IO(out: "files differ (\(linesA.count) vs \(linesB.count) lines)\n", status: 1)
         }
         // Classic LCS table, then walk back emitting -/+ lines.
         var table = [[Int]](repeating: [Int](repeating: 0, count: linesB.count + 1), count: linesA.count + 1)

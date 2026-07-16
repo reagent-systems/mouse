@@ -68,6 +68,45 @@ final class Workspace {
         return fresh
     }
 
+    /// True for projects born on this device ("local/<name>") — no remote exists, so there is
+    /// nothing to push, pull, or graph until a publish flow arrives (roadmap).
+    var isLocal: Bool { repoFullName.hasPrefix("local/") }
+
+    /// Every local project on disk ("local/<name>"), for the picker.
+    static func localProjectNames() -> [String] {
+        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("workspaces")
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: base.path)) ?? []
+        return entries
+            .filter { $0.hasPrefix("local__") }
+            .map { "local/" + $0.dropFirst("local__".count) }
+            .sorted()
+    }
+
+    /// Create (or reopen) a fresh local project — code without GitHub: an empty tree under
+    /// `local/<name>`, ready immediately. Files come from the editor and the terminal
+    /// (`touch`, redirects); persistence and restore work exactly like repo workspaces.
+    static func local(named rawName: String) -> Workspace {
+        let name = rawName
+            .lowercased()
+            .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
+            .reduce(into: "") { if !($0.hasSuffix("-") && $1 == "-") { $0.append($1) } }
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let full = "local/" + (name.isEmpty ? "project" : name)
+        if let live = byRepo[full] { return live }
+        let dir = directory(for: full)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let fresh = Workspace(existing: full) else {
+            // Directory creation failed (out of disk?) — surface as a failed workspace.
+            let broken = Workspace(downloading: full)
+            broken.phase = .failed("couldn't create the project folder")
+            byRepo[full] = broken
+            return broken
+        }
+        byRepo[full] = fresh
+        return fresh
+    }
+
     /// Restore path: the shared workspace, seeded with persisted state if it isn't live yet
     /// (a second ring restoring the same repo just gets the first ring's instance).
     static func shared(
@@ -120,6 +159,7 @@ final class Workspace {
     /// synced head moved since it was built). Runs regardless of whether the Graph is visible.
     @MainActor
     func refreshHistory(token: String) async {
+        guard !isLocal else { return }
         let stamp = "\(treeVersion)|\(syncedSha ?? "?")"
         guard !historyInFlight else { return }
         guard historyStamp != stamp || graphRows == nil else { return }
@@ -139,6 +179,7 @@ final class Workspace {
     /// Compare the remote head against `syncedSha` (throttled to once a minute).
     @MainActor
     func refreshUpstream(token: String) async {
+        guard !isLocal else { return }
         if let last = lastUpstreamCheck, Date().timeIntervalSince(last) < 60 { return }
         lastUpstreamCheck = Date()
         guard let head = try? await Workspace.remoteHeadSha(repoFullName, token: token) else { return }
@@ -162,6 +203,7 @@ final class Workspace {
     }
 
     func markModified(_ path: String) { modifiedPaths.insert(path) }
+    func unmarkModified(_ path: String) { modifiedPaths.remove(path) }
     func clearModified() { modifiedPaths = [] }
 
     /// Reopen an already-downloaded workspace. Fails if the tree is gone. Private: all creation

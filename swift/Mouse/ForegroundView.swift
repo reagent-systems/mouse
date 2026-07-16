@@ -95,6 +95,12 @@ struct ForegroundView: View {
             }
             return length
         }
+        // The ring dots are display-only, so they borrow space the layout can't use anyway:
+        // the bottom safe-area inset (beside the home indicator). Containers keep the full
+        // height; nothing moved up to make room.
+        .overlay(alignment: .bottom) {
+            ringDots.offset(y: dotsOffset)
+        }
         .simultaneousGesture(magnifyGesture)
         .overlay(alignment: .leading) { edgeStrip(.left) }
         .overlay(alignment: .trailing) { edgeStrip(.right) }
@@ -134,6 +140,36 @@ struct ForegroundView: View {
             withAnimation(.spring(duration: 0.35)) { edgeNudge = 0 }
             try? await Task.sleep(for: .seconds(0.4))
         }
+    }
+
+    /// Bottom safe-area inset of the window (34 pt on home-indicator iPhones, 0 on SE).
+    @State private var bottomInset: CGFloat = 0
+
+    /// Dip the dots into the safe-area inset: centered in the gap between the container
+    /// bottom and the home indicator. On inset-less devices they stay just inside, riding
+    /// the container's bottom edge instead.
+    private var dotsOffset: CGFloat {
+        bottomInset >= 24 ? bottomInset * 0.55 : -10
+    }
+
+    /// The ring navigation dots: one per ring, the current one filled — always visible,
+    /// display only (rings are still traveled by edge swipes). Black on the white canvas
+    /// when they sit in the safe-area gap; white when riding the container edge (SE).
+    private var ringDots: some View {
+        let onCanvas = bottomInset >= 24
+        let stroke: Color = onCanvas ? .black.opacity(0.4) : .white.opacity(0.5)
+        let fill: Color = onCanvas ? .black : .white
+        return HStack(spacing: 8) {
+            ForEach(strip.rings.indices, id: \.self) { index in
+                Circle()
+                    .strokeBorder(stroke, lineWidth: 1)
+                    .background(Circle().fill(index == strip.currentIndex ? fill : .clear))
+                    .frame(width: 7, height: 7)
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: strip.currentIndex)
+        .animation(.snappy(duration: 0.2), value: strip.rings.count)
+        .allowsHitTesting(false)
     }
 
     private func laneStack(for ring: CarouselDeck) -> some View {
@@ -374,6 +410,9 @@ struct ForegroundView: View {
     private func configure(for height: CGFloat) {
         let previous = availableHeight
         availableHeight = height
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            if let inset = scene.keyWindow?.safeAreaInsets.bottom { bottomInset = inset }
+        }
         if didInit {
             // iPad rotation or a multitasking resize changed the window: re-fit the current ring
             // proportionally (off-screen rings re-fit when they next slide in, via makeAdjacent).

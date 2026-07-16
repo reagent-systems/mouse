@@ -57,7 +57,7 @@ final class TerminalSession {
     func switchEngine() {
         let all = Engine.allCases
         engine = all[(all.firstIndex(of: engine)! + 1) % all.count]
-        append("[engine: \(engine == .msh ? "msh — mouse shell" : "js — JavaScriptCore")]", .output)
+        append("[engine: \(engine.rawValue)]", .output)
     }
 
     /// Returns false when the input was refused (a command is already running) so the prompt
@@ -165,7 +165,7 @@ struct TerminalContainerView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { promptFocused = true }
             } else {
-                Text("open a repo in the Files container —\nthe terminal runs on the workspace")
+                Text("open a project in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))
                     .multilineTextAlignment(.center)
                     .opacity(0.6)

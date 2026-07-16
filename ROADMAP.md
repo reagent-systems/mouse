@@ -32,7 +32,8 @@ terminal, push/pull. Largely shipped (see below). Still on this branch's
 plate:
 
 - **libgit2**: real clones, offline commits, branches, merges, full ref
-  topology in the graph, honest conflict surfacing
+  topology in the graph, honest conflict surfacing — and local history + a
+  **publish-to-GitHub flow for local projects** (they exist now, remote-less)
 - Editor upgrades: syntax highlighting + line numbers (Runestone/TextKit 2),
   find in file, font-size setting, large-file strategy
 - Terminal engines: the package engine (`pnpm install`, lockfile-driven,

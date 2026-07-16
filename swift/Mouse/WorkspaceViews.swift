@@ -45,21 +45,46 @@ struct FilesContainerView: View {
     }
 }
 
-/// Lists the signed-in user's repositories; tapping one downloads it into the ring's workspace.
+/// Picks the ring's project: a fresh LOCAL project (no GitHub needed — code offline, or when
+/// the API is having a bad day), or one of the signed-in user's repositories.
 private struct RepoPickerView: View {
     let deck: CarouselDeck
 
     @State private var repos: [RepoSummary]?
     @State private var loadError: String?
+    @State private var askingName = false
+    @State private var projectName = ""
+    @State private var localProjects: [String] = []
 
     var body: some View {
-        if case .signedIn = GitHubAuth.shared.phase {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    Text("open a repo")
-                        .font(.custom(AppFont.asciiName, size: 12))
-                        .opacity(0.55)
-                        .padding(.bottom, 10)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                Text("start a project")
+                    .font(.custom(AppFont.asciiName, size: 12))
+                    .opacity(0.55)
+                    .padding(.bottom, 10)
+                Button { askingName = true } label: {
+                    Text("+ new local project")
+                        .font(.custom(AppFont.asciiName, size: 14))
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                ForEach(localProjects, id: \.self) { project in
+                    Button {
+                        deck.workspace = Workspace.shared(for: project)
+                    } label: {
+                        Text(String(project.dropFirst("local/".count)))
+                            .font(.custom(AppFont.asciiName, size: 14))
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                Text(signedIn ? "or open a repo" : "sign in with the GitHub container to open a repo")
+                    .font(.custom(AppFont.asciiName, size: 12))
+                    .opacity(0.55)
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
+                if signedIn {
                     if let loadError {
                         Text(loadError)
                             .font(.custom(AppFont.asciiName, size: 13))
@@ -87,20 +112,29 @@ private struct RepoPickerView: View {
                             .opacity(0.55)
                     }
                 }
-                .padding(16)
             }
-            .task {
-                guard repos == nil, let token = GitHubAuth.shared.accessToken else { return }
-                do { repos = try await RepoSummary.fetchMine(token: token) }
-                catch { loadError = error.localizedDescription }
-            }
-        } else {
-            Text("sign in with the GitHub container\nto open a repo")
-                .font(.custom(AppFont.asciiName, size: 14))
-                .multilineTextAlignment(.center)
-                .opacity(0.6)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(16)
         }
+        .task {
+            localProjects = Workspace.localProjectNames()
+            guard repos == nil, let token = GitHubAuth.shared.accessToken else { return }
+            do { repos = try await RepoSummary.fetchMine(token: token) }
+            catch { loadError = error.localizedDescription }
+        }
+        .alert("New local project", isPresented: $askingName) {
+            TextField("project name", text: $projectName)
+                .textInputAutocapitalization(.never)
+            Button("Create") {
+                deck.workspace = Workspace.local(named: projectName)
+                projectName = ""
+            }
+            Button("Cancel", role: .cancel) { projectName = "" }
+        }
+    }
+
+    private var signedIn: Bool {
+        if case .signedIn = GitHubAuth.shared.phase { return true }
+        return false
     }
 
     private func open(_ repo: RepoSummary) {
@@ -119,6 +153,8 @@ private struct FileTreeView: View {
     let deck: CarouselDeck
     let workspace: Workspace
     @State private var expanded: Set<String> = []
+    @State private var askingNewFile = false
+    @State private var newFileName = ""
 
     private struct Node: Identifiable {
         let path: String
@@ -138,9 +174,46 @@ private struct FileTreeView: View {
                 ForEach(visibleNodes()) { node in
                     row(node)
                 }
+                Button { askingNewFile = true } label: {
+                    Text("+ add file")
+                        .font(.custom(AppFont.asciiName, size: 13))
+                        .opacity(0.55)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .padding(16)
         }
+        .alert("New file", isPresented: $askingNewFile) {
+            TextField("name", text: $newFileName)
+                .textInputAutocapitalization(.never)
+            Button("Create") { createFile() }
+            Button("Cancel", role: .cancel) { newFileName = "" }
+        }
+    }
+
+    /// Create an empty file (subfolders in the name are created too), mark it for push, and
+    /// open it in the ring's viewer with its ancestors expanded.
+    private func createFile() {
+        let name = newFileName.trimmingCharacters(in: .whitespaces)
+        newFileName = ""
+        guard !name.isEmpty else { return }
+        let pieces = name.split(separator: "/").map(String.init).filter { $0 != ".." && $0 != "." }
+        guard !pieces.isEmpty else { return }
+        let rel = pieces.joined(separator: "/")
+        let url = workspace.root.appendingPathComponent(rel)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: url.path) {
+            fm.createFile(atPath: url.path, contents: Data())
+            workspace.markModified(rel)
+        }
+        var ancestor = ""
+        for piece in pieces.dropLast() {
+            ancestor = ancestor.isEmpty ? piece : ancestor + "/" + piece
+            expanded.insert(ancestor)
+        }
+        deck.openFile(rel)
     }
 
     private func row(_ node: Node) -> some View {
@@ -231,6 +304,14 @@ final class FileBuffer: @unchecked Sendable {
     static func flushAll() {
         byFile.values.forEach { $0.flush() }
     }
+
+    /// After a push, what's on disk IS the remote: re-anchor open buffers' baselines so the
+    /// next edit is measured against the pushed content, not the pre-push load.
+    static func rebaseline(for workspace: Workspace) {
+        for buffer in byFile.values where buffer.loadedWorkspace === workspace {
+            buffer.baseline = buffer.text
+        }
+    }
     var text = ""
     private(set) var note: String?
     private(set) var loadedURL: URL?
@@ -239,6 +320,11 @@ final class FileBuffer: @unchecked Sendable {
     private var loadedTreeVersion = -1
     private var dirty = false
     private var suppressNextChange = false
+    /// The content as loaded from the tree — the "no real change" reference. A flush whose
+    /// text equals this UNMARKS the file: type a space, delete it, and there is nothing to
+    /// push. (Baseline is per-load: after an app restart atop unpushed edits, those edits
+    /// are the baseline and stay marked via the persisted dirty set.)
+    private var baseline = ""
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     var hasDocument: Bool { loadedURL != nil }
@@ -254,6 +340,7 @@ final class FileBuffer: @unchecked Sendable {
             note = nil
             suppressNextChange = true
             text = ""
+            baseline = ""
             return
         }
         loadedPath = path
@@ -273,6 +360,7 @@ final class FileBuffer: @unchecked Sendable {
         note = nil
         suppressNextChange = true
         text = content
+        baseline = content
         dirty = false
         loadedURL = url
     }
@@ -311,7 +399,14 @@ final class FileBuffer: @unchecked Sendable {
         guard dirty, let loadedURL else { return }
         try? text.write(to: loadedURL, atomically: true, encoding: .utf8)
         dirty = false
-        if let loadedWorkspace, let loadedPath { loadedWorkspace.markModified(loadedPath) }
+        guard let loadedWorkspace, let loadedPath else { return }
+        // Only a REAL difference from the loaded content counts as a change to push; an edit
+        // that round-tripped back to the baseline clears the flag it may have set earlier.
+        if text == baseline {
+            loadedWorkspace.unmarkModified(loadedPath)
+        } else {
+            loadedWorkspace.markModified(loadedPath)
+        }
     }
 }
 
@@ -398,9 +493,11 @@ struct ContainerActionsRow: View {
     @State private var commitMessage = ""
 
     private var chipDiameter: CGFloat { 22 }
+    /// Slot width — per the sketch: wide slots, not circles.
+    private var chipWidth: CGFloat { 44 }
 
     var body: some View {
-        if let workspace = deck.workspace, case .ready = workspace.phase,
+        if let workspace = deck.workspace, !workspace.isLocal, case .ready = workspace.phase,
            case .signedIn = GitHubAuth.shared.phase {
             HStack(spacing: 8) {
                 if workspace.hasChanges {
@@ -428,7 +525,7 @@ struct ContainerActionsRow: View {
             commitMessage = ""
             askingPush = true
         } label: {
-            chip(state: workspace.pushState, pointingUp: true)
+            chip(state: workspace.pushState, color: GitGraph.railColors[3])   // green
         }
         .disabled(isBusy(workspace.pushState))
         .alert(pushTitle(workspace), isPresented: $askingPush) {
@@ -467,6 +564,7 @@ struct ContainerActionsRow: View {
                 )
                 workspace.clearModified()
                 workspace.markSynced(to: commitSha)
+                FileBuffer.rebaseline(for: workspace)
                 workspace.pushState = .idle
                 await workspace.refreshHistory(token: token)  // our commit appears in the graph
             } catch {
@@ -481,7 +579,7 @@ struct ContainerActionsRow: View {
         Button {
             askingPull = true
         } label: {
-            chip(state: workspace.pullState, pointingUp: false)
+            chip(state: workspace.pullState, color: GitGraph.railColors[6])   // blue
         }
         .disabled(isBusy(workspace.pullState))
         .alert(pullTitle(workspace), isPresented: $askingPull) {
@@ -493,7 +591,7 @@ struct ContainerActionsRow: View {
             if case .failed(let reason) = workspace.pullState {
                 Text("Last attempt failed: \(reason)")
             } else if workspace.hasChanges {
-                Text("Replaces the working tree — your \(workspace.modifiedPaths.count) unpushed edit\(workspace.modifiedPaths.count == 1 ? "" : "s") will be lost.")
+                Text("Replaces the working tree. \(workspace.modifiedPaths.count) unpushed edit\(workspace.modifiedPaths.count == 1 ? "" : "s") will be lost.")
             }
         }
     }
@@ -527,43 +625,23 @@ struct ContainerActionsRow: View {
         return false
     }
 
-    private func chip(state: Workspace.PushState, pointingUp: Bool) -> some View {
+    /// Slot-shaped (capsule) action buttons: no glyphs — the color IS the identity.
+    /// Push is green (outgoing work), pull is blue (incoming), failure red. The hues come
+    /// from the graph-rail palette, so no new colors enter the system.
+    private func chip(state: Workspace.PushState, color: Color) -> some View {
         Group {
-            switch state {
-            case .pushing:
-                ProgressView().tint(.white).scaleEffect(0.5)
-            case .failed:
-                ChevronGlyph(pointingUp: pointingUp)
-                    .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-                    .foregroundStyle(.red)
-                    .frame(width: 7.5, height: 4.5)
-            case .idle:
-                ChevronGlyph(pointingUp: pointingUp)
-                    .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-                    .foregroundStyle(.white)
-                    .frame(width: 7.5, height: 4.5)
+            if case .pushing = state {
+                ProgressView().tint(.black).scaleEffect(0.5)
             }
         }
-        .frame(width: chipDiameter, height: chipDiameter)
-        .background(.white.opacity(0.16), in: Circle())
+        .frame(width: chipWidth, height: chipDiameter)
+        .background(slotColor(for: state, idle: color), in: Capsule())
+        .contentShape(Capsule())
+    }
+
+    private func slotColor(for state: Workspace.PushState, idle: Color) -> Color {
+        if case .failed = state { return .red }
+        return idle
     }
 }
 
-/// A hand-drawn /\ (or \/) — two strokes meeting at a point, matching the app's ascii language.
-struct ChevronGlyph: Shape {
-    let pointingUp: Bool
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        if pointingUp {
-            path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
-            path.addLine(to: CGPoint(x: rect.midX, y: rect.minY))
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        } else {
-            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        }
-        return path
-    }
-}

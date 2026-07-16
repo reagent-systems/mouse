@@ -146,11 +146,16 @@ struct GitGraphContainerView: View {
         Group {
             if let workspace {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("\(workspace.repoFullName) — history")
+                    Text("\(workspace.repoFullName) history")
                         .font(.custom(AppFont.asciiName, size: 11))
                         .opacity(0.55)
                         .padding(.bottom, 8)
-                    if let rows = workspace.graphRows {
+                    if workspace.isLocal {
+                        Text("no history yet")
+                            .font(.custom(AppFont.asciiName, size: 13))
+                            .opacity(0.55)
+                            .padding(.top, 8)
+                    } else if let rows = workspace.graphRows {
                         graph(rows, tips: workspace.graphTips)
                     } else if let error = workspace.graphError {
                         Text(error)
@@ -179,7 +184,7 @@ struct GitGraphContainerView: View {
                     }
                 }
             } else {
-                Text("open a repo in the Files container")
+                Text("open a project in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))
                     .opacity(0.6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

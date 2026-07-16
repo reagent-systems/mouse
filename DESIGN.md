@@ -65,7 +65,10 @@ Mouse is monochrome with one sanctioned exception.
 - **The exception:** the commit graph's branch rails cycle an 8-color
   palette (orange, pink, cyan, green, purple, yellow, blue, red) — data
   encoding, not decoration.
-- Red additionally marks failure states (a failed push chip). Nothing else
+- **The second exception:** the action slots — green (push) and blue
+  (pull), drawn from the same rail palette. Color as action-identity, not
+  decoration.
+- Red additionally marks failure states (a failed push slot). Nothing else
   is colored. There is no accent color; if a design wants one, the design
   isn't finished.
 
@@ -96,13 +99,22 @@ Rules:
 
 ## 6. Components
 
-- **Action chips** (container top-right): 22 pt circles, white-on-black
-  inverted, sitting *concentric* with the container corner — chip inset is
-  chosen so `chip radius = corner radius − inset`. Glyphs are hand-drawn
-  strokes (`ChevronGlyph`: ∧ push, ∨ pull), matching the ASCII language —
-  no SF Symbols on container surfaces. A chip exists only while its
-  prerequisites are met; a failed action turns its chip red and the next
-  tap explains why in plain words.
+- **Action slots** (container top-right): 22 pt-tall × 44 pt **capsule
+  slots**, no glyphs — **the color is the identity**: push is green
+  (outgoing work), pull is blue (incoming), failure red. The hues are the
+  graph-rail palette's own green/blue, so no new colors enter the system.
+  A slot exists only while its prerequisites are met — and only when
+  there's a real difference to act on (a no-op edit doesn't summon push).
+  The terminal's engine switcher (top-left) keeps its outlined text-capsule
+  form. No SF Symbols on container surfaces.
+- **Container header**: metadata line top-left (filename, `owner/repo`),
+  action slots top-right. No visible divider — whitespace is the separator.
+- **Ring dots** (in the bottom safe-area gap, beside the home indicator):
+  one 7 pt dot per ring, current filled — black on white, always visible.
+  Display-only, so they live in space the layout can't use anyway: the
+  containers keep the full height. The one piece of persistent shell
+  furniture; travel stays gestural (edge swipes). On home-button devices
+  (no bottom inset) they ride the container's bottom edge in white.
 - **Lesson words** ride the gesture they teach: the label flips to past
   tense ("Swipe?" → "Swiped.") the moment the gesture crosses its commit
   threshold — feedback lands mid-gesture, not after.
@@ -119,6 +131,9 @@ Rules:
 - Unbuilt things say so honestly: `git: not built yet — the native git
   engine is on the roadmap`.
 - No exclamation points, no "oops", no celebration copy.
+- **No em-dashes in UI text**, and no self-explanations: state the fact,
+  never the rationale ("no GitHub needed", "this will…" are bloat). If a
+  control needs explaining, redesign the control.
 
 ## 8. Adding a container
 

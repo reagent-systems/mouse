@@ -168,14 +168,14 @@ final class GitHubAuth {
             case "slow_down":
                 interval = response.interval ?? (interval + 5)
             case "expired_token":
-                throw AuthError("The code expired — start over.")
+                throw AuthError("The code expired. Start over.")
             case "access_denied":
                 throw AuthError("Sign-in was declined on GitHub.")
             default:
                 throw AuthError("GitHub said: \(response.error ?? "unknown error")")
             }
         }
-        throw AuthError("The code expired — start over.")
+        throw AuthError("The code expired. Start over.")
     }
 
     private func refreshToken() async throws -> String {
