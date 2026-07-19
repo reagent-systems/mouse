@@ -31,12 +31,15 @@ The IDE absorption: workspaces, file tree, in-place editor, commit graph,
 terminal, push/pull. Largely shipped (see below). Still on this branch's
 plate:
 
-- **Git, merges**: the local engine and the remote half are BUILT
-  (`GitCore` + `GitRemote`: clone/fetch/push over smart-HTTP, packfiles with
-  delta resolution, and push that auto-creates the GitHub repo via
-  `POST /user/repos`). Remaining: real merges with conflict surfacing, a
-  `git clone` entry in the project picker, and wiring the push action-slot
-  to the native engine for local projects
+- **Git, merges**: the local engine, the remote half, AND native merges are
+  BUILT (`GitCore` + `GitRemote`: clone/fetch/push over smart-HTTP, packfiles
+  with delta resolution, push that auto-creates the GitHub repo via
+  `POST /user/repos`, and a three-way merge engine — fast-forward /
+  merge-commit / diff3 conflict markers — verified against `git merge-file`
+  and a real repo). The git module toolbar (`commit · sync · branch · merge`
+  in the Graph header) drives them. Remaining: a `git clone` entry in the
+  project picker, and a non-clobbering fetch-into-tracking-ref so `sync` can
+  pull-and-merge from the remote, not only push
 - Editor upgrades: syntax highlighting + line numbers (Runestone/TextKit 2),
   find in file, font-size setting, large-file strategy
 - Terminal engines: the package engine (`pnpm install`, lockfile-driven,

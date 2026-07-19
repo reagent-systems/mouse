@@ -824,7 +824,7 @@ struct Panel: View {
                     ViewerContainerView(deck: deck)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if type.kind == ContainerType.graphKind {
-                    GitGraphContainerView(workspace: deck?.workspace)
+                    GitGraphContainerView(workspace: deck?.workspace, deck: deck)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if type.kind == ContainerType.terminalKind {
                     TerminalContainerView(deck: deck)
@@ -844,22 +844,13 @@ struct Panel: View {
                         .strokeBorder(.white.opacity(0.35), lineWidth: 1)
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                // The container action stack: icons appear as their prerequisites are met.
-                // Nudged slightly further off the right edge than the top, by request.
-                if !type.isOnboardingPreset, let deck {
-                    ContainerActionsRow(deck: deck, cornerRadius: cornerRadius)
-                        .padding(.top, ContainerActionsRow.topInset)
-                        .padding(.trailing, ContainerActionsRow.inset + 8)
-                }
-            }
             .overlay(alignment: .topLeading) {
-                // The terminal's engine switcher — the top-left counterpart of the action
-                // chips: shows the active engine (msh, js), tap to cycle.
+                // The terminal's engine switcher — top-left: shows the active engine (msh, js),
+                // tap to cycle. The git controls live in the Graph module's header now.
                 if type.kind == ContainerType.terminalKind, let deck, let workspace = deck.workspace {
                     TerminalEngineChip(session: deck.terminal(for: workspace), cornerRadius: cornerRadius)
-                        .padding(.top, ContainerActionsRow.inset)
-                        .padding(.leading, ContainerActionsRow.inset + 8)
+                        .padding(.top, 8)
+                        .padding(.leading, 16)
                 }
             }
     }

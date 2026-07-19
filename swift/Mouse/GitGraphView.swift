@@ -138,6 +138,8 @@ enum GitGraph {
 
 struct GitGraphContainerView: View {
     let workspace: Workspace?
+    /// The ring, for the git toolbar's terminal reporting. Optional so previews/other callers work.
+    var deck: CarouselDeck? = nil
 
     private let laneWidth: CGFloat = 14
     private let rowHeight: CGFloat = 34
@@ -149,7 +151,15 @@ struct GitGraphContainerView: View {
                     Text("\(workspace.repoFullName) history")
                         .font(.custom(AppFont.asciiName, size: 11))
                         .opacity(0.55)
-                        .padding(.bottom, 8)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let deck {
+                        // The git module's toolbar rides its own row beneath the title so all four
+                        // controls have room on a narrow phone.
+                        GitModuleToolbar(deck: deck, workspace: workspace)
+                            .padding(.top, 8)
+                    }
+                    Color.clear.frame(height: 8)
                     if let rows = workspace.graphRows, !rows.isEmpty {
                         graph(rows, tips: workspace.graphTips)
                     } else if workspace.hasLocalRepo || workspace.isLocal {
@@ -177,8 +187,9 @@ struct GitGraphContainerView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .task(id: workspace.repoFullName + "::t\(workspace.treeVersion)") {
-                    // Fallback kick (deduped inside) — normally the action row has already
-                    // loaded this long before the Graph is on screen. Local repos need no token.
+                    // Recompute the toolbar's enable/disable state, then warm the graph. Local
+                    // repos need no token. Deduped inside refreshHistory.
+                    workspace.refreshGitState()
                     await workspace.refreshHistory(token: GitHubAuth.shared.accessToken)
                 }
             } else {
@@ -280,4 +291,303 @@ struct GitGraphContainerView: View {
         }
     }
 
+}
+
+/// The git module's toolbar: four always-present controls in the Graph container's header —
+/// `commit · sync · branch · merge`. Unlike the old corner slots (which appeared only when
+/// usable), these pre-exist and gray out (dim, ~0.28) until their prerequisite is met, so their
+/// place in the header is stable. A tap on a dimmed control isn't dead: it states WHY it's
+/// unavailable in the ring's terminal (the app's one honest error surface). The native git
+/// engine (`GitCore`/`GitRemote`) backs commit, branch, and merge; sync uses it for repos with a
+/// local `.git` and the Data API for downloaded (tarball) repos.
+struct GitModuleToolbar: View {
+    let deck: CarouselDeck
+    let workspace: Workspace
+
+    @State private var askingCommit = false
+    @State private var commitMessage = ""
+    @State private var askingBranch = false
+    @State private var askingNewBranch = false
+    @State private var newBranchName = ""
+    @State private var askingMerge = false
+    @State private var askingSyncPush = false      // tarball push needs a commit message
+
+    var body: some View {
+        HStack(spacing: 12) {
+            control("commit", enabled: canCommit) { commitTapped() }
+            control("sync", enabled: canSync, busy: isBusy(workspace.pushState), failed: isFailed(workspace.pushState)) { syncTapped() }
+            control("branch", enabled: canBranch) { branchTapped() }
+            control("merge", enabled: canMerge) { mergeTapped() }
+        }
+        // commit — message prompt
+        .alert("Commit \(workspace.repoFullName)", isPresented: $askingCommit) {
+            TextField("Message", text: $commitMessage).textInputAutocapitalization(.sentences)
+            Button("Commit") { commit() }
+            Button("Cancel", role: .cancel) {}
+        }
+        // sync (tarball push) — message prompt
+        .alert(syncPushTitle, isPresented: $askingSyncPush) {
+            TextField("Message", text: $commitMessage).textInputAutocapitalization(.sentences)
+            Button("Commit & Push") { dataPush() }
+            Button("Cancel", role: .cancel) {}
+        }
+        // branch — switch to an existing branch or start a new one
+        .confirmationDialog("Branch", isPresented: $askingBranch, titleVisibility: .visible) {
+            ForEach(workspace.localBranches, id: \.self) { name in
+                if name != workspace.currentGitBranch {
+                    Button("switch to \(name)") { switchBranch(name) }
+                }
+            }
+            Button("new branch…") { newBranchName = ""; askingNewBranch = true }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("New branch", isPresented: $askingNewBranch) {
+            TextField("name", text: $newBranchName).textInputAutocapitalization(.never)
+            Button("Create") { createBranch() }
+            Button("Cancel", role: .cancel) {}
+        }
+        // merge — pick a branch to merge into the current one
+        .confirmationDialog("Merge into \(workspace.currentGitBranch)", isPresented: $askingMerge, titleVisibility: .visible) {
+            ForEach(workspace.localBranches, id: \.self) { name in
+                if name != workspace.currentGitBranch {
+                    Button(name) { merge(name) }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    // MARK: - Enablement
+
+    private var signedIn: Bool {
+        if case .signedIn = GitHubAuth.shared.phase { return true }
+        return false
+    }
+    private var signedInLogin: String? {
+        if case .signedIn(let login) = GitHubAuth.shared.phase { return login }
+        return nil
+    }
+
+    private var canCommit: Bool {
+        workspace.hasLocalRepo && (workspace.hasUncommittedChanges || workspace.hasChanges)
+    }
+    private var canSync: Bool {
+        guard signedIn else { return false }
+        return workspace.hasLocalRepo ? workspace.unpushedCommits : (workspace.hasChanges || workspace.upstreamAvailable)
+    }
+    private var canBranch: Bool { workspace.hasLocalRepo && workspace.hasCommits }
+    private var canMerge: Bool { workspace.hasLocalRepo && workspace.localBranches.count >= 2 }
+
+    // MARK: - Taps (dimmed controls explain themselves in the terminal)
+
+    private func commitTapped() {
+        if canCommit { commitMessage = ""; askingCommit = true }
+        else if !workspace.hasLocalRepo { report("commit: no local git repo (this project was downloaded, not cloned)") }
+        else { report("commit: nothing to commit, working tree clean") }
+    }
+
+    private func syncTapped() {
+        guard signedIn else { return report("sync: sign in with the GitHub container first") }
+        if workspace.hasLocalRepo {
+            if workspace.unpushedCommits { gitPush() }
+            else { report("sync: nothing to push, up to date") }
+        } else if workspace.hasChanges {
+            commitMessage = ""; askingSyncPush = true
+        } else if workspace.upstreamAvailable {
+            dataPull()
+        } else {
+            report("sync: nothing to sync, up to date")
+        }
+    }
+
+    private func branchTapped() {
+        if canBranch { askingBranch = true }
+        else if !workspace.hasLocalRepo { report("branch: no local git repo") }
+        else { report("branch: no commits yet — commit first") }
+    }
+
+    private func mergeTapped() {
+        if canMerge { askingMerge = true }
+        else if !workspace.hasLocalRepo { report("merge: no local git repo") }
+        else { report("merge: only one branch") }
+    }
+
+    // MARK: - Actions
+
+    private func commit() {
+        let message = commitMessage.isEmpty ? "Update from Mouse" : commitMessage
+        do {
+            _ = try GitCore.commitAll(in: workspace.root, message: message)
+            workspace.clearModified()
+            FileBuffer.rebaseline(for: workspace)
+            workspace.localHistoryChanged()
+        } catch {
+            report("commit: \(error)")
+        }
+    }
+
+    private func switchBranch(_ name: String) {
+        do {
+            try GitCore.checkout(name, in: workspace.root)
+            workspace.clearModified()
+            workspace.treeVersion += 1          // worktree replaced — file views reload
+            workspace.localHistoryChanged()
+        } catch {
+            report("branch: \(error)")
+        }
+    }
+
+    private func createBranch() {
+        let name = newBranchName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        do {
+            try GitCore.createBranch(name, in: workspace.root)
+            try GitCore.checkout(name, in: workspace.root)
+            workspace.localHistoryChanged()
+        } catch {
+            report("branch: \(error)")
+        }
+    }
+
+    private func merge(_ name: String) {
+        do {
+            let result = try GitCore.merge(name, in: workspace.root)
+            switch result {
+            case .upToDate:
+                report("merge: already up to date", isError: false)
+            case .fastForward:
+                report("merge: fast-forwarded \(workspace.currentGitBranch) to \(name)", isError: false)
+                workspace.treeVersion += 1
+                workspace.localHistoryChanged()
+            case .merged:
+                report("merge: made a merge commit of \(name)", isError: false)
+                workspace.treeVersion += 1
+                workspace.localHistoryChanged()
+            case .conflicts(let files):
+                report("merge: conflicts in \(files.joined(separator: ", ")) — resolve the markers and commit")
+                workspace.treeVersion += 1       // worktree now holds conflict markers
+                files.forEach { workspace.markModified($0) }
+                workspace.refreshGitState()
+            }
+        } catch {
+            report("merge: \(error)")
+        }
+    }
+
+    /// Sync's native push: publish local commits to GitHub, creating the repo on first push.
+    private func gitPush() {
+        guard let token = GitHubAuth.shared.accessToken, let login = signedInLogin else { return }
+        let branch = GitCore.currentBranch(in: workspace.root) ?? "main"
+        let repoName = workspace.gitRemoteRepoName(login: login)
+        workspace.pushState = .pushing
+        Task {
+            do {
+                _ = try await GitRemote.push(root: workspace.root, repoFullName: repoName,
+                                             branch: branch, token: token, login: login)
+                workspace.pushState = .idle
+                workspace.localHistoryChanged()
+            } catch {
+                syncFailed("sync", error)
+            }
+        }
+    }
+
+    /// Sync's Data-API push for downloaded (tarball) repos: commit the modified files via the
+    /// GitHub contents API.
+    private func dataPush() {
+        guard let token = GitHubAuth.shared.accessToken else { return }
+        let count = workspace.modifiedPaths.count
+        let message = commitMessage.isEmpty
+            ? "Edit \(count) file\(count == 1 ? "" : "s") from Mouse"
+            : commitMessage
+        let paths = Array(workspace.modifiedPaths)
+        workspace.pushState = .pushing
+        Task {
+            do {
+                let commitSha = try await GitHubPush.push(
+                    repo: workspace.repoFullName, root: workspace.root,
+                    paths: paths, message: message, token: token)
+                workspace.clearModified()
+                workspace.markSynced(to: commitSha)
+                FileBuffer.rebaseline(for: workspace)
+                workspace.pushState = .idle
+                await workspace.refreshHistory(token: token)
+            } catch {
+                syncFailed("sync", error)
+            }
+        }
+    }
+
+    /// Sync's Data-API pull for downloaded repos: replace the working tree with the latest tarball.
+    private func dataPull() {
+        guard let token = GitHubAuth.shared.accessToken else { return }
+        workspace.pushState = .pushing
+        Task {
+            do {
+                try await Workspace.fetchAndExtract(workspace.repoFullName, token: token)
+                let sha = try? await Workspace.remoteHeadSha(workspace.repoFullName, token: token)
+                workspace.markSynced(to: sha)
+                workspace.clearModified()
+                workspace.treeVersion += 1
+                workspace.pushState = .idle
+                await workspace.refreshHistory(token: token)
+            } catch {
+                syncFailed("sync", error)
+            }
+        }
+    }
+
+    // MARK: - Reporting
+
+    /// A failed sync's reason lands in the terminal (readable, scrollable, permanent); the button
+    /// flashes via `.failed` then returns to actionable — a stuck error state tells you nothing.
+    private func syncFailed(_ what: String, _ error: Error) {
+        report("\(what): \(error)")
+        workspace.pushState = .failed("\(error)")
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.6))
+            if case .failed = workspace.pushState { workspace.pushState = .idle }
+        }
+    }
+
+    private func report(_ text: String, isError: Bool = true) {
+        deck.terminal(for: workspace).report(text, isError: isError)
+    }
+
+    private func isBusy(_ state: Workspace.PushState) -> Bool {
+        if case .pushing = state { return true }
+        return false
+    }
+    private func isFailed(_ state: Workspace.PushState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    private var syncPushTitle: String {
+        let count = workspace.modifiedPaths.count
+        return "Commit \(count) file\(count == 1 ? "" : "s") to \(workspace.repoFullName)"
+    }
+
+    // MARK: - Control
+
+    /// One labeled control: mono text, full white when usable, dimmed when not. Always tappable
+    /// (a dimmed tap explains itself). Only sync passes `busy`/`failed` — a spinner while it runs,
+    /// a red tint on failure — since it's the only control with in-flight state.
+    private func control(_ label: String, enabled: Bool, busy: Bool = false, failed: Bool = false,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Text(label)
+                    .font(.custom(AppFont.asciiName, size: 12))
+                    .foregroundStyle(failed ? .red : .white.opacity(enabled ? 0.85 : 0.28))
+                    .opacity(busy ? 0 : 1)
+                if busy {
+                    ProgressView().tint(.white).scaleEffect(0.5)
+                }
+            }
+            .padding(.vertical, 6)          // taller hit area than the 12pt glyph
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }

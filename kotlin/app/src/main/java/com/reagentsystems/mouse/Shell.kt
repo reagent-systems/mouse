@@ -55,6 +55,16 @@ import kotlin.math.abs
  * the shell, vertical belongs to content. Sizing uses [BoxWithConstraints] (Android has no ASCII-
  * sibling inflation problem, so this is simpler than the iOS containerRelativeFrame path).
  */
+
+/**
+ * Pixel's gesture navigation caps [systemGestureExclusion] at 200dp per edge, so on Pixels the
+ * edge strips lose the fight with the system back gesture. There, ring travel moves to the
+ * NEGATIVE SPACE BETWEEN CONTAINERS: a horizontal drag in a divider gap swipes the ring
+ * (vertical drags in the gap still resize lanes — axis-locked detectors keep both). A one-lane
+ * ring has no between-container space, so the edge strips remain its travel path.
+ */
+private val isPixel = android.os.Build.MANUFACTURER.equals("Google", ignoreCase = true) &&
+    android.os.Build.MODEL.contains("Pixel", ignoreCase = true)
 @Composable
 fun ForegroundView(base: File) {
     val strip = remember { StripPersistence.load(base) ?: RingStrip(listOf(CarouselDeck.onboarding())) }
@@ -79,6 +89,21 @@ fun ForegroundView(base: File) {
 
         val ringDrag = remember { Animatable(0f) }
         var adjacent by remember { mutableStateOf<Pair<CarouselDeck, Boolean>?>(null) } // ring, isRight
+        // Gap ring-swipe (Pixel): unlike an edge strip, a gap drag has no built-in direction —
+        // the FIRST movement locks it (leftward pulls in the right neighbor, rightward the left)
+        // and it holds until the finger lifts, so a wobble mid-drag can't flip neighbors.
+        var gapDirection by remember { mutableStateOf<Boolean?>(null) } // isRight
+        val gapRingDrag: (Float, Boolean) -> Unit = { delta, done ->
+            if (done) {
+                gapDirection?.let { dir ->
+                    ringSwipe(0f, true, dir, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent)
+                }
+                gapDirection = null
+            } else {
+                val dir = gapDirection ?: (delta < 0f).also { gapDirection = it }
+                ringSwipe(delta, false, dir, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent)
+            }
+        }
 
         Box(Modifier.fillMaxSize().pointerInput(deck) {
             // Two-finger pinch adds/removes a lane. Detected in the INITIAL pass so it can
@@ -129,12 +154,16 @@ fun ForegroundView(base: File) {
             adjacent?.let { (ring, isRight) ->
                 LaneStack(ring, base, Modifier.offset { IntOffset((ringDrag.value + if (isRight) availableWidthPx else -availableWidthPx).toInt(), 0) })
             }
-            LaneStack(deck, base, Modifier.offset { IntOffset(ringDrag.value.toInt(), 0) })
+            LaneStack(deck, base, Modifier.offset { IntOffset(ringDrag.value.toInt(), 0) },
+                onGapRingDrag = if (isPixel) gapRingDrag else null)
         }
 
-        // Edge strips: a drag from either edge swipes the whole ring.
-        EdgeStrip(true, Modifier.align(Alignment.CenterEnd)) { delta, done -> ringSwipe(delta, done, isRight = true, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
-        EdgeStrip(false, Modifier.align(Alignment.CenterStart)) { delta, done -> ringSwipe(delta, done, isRight = false, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
+        // Ring travel. Pixels swipe in the divider gaps (see [isPixel]); the edge strips serve
+        // everyone else — and Pixel's one-lane rings, which have no gap to swipe in.
+        if (!isPixel || deck.lanes.size == 1) {
+            EdgeStrip(true, Modifier.align(Alignment.CenterEnd)) { delta, done -> ringSwipe(delta, done, isRight = true, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
+            EdgeStrip(false, Modifier.align(Alignment.CenterStart)) { delta, done -> ringSwipe(delta, done, isRight = false, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
+        }
 
         // The onboarding's final lesson: once pinch is done, hint the edge swipe that graduates.
         if (deck.isOnboarding && deck.edgeLessonActive) {
@@ -150,12 +179,16 @@ fun ForegroundView(base: File) {
 }
 
 @Composable
-private fun LaneStack(ring: CarouselDeck, base: File, modifier: Modifier) {
+private fun LaneStack(
+    ring: CarouselDeck, base: File, modifier: Modifier,
+    /** Non-null on Pixels for the CURRENT ring: divider gaps also carry the ring swipe. */
+    onGapRingDrag: ((delta: Float, done: Boolean) -> Unit)? = null,
+) {
     val density = LocalDensity.current
     Column(modifier.fillMaxSize().clip(androidx.compose.ui.graphics.RectangleShape)) {
         ring.lanes.forEachIndexed { index, lane ->
             CarouselLane(ring, lane, base, Modifier.fillMaxWidth().height(with(density) { lane.height.toDp() }))
-            if (index < ring.lanes.size - 1) DividerHandle(ring, index)
+            if (index < ring.lanes.size - 1) DividerHandle(ring, index, onGapRingDrag)
         }
     }
 }
@@ -229,11 +262,23 @@ private fun CarouselLane(ring: CarouselDeck, lane: Lane, base: File, modifier: M
 }
 
 @Composable
-private fun DividerHandle(ring: CarouselDeck, index: Int) {
+private fun DividerHandle(
+    ring: CarouselDeck, index: Int,
+    onRingDrag: ((delta: Float, done: Boolean) -> Unit)? = null,
+) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val minLanePx = with(density) { 80.dp.toPx() }
-    Box(Modifier.fillMaxWidth().height(Theme.dividerGap).pointerInput(index) {
+    // Pixel: the gap is also the ring's travel surface. Horizontal and vertical detectors are
+    // both axis-locked, so whichever axis crosses touch slop first claims the drag — a resize
+    // never becomes a ring swipe mid-gesture, and vice versa.
+    val gapSwipe = if (onRingDrag == null) Modifier else Modifier.pointerInput(index) {
+        detectHorizontalDragGestures(
+            onDragEnd = { onRingDrag(0f, true) },
+            onDragCancel = { onRingDrag(0f, true) },
+        ) { _, dragAmount -> onRingDrag(dragAmount, false) }
+    }
+    Box(Modifier.fillMaxWidth().height(Theme.dividerGap).then(gapSwipe).pointerInput(index) {
         var acc = 0f
         detectVerticalDragGestures(
             onDragStart = { acc = 0f },

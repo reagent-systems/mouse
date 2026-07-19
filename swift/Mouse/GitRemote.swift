@@ -229,10 +229,10 @@ enum GitRemote {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 201 else {
             let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
-            // 403 "Resource not accessible by integration" = the GitHub App token lacks the
-            // "Administration: write" repo permission needed to create repos. Point at the fix.
+            // With `repo` scope a 403 here means a stale token (a GitHub-App-era session, or a
+            // revoked grant) — a fresh sign-in mints one that can create repos.
             if code == 403 {
-                throw RemoteError("git: GitHub blocked repo creation. The app needs 'Administration' write permission, or create \(name) on github.com first, then push.")
+                throw RemoteError("git: GitHub blocked repo creation (403). Sign out and back in, or create \(name) on github.com first, then push.")
             }
             throw RemoteError("git: couldn't create repo\(detail.map { " (\($0))" } ?? "")")
         }

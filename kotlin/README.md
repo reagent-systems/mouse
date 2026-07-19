@@ -78,7 +78,9 @@ Feature parity with the iOS app, built natively in Compose:
   detectors: horizontal drives the shell, vertical is content), edge-swipe
   ring travel, divider resize, pinch to add/remove lanes
 - **Onboarding ring** — the self-teaching lesson chain (Swipe? → Drag? → …)
-- **GitHub sign-in** — OAuth Device Flow; tokens in app-private storage
+- **GitHub sign-in** — OAuth Device Flow against a classic OAuth App with
+  `repo` scope (all the user's repos, no installation step); tokens in
+  app-private storage
 - **Workspaces** — clone via the tarball API, extracted by the hand-written
   `TarGz` (platform GZIP + hand tar); one workspace per repo, app-wide
 - **Files / Viewer / Graph** — lazy tree, in-place editing with shared
@@ -99,6 +101,15 @@ Feature parity with the iOS app, built natively in Compose:
   real-device / real-finger behavior (`adb input` near the edge is
   intercepted by the system's back-gesture handler and can't test it
   faithfully). No conflict on 3-button navigation.
+- **Pixels ring-swipe in the gaps.** On Google Pixels (runtime check:
+  `Build.MANUFACTURER == "Google"` + `Build.MODEL` contains "Pixel", one APK
+  for everyone), the edge strips stand down and ring travel moves to the
+  negative space between containers: a **horizontal drag in a divider gap**
+  swipes the ring. The gap keeps both gestures — the axis-locked detectors
+  mean vertical still resizes lanes, horizontal swipes rings, and whichever
+  axis crosses touch slop first claims the drag. Direction locks on the
+  first movement so a mid-drag wobble can't flip neighbors. A one-lane ring
+  has no gap, so the edge strips remain its travel path there.
 
 ## Platform differences (by design)
 

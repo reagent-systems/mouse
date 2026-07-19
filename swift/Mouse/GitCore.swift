@@ -595,6 +595,196 @@ enum GitCore {
         try checkout(branch, in: root)
     }
 
+    // MARK: - Merge (fast-forward + three-way, diff3 conflict markers)
+
+    enum MergeResult {
+        case upToDate
+        case fastForward(sha: String)
+        case merged(sha: String)
+        /// Conflicting files are written to the worktree with markers; resolve them and commit.
+        case conflicts([String])
+    }
+
+    /// The most recent common ancestor of two commits (breadth-first from `a`, first of `b`'s
+    /// ancestors seen). Good enough for the linear-and-simple histories a phone produces.
+    static func mergeBase(_ a: String, _ b: String, in root: URL) throws -> String? {
+        var ancestorsOfA: Set<String> = []
+        var queue = [a]
+        while let next = queue.first {
+            queue.removeFirst()
+            guard ancestorsOfA.insert(next).inserted else { continue }
+            if let commit = try? readCommit(next, in: root) { queue.append(contentsOf: commit.parents) }
+        }
+        var seen: Set<String> = []
+        queue = [b]
+        while let next = queue.first {
+            queue.removeFirst()
+            if ancestorsOfA.contains(next) { return next }
+            guard seen.insert(next).inserted else { continue }
+            if let commit = try? readCommit(next, in: root) { queue.append(contentsOf: commit.parents) }
+        }
+        return nil
+    }
+
+    /// Merge `otherBranch` into the current branch. Fast-forwards when possible; otherwise a
+    /// three-way merge per file. Non-overlapping edits merge cleanly and commit; overlapping
+    /// edits are written with `<<<<<<< ======= >>>>>>>` markers and left for the user (no commit).
+    static func merge(_ otherBranch: String, in root: URL,
+                      author: String = "mouse <mouse@local>") throws -> MergeResult {
+        guard let branch = currentBranch(in: root), let ourSha = refSha(branch, in: root) else {
+            throw GitError("no commits on the current branch")
+        }
+        guard let theirSha = branches(in: root)[otherBranch] else {
+            throw GitError("no such branch: \(otherBranch)")
+        }
+        if ourSha == theirSha { return .upToDate }
+        let base = try mergeBase(ourSha, theirSha, in: root)
+        if base == theirSha { return .upToDate }              // we already contain them
+        if base == ourSha {                                    // pure fast-forward
+            try setRef(branch, to: theirSha, in: root)
+            try checkout(branch, in: root)
+            return .fastForward(sha: theirSha)
+        }
+
+        let baseFiles = base.flatMap { try? flattenTree(readCommit($0, in: root).tree, in: root) } ?? [:]
+        let ourFiles = try flattenTree(readCommit(ourSha, in: root).tree, in: root)
+        let theirFiles = try flattenTree(readCommit(theirSha, in: root).tree, in: root)
+
+        var conflicts: [String] = []
+        let paths = Set(baseFiles.keys).union(ourFiles.keys).union(theirFiles.keys)
+        for path in paths {
+            let outcome = try mergeFile(path: path,
+                                        base: baseFiles[path], ours: ourFiles[path], theirs: theirFiles[path],
+                                        in: root)
+            let url = root.appendingPathComponent(path)
+            switch outcome {
+            case .delete:
+                try? FileManager.default.removeItem(at: url)
+            case .content(let data):
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: url)
+            case .conflict(let data):
+                conflicts.append(path)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: url)
+            }
+        }
+
+        if !conflicts.isEmpty { return .conflicts(conflicts.sorted()) }
+
+        // Clean merge: commit the worktree with two parents.
+        let treeSha = try writeTree(for: root, root: root)
+        let timestamp = Int(Date().timeIntervalSince1970)
+        var body = "tree \(treeSha)\n"
+        body += "parent \(ourSha)\nparent \(theirSha)\n"
+        body += "author \(author) \(timestamp) +0000\ncommitter \(author) \(timestamp) +0000\n"
+        body += "\nMerge branch '\(otherBranch)'\n"
+        let sha = try writeObject(.commit, Data(body.utf8), in: root)
+        try updateHead(to: sha, in: root)
+        try? writeIndex(tree: treeSha, in: root)
+        return .merged(sha: sha)
+    }
+
+    private enum FileMerge { case delete, content(Data), conflict(Data) }
+
+    /// Three-way merge of one path by blob sha. Whole-file decisions first (added/removed on one
+    /// side, identical changes); genuinely divergent text falls to the line-level diff3.
+    private static func mergeFile(path: String, base: String?, ours: String?, theirs: String?, in root: URL) throws -> FileMerge {
+        if ours == theirs { return ours == nil ? .delete : .content(try blob(ours!, in: root)) }
+        if ours == base { return theirs == nil ? .delete : .content(try blob(theirs!, in: root)) }
+        if theirs == base { return ours == nil ? .delete : .content(try blob(ours!, in: root)) }
+        // Both sides diverged from base. Need all three as text to line-merge; else it's a
+        // hard conflict (add/add, or edit/delete).
+        guard let base, let ours, let theirs,
+              let baseText = String(data: try blob(base, in: root), encoding: .utf8),
+              let ourText = String(data: try blob(ours, in: root), encoding: .utf8),
+              let theirText = String(data: try blob(theirs, in: root), encoding: .utf8) else {
+            let ourData = ours.flatMap { try? blob($0, in: root) } ?? Data()
+            return .conflict(ourData)   // best-effort body; the path is reported as conflicted
+        }
+        let (merged, conflict) = diff3(base: lines(baseText), ours: lines(ourText), theirs: lines(theirText))
+        // Re-terminate each line. `lines()` split on "\n" and dropped the trailing empty, so
+        // rejoin with a newline after every line — but honor a source file that had no final
+        // newline (git warns on those; we shouldn't invent one).
+        let finalNewline = ourText.hasSuffix("\n") || theirText.hasSuffix("\n")
+        var text = merged.map { $0 + "\n" }.joined()
+        if !finalNewline, text.hasSuffix("\n") { text.removeLast() }
+        return conflict ? .conflict(Data(text.utf8)) : .content(Data(text.utf8))
+    }
+
+    private static func blob(_ sha: String, in root: URL) throws -> Data {
+        try readObject(sha, in: root).content
+    }
+    private static func lines(_ text: String) -> [String] {
+        var l = text.components(separatedBy: "\n")
+        if l.last == "" { l.removeLast() }
+        return l
+    }
+
+    /// diff3 line merge. Anchors = lines present in all three (matched base↔ours and base↔theirs);
+    /// between anchors, each side's chunk is compared against the BASE chunk — if only one side
+    /// changed it, take that side; if both changed it differently, emit conflict markers.
+    static func diff3(base: [String], ours: [String], theirs: [String]) -> (merged: [String], conflict: Bool) {
+        let inOurs = lcsMatch(base, ours)     // base index -> ours index (or nil)
+        let inTheirs = lcsMatch(base, theirs) // base index -> theirs index (or nil)
+
+        var merged: [String] = []
+        var conflict = false
+        var bStart = 0, oi = 0, ti = 0
+        var bi = 0
+        while bi <= base.count {
+            let isAnchor = bi < base.count && inOurs[bi] != nil && inTheirs[bi] != nil
+            if isAnchor || bi == base.count {
+                let oEnd = isAnchor ? inOurs[bi]! : ours.count
+                let tEnd = isAnchor ? inTheirs[bi]! : theirs.count
+                emitChunk(base: Array(base[bStart..<bi]),
+                          ours: Array(ours[oi..<oEnd]),
+                          theirs: Array(theirs[ti..<tEnd]),
+                          into: &merged, conflict: &conflict)
+                if isAnchor {
+                    merged.append(base[bi])
+                    oi = oEnd + 1; ti = tEnd + 1; bStart = bi + 1
+                }
+            }
+            bi += 1
+        }
+        return (merged, conflict)
+    }
+
+    private static func emitChunk(base: [String], ours: [String], theirs: [String],
+                                  into merged: inout [String], conflict: inout Bool) {
+        if ours == theirs { merged.append(contentsOf: ours); return }
+        if ours == base { merged.append(contentsOf: theirs); return }   // only theirs changed
+        if theirs == base { merged.append(contentsOf: ours); return }   // only ours changed
+        // Both sides changed this region differently: conflict.
+        conflict = true
+        merged.append("<<<<<<< ours")
+        merged.append(contentsOf: ours)
+        merged.append("=======")
+        merged.append(contentsOf: theirs)
+        merged.append(">>>>>>> theirs")
+    }
+
+    /// For each index in `a`, the index in `b` it maps to on the longest common subsequence
+    /// (or nil). The shared backbone the diff3 anchors on.
+    private static func lcsMatch(_ a: [String], _ b: [String]) -> [Int?] {
+        let n = a.count, m = b.count
+        var table = [[Int]](repeating: [Int](repeating: 0, count: m + 1), count: n + 1)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            for j in stride(from: m - 1, through: 0, by: -1) {
+                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        var result = [Int?](repeating: nil, count: n)
+        var i = 0, j = 0
+        while i < n && j < m {
+            if a[i] == b[j] { result[i] = j; i += 1; j += 1 }
+            else if table[i + 1][j] >= table[i][j + 1] { i += 1 }
+            else { j += 1 }
+        }
+        return result
+    }
+
     // MARK: - Streaming inflate (one zlib member out of a concatenated buffer)
 
     /// Inflate a single zlib member at the start of `input`, returning the output and how many

@@ -948,7 +948,23 @@ final class MouseShell {
                 let result = try await GitRemote.fetch(root: root, repoFullName: repoFullName, token: token, checkout: false)
                 context.historyChanged()
                 return IO(out: "fetched \(result.objectCount) object\(result.objectCount == 1 ? "" : "s") from origin/\(result.branch)\n")
-            case "pull", "clone", "merge":
+            case "merge":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                guard let name = rest.first else { return IO(err: "git merge: usage: git merge <branch>", status: 1) }
+                let result = try GitCore.merge(name, in: root)
+                context.reloadTree()
+                context.historyChanged()
+                switch result {
+                case .upToDate:
+                    return IO(out: "already up to date\n")
+                case .fastForward(let sha):
+                    return IO(out: "fast-forward to \(sha.prefix(7))\n")
+                case .merged(let sha):
+                    return IO(out: "merge made by the three-way strategy (\(sha.prefix(7)))\n")
+                case .conflicts(let files):
+                    return IO(err: "conflicts in \(files.joined(separator: ", ")) — resolve the markers and commit", status: 1)
+                }
+            case "pull", "clone":
                 return IO(err: "git \(sub): not built yet", status: 1)
             default:
                 return IO(err: "git: unknown command: \(sub)", status: 1)
@@ -1262,7 +1278,8 @@ final class ICMPPinger: @unchecked Sendable {
         var mutable = address
         var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
         inet_ntop(AF_INET, &mutable.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN))
-        addressString = String(cString: buffer)
+        // String(cString: [CChar]) is deprecated: truncate at the NUL, decode as UTF-8.
+        addressString = String(decoding: buffer.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
     }
 
     func shutdown() {

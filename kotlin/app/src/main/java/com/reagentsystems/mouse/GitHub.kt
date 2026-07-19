@@ -16,12 +16,14 @@ import java.net.URLEncoder
 import java.util.Base64
 
 /**
- * GitHub sign-in via the OAuth Device Flow — the same public GitHub App the iOS and web clients
- * use, so one app serves every Mouse frontend. Tokens live in app-private storage (Android's
- * sandbox); the login handle is cached for instant restore. Mirrors `GitHubAuth.swift`.
+ * GitHub sign-in via the OAuth Device Flow against a classic OAuth App with `repo` scope: the
+ * token acts as the user — every repo they can touch, no installation step, no expiry. Mirrors
+ * `GitHubAuth.swift` (which also records why the GitHub App provider was removed). Tokens live
+ * in app-private storage (Android's sandbox); the login handle is cached for restore.
  */
 object GitHub {
-    private const val clientID = "Iv23liFfOa5cNvXvatNB"
+    /** Public identifier of the Mouse OAuth App (not a secret). */
+    private const val clientID = "Ov23liZpd88m5S0nz1ZS"
 
     sealed class Phase {
         object SignedOut : Phase()
@@ -44,10 +46,8 @@ object GitHub {
 
     val accessToken: String? get() = if (::prefs.isInitialized) prefs.getString("access-token", null) else null
 
-    private fun store(token: String, refresh: String?, login: String) {
-        prefs.edit().putString("access-token", token)
-            .apply { if (refresh != null) putString("refresh-token", refresh) }
-            .putString("login", login).apply()
+    private fun store(token: String, login: String) {
+        prefs.edit().putString("access-token", token).putString("login", login).apply()
     }
 
     fun signOut() {
@@ -81,7 +81,7 @@ object GitHub {
                 val token = poll.optString("access_token", "")
                 if (token.isNotEmpty()) {
                     val login = withContext(Dispatchers.IO) { fetchLogin(token) }
-                    store(token, poll.optString("refresh_token").ifEmpty { null }, login)
+                    store(token, login)
                     phase = Phase.SignedIn(login)
                     return
                 }

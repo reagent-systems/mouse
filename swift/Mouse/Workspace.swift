@@ -252,18 +252,34 @@ final class Workspace {
     func bumpTreeVersion() { treeVersion += 1 }
 
     /// True when the local git repo has commits the remote doesn't (never pushed, or ahead).
-    /// Drives the git push slot. Recomputed by `refreshGitState`, so it stays reactive.
+    /// A sync prerequisite. Recomputed by `refreshGitState`, so it stays reactive.
     var unpushedCommits = false
-    /// The branch the push slot would publish (for the confirm text).
+    /// The branch the toolbar operates on (for confirm text and the branch label).
     var currentGitBranch = "main"
+    /// True when the worktree differs from HEAD — the commit button's prerequisite.
+    var hasUncommittedChanges = false
+    /// True once the current branch has at least one commit (branch/merge need a base commit).
+    var hasCommits = false
+    /// Local branch names, sorted — merge lights up at two or more.
+    var localBranches: [String] = []
 
-    /// Refresh the git-derived slot state from disk (after commit/checkout/push, or on ready).
+    /// Refresh the git-derived toolbar state from disk (after commit/checkout/merge/push, or on
+    /// ready). Cheap enough for a local tree; `status` hashes files but the trees are small.
     func refreshGitState() {
-        guard GitCore.hasRepo(root) else { unpushedCommits = false; return }
+        guard GitCore.hasRepo(root) else {
+            unpushedCommits = false; hasUncommittedChanges = false; hasCommits = false; localBranches = []
+            return
+        }
         let branch = GitCore.currentBranch(in: root) ?? "main"
         currentGitBranch = branch
-        guard let localSha = GitCore.refSha(branch, in: root) else { unpushedCommits = false; return }
+        localBranches = GitCore.branches(in: root).keys.sorted()
+        guard let localSha = GitCore.refSha(branch, in: root) else {
+            unpushedCommits = false; hasUncommittedChanges = false; hasCommits = false
+            return
+        }
+        hasCommits = true
         unpushedCommits = GitCore.remoteTrackingSha(branch: branch, in: root) != localSha
+        hasUncommittedChanges = ((try? GitCore.status(in: root))?.isClean == false)
     }
 
     /// The "owner/name" this project pushes to: an existing origin, else the signed-in user's

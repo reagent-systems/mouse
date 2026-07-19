@@ -23,10 +23,13 @@ changes verify headlessly: compile with a scratch `main.swift` of assertions
 via `swiftc` and run. For GitCore, ALSO validate interop with the real CLI:
 `git fsck --full` silent + `git status --porcelain` empty against a repo the
 engine wrote; the packfile writer must pass `git index-pack --stdin`; the
-reader must resolve a delta pack from `git pack-objects`; and a push body
+reader must resolve a delta pack from `git pack-objects`; a push body
 (pkt-line command + pack) must update a ref via `git receive-pack
---stateless-rpc`. Pack inflate uses **libz** (`-lz` in project.yml), not the
-Compression framework, which can't delimit concatenated zlib members.
+--stateless-rpc`; and the merge engine must match `git merge-file` on the
+line merge (clean + conflict cases) and a real repo on the FF/three-way
+outcomes (`fsck` clean, both parents present, byte-identical content).
+Pack inflate uses **libz** (`-lz` in project.yml), not the Compression
+framework, which can't delimit concatenated zlib members.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
@@ -151,12 +154,12 @@ it, and force-quit-relaunch to prove it.
 | `ForegroundView.swift` | The shell: lanes, dividers, all shell gestures, ring swipes, `CarouselLane`, `Panel` |
 | `CarouselDeck.swift` | Ring model: lanes/reserve, container catalog, onboarding chain, per-ring viewport (open file, terminal, editor focus) |
 | `Workspace.swift` | Project truth: tree on disk, dirty set, sync state, graph cache, tarball download, native tar/gzip (`TarGz`) |
-| `WorkspaceViews.swift` | Files/Viewer containers, `FileBuffer` (shared live documents), action chips (push/pull) |
-| `GitGraphView.swift` | Commit-graph layout + rendering, history fetch |
+| `WorkspaceViews.swift` | Files/Viewer containers, `FileBuffer` (shared live documents) |
+| `GitGraphView.swift` | The git module: commit-graph layout + rendering, history fetch, and `GitModuleToolbar` (`commit · sync · branch · merge` in the header) |
 | `GitHubAuth.swift` | Device Flow, Keychain, sign-in container |
 | `GitHubPush.swift` | Git Data API push (blobs → tree → commit → ref) |
 | `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins incl. `git`, and `ICMPPinger` (real ping) |
-| `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line — real-git interoperable |
+| `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line, and the three-way merge engine (`merge`/`diff3`) — real-git interoperable |
 | `GitRemote.swift` | The remote half: clone/fetch/push over GitHub smart-HTTP, and `POST /user/repos` auto-create on push |
 | `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field |
 | `StripPersistence.swift` | Snapshot/restore DTOs for the whole strip |
