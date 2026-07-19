@@ -86,6 +86,13 @@ Compose real UI by direct manipulation, generate honest code into the
 workspace. The inverse of the `figma` branch: not drawing pictures of apps,
 assembling running ones.
 
+### OpenShip Integration
+
+### Visual Intelligence
+
+### tl-draw
+
+
 ## Foundations (serve every branch)
 
 Cross-cutting work that lands on `main` directly and unblocks branches:
