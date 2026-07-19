@@ -92,6 +92,13 @@ final class TerminalSession {
             clear: { [weak self] in self?.lines = [] },
             emit: { [weak self] output in
                 self?.append(output.text, output.isError ? .error : .output)
+            },
+            reloadTree: { workspace?.bumpTreeVersion() },
+            historyChanged: { workspace?.localHistoryChanged() },
+            githubToken: { GitHubAuth.shared.accessToken },
+            githubLogin: {
+                if case .signedIn(let login) = GitHubAuth.shared.phase { return login }
+                return nil
             }
         )
         isRunning = true
@@ -112,6 +119,13 @@ final class TerminalSession {
         for output in javascript.evaluate(command) {
             append(output.text, output.isError ? .error : .output)
         }
+    }
+
+    /// Surface something that happened OUTSIDE the prompt (a corner-slot action) in the
+    /// scrollback. The terminal is the app's one honest error surface: a failure belongs in
+    /// text you can read and scroll back to, not encoded in the color of a pill.
+    func report(_ text: String, isError: Bool = true) {
+        append(text, isError ? .error : .output)
     }
 
     private func append(_ text: String, _ kind: Line.Kind) {

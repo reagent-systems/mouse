@@ -69,8 +69,11 @@ final class Workspace {
     }
 
     /// True for projects born on this device ("local/<name>") — no remote exists, so there is
-    /// nothing to push, pull, or graph until a publish flow arrives (roadmap).
+    /// nothing to push or pull until a publish flow arrives (roadmap).
     var isLocal: Bool { repoFullName.hasPrefix("local/") }
+
+    /// True when the worktree has a real .git (GitCore) — local history exists.
+    var hasLocalRepo: Bool { GitCore.hasRepo(root) }
 
     /// Every local project on disk ("local/<name>"), for the picker.
     static func localProjectNames() -> [String] {
@@ -96,6 +99,7 @@ final class Workspace {
         if let live = byRepo[full] { return live }
         let dir = directory(for: full)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? GitCore.initRepo(dir)
         guard let fresh = Workspace(existing: full) else {
             // Directory creation failed (out of disk?) — surface as a failed workspace.
             let broken = Workspace(downloading: full)
@@ -158,13 +162,55 @@ final class Workspace {
     /// Fetch and lay out the commit graph if the cached copy is missing or stale (the tree or
     /// synced head moved since it was built). Runs regardless of whether the Graph is visible.
     @MainActor
-    func refreshHistory(token: String) async {
-        guard !isLocal else { return }
+    func refreshHistory(token: String?) async {
         let stamp = "\(treeVersion)|\(syncedSha ?? "?")"
         guard !historyInFlight else { return }
         guard historyStamp != stamp || graphRows == nil else { return }
         historyInFlight = true
         defer { historyInFlight = false }
+
+        // A workspace with a real .git (local projects are born with one; repo workspaces get
+        // one via `git init`) graphs its LOCAL history — full topology, no network.
+        if GitCore.hasRepo(root) {
+            let root = self.root
+            let local: (rows: [GraphRow], tips: [String: String])? = await Task.detached {
+                let branches = GitCore.branches(in: root)
+                guard !branches.isEmpty else { return ([], [:]) }
+                var seen: Set<String> = []
+                var nodes: [CommitNode] = []
+                for tip in branches.values {
+                    guard let commits = try? GitCore.log(from: tip, in: root) else { continue }
+                    for commit in commits where !seen.contains(commit.sha) {
+                        seen.insert(commit.sha)
+                        nodes.append(CommitNode(
+                            sha: commit.sha,
+                            message: commit.message.components(separatedBy: "\n")[0],
+                            author: commit.author.components(separatedBy: " <")[0],
+                            parents: commit.parents
+                        ))
+                    }
+                }
+                nodes.sort { a, b in
+                    // Parents must come after children for the lane layout; date order works
+                    // for our linear-ish histories.
+                    guard let ca = try? GitCore.readCommit(a.sha, in: root),
+                          let cb = try? GitCore.readCommit(b.sha, in: root) else { return false }
+                    return ca.date > cb.date
+                }
+                var tips: [String: String] = [:]
+                for (name, sha) in branches { tips[sha] = name }
+                return (GitGraph.layout(nodes), tips)
+            }.value
+            if let local {
+                graphRows = local.rows
+                graphTips = local.tips
+                graphError = nil
+                historyStamp = stamp
+            }
+            return
+        }
+
+        guard !isLocal, let token else { return }
         do {
             let history = try await GitGraph.fetchHistory(repo: repoFullName, token: token)
             graphRows = GitGraph.layout(history.commits)
@@ -202,6 +248,48 @@ final class Workspace {
         return sha
     }
 
+    /// The worktree was rewritten outside the viewers (a `git checkout`): reload file views.
+    func bumpTreeVersion() { treeVersion += 1 }
+
+    /// True when the local git repo has commits the remote doesn't (never pushed, or ahead).
+    /// Drives the git push slot. Recomputed by `refreshGitState`, so it stays reactive.
+    var unpushedCommits = false
+    /// The branch the push slot would publish (for the confirm text).
+    var currentGitBranch = "main"
+
+    /// Refresh the git-derived slot state from disk (after commit/checkout/push, or on ready).
+    func refreshGitState() {
+        guard GitCore.hasRepo(root) else { unpushedCommits = false; return }
+        let branch = GitCore.currentBranch(in: root) ?? "main"
+        currentGitBranch = branch
+        guard let localSha = GitCore.refSha(branch, in: root) else { unpushedCommits = false; return }
+        unpushedCommits = GitCore.remoteTrackingSha(branch: branch, in: root) != localSha
+    }
+
+    /// The "owner/name" this project pushes to: an existing origin, else the signed-in user's
+    /// account with the project's own name (which push auto-creates).
+    func gitRemoteRepoName(login: String) -> String {
+        if let url = GitCore.remoteURL(in: root) {
+            var name = url
+            if let range = name.range(of: "github.com/") { name = String(name[range.upperBound...]) }
+            if name.hasSuffix(".git") { name = String(name.dropLast(4)) }
+            return name
+        }
+        let leaf = root.lastPathComponent.replacingOccurrences(of: "local__", with: "")
+        return "\(login)/\(leaf)"
+    }
+
+    /// Local git history changed (commit, branch, checkout, push): rebuild the graph and the
+    /// git slot state.
+    @MainActor
+    func localHistoryChanged() {
+        historyStamp = nil
+        refreshGitState()
+        Task { @MainActor [weak self] in
+            await self?.refreshHistory(token: nil)
+        }
+    }
+
     func markModified(_ path: String) { modifiedPaths.insert(path) }
     func unmarkModified(_ path: String) { modifiedPaths.remove(path) }
     func clearModified() { modifiedPaths = [] }
@@ -216,6 +304,7 @@ final class Workspace {
         self.modifiedPaths = Set(modifiedPaths)
         self.syncedSha = syncedSha
         self.phase = .ready
+        refreshGitState()   // so the push slot reflects unpushed commits from the first frame
     }
 
     /// A workspace awaiting download. Private: all creation goes through the shared registry.

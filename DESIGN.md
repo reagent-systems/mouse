@@ -99,12 +99,16 @@ Rules:
 
 ## 6. Components
 
-- **Action slots** (container top-right): 22 pt-tall × 44 pt **capsule
-  slots**, no glyphs — **the color is the identity**: push is green
+- **Action slots** (container top-right): **44 × 12 pt capsule slots** (wide
+  and thin), no glyphs — **the color is the identity**: push is green
   (outgoing work), pull is blue (incoming), failure red. The hues are the
   graph-rail palette's own green/blue, so no new colors enter the system.
   A slot exists only while its prerequisites are met — and only when
   there's a real difference to act on (a no-op edit doesn't summon push).
+  **A failure goes to the terminal**, not into the slot: the reason lands in
+  the ring's scrollback where it can be read and scrolled back to, while the
+  slot flashes red and returns to actionable. A stuck red pill states a
+  problem you can't act on.
   The terminal's engine switcher (top-left) keeps its outlined text-capsule
   form. No SF Symbols on container surfaces.
 - **Container header**: metadata line top-left (filename, `owner/repo`),

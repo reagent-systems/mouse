@@ -487,33 +487,94 @@ struct ContainerActionsRow: View {
 
     /// Inset from the container's corner.
     static let inset: CGFloat = 8
+    /// The slots ride a little lower than the corner inset (they're thin; this centers them
+    /// against the header line rather than hugging the very top).
+    static let topInset: CGFloat = 16
 
     @State private var askingPush = false
     @State private var askingPull = false
+    @State private var askingGitPush = false
     @State private var commitMessage = ""
 
-    private var chipDiameter: CGFloat { 22 }
-    /// Slot width — per the sketch: wide slots, not circles.
+    /// Slot geometry: wide and thin, per the sketch (not circles, hence no "diameter").
+    private var chipHeight: CGFloat { 12 }
     private var chipWidth: CGFloat { 44 }
 
     var body: some View {
-        if let workspace = deck.workspace, !workspace.isLocal, case .ready = workspace.phase,
+        if let workspace = deck.workspace, case .ready = workspace.phase,
            case .signedIn = GitHubAuth.shared.phase {
             HStack(spacing: 8) {
-                if workspace.hasChanges {
-                    pushButton(workspace)
-                }
-                if workspace.upstreamAvailable {
-                    pullButton(workspace)
+                if workspace.hasLocalRepo {
+                    // Native git engine: push what's committed but not yet on the remote.
+                    if workspace.unpushedCommits { gitPushButton(workspace) }
+                } else {
+                    // Data-API path for downloaded (tarball) repos.
+                    if workspace.hasChanges { pushButton(workspace) }
+                    if workspace.upstreamAvailable { pullButton(workspace) }
                 }
             }
             .task(id: "\(workspace.repoFullName)#\(workspace.treeVersion)") {
-                // Discover upstream commits (throttled inside) and keep the commit graph
-                // warm in the background — the Graph container renders instantly on swipe-in.
-                if let token = GitHubAuth.shared.accessToken {
+                workspace.refreshGitState()
+                // For Data-API repos, discover upstream and warm the graph in the background.
+                if !workspace.hasLocalRepo, let token = GitHubAuth.shared.accessToken {
                     await workspace.refreshUpstream(token: token)
                     await workspace.refreshHistory(token: token)
                 }
+            }
+        }
+    }
+
+    // MARK: - Git push (native engine, for local / git-init'd projects)
+
+    private func gitPushButton(_ workspace: Workspace) -> some View {
+        Button {
+            askingGitPush = true
+        } label: {
+            chip(state: workspace.pushState, color: GitGraph.railColors[3])   // green
+        }
+        .disabled(isBusy(workspace.pushState))
+        .alert("Push to GitHub", isPresented: $askingGitPush) {
+            Button("Push") { gitPush(workspace) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let login = signedInLogin, GitCore.remoteURL(in: workspace.root) == nil {
+                Text("Creates \(workspace.gitRemoteRepoName(login: login)) and pushes.")
+            } else {
+                Text("Pushes to origin.")
+            }
+        }
+    }
+
+    private var signedInLogin: String? {
+        if case .signedIn(let login) = GitHubAuth.shared.phase { return login }
+        return nil
+    }
+
+    /// Report a slot action's failure: the reason lands in the ring's terminal (readable,
+    /// scrollable, permanent) while the slot flashes red and then returns to actionable — a
+    /// stuck red pill tells you nothing you can act on.
+    private func fail(_ workspace: Workspace, _ what: String, _ error: Error) {
+        deck.terminal(for: workspace).report("\(what): \(error.localizedDescription)")
+        workspace.pushState = .failed(error.localizedDescription)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.6))
+            if case .failed = workspace.pushState { workspace.pushState = .idle }
+        }
+    }
+
+    private func gitPush(_ workspace: Workspace) {
+        guard let token = GitHubAuth.shared.accessToken, let login = signedInLogin else { return }
+        let branch = GitCore.currentBranch(in: workspace.root) ?? "main"
+        let repoName = workspace.gitRemoteRepoName(login: login)
+        workspace.pushState = .pushing
+        Task {
+            do {
+                _ = try await GitRemote.push(root: workspace.root, repoFullName: repoName,
+                                             branch: branch, token: token, login: login)
+                workspace.pushState = .idle
+                workspace.localHistoryChanged()   // clears the slot + refreshes the graph
+            } catch {
+                fail(workspace, "git push", error)
             }
         }
     }
@@ -533,10 +594,6 @@ struct ContainerActionsRow: View {
                 .textInputAutocapitalization(.sentences)
             Button("Commit & Push") { push(workspace) }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            if case .failed(let reason) = workspace.pushState {
-                Text("Last attempt failed: \(reason)")
-            }
         }
     }
 
@@ -568,7 +625,7 @@ struct ContainerActionsRow: View {
                 workspace.pushState = .idle
                 await workspace.refreshHistory(token: token)  // our commit appears in the graph
             } catch {
-                workspace.pushState = .failed(error.localizedDescription)
+                fail(workspace, "push", error)
             }
         }
     }
@@ -613,7 +670,12 @@ struct ContainerActionsRow: View {
                 workspace.pullState = .idle
                 await workspace.refreshHistory(token: token)
             } catch {
+                deck.terminal(for: workspace).report("pull: \(error.localizedDescription)")
                 workspace.pullState = .failed(error.localizedDescription)
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(1.6))
+                    if case .failed = workspace.pullState { workspace.pullState = .idle }
+                }
             }
         }
     }
@@ -629,14 +691,18 @@ struct ContainerActionsRow: View {
     /// Push is green (outgoing work), pull is blue (incoming), failure red. The hues come
     /// from the graph-rail palette, so no new colors enter the system.
     private func chip(state: Workspace.PushState, color: Color) -> some View {
-        Group {
-            if case .pushing = state {
-                ProgressView().tint(.black).scaleEffect(0.5)
+        // The capsule IS the control (no glyph): it must be a real shape, not an empty Group
+        // with a frame — `EmptyView` produces no geometry, so `.frame`+`.background` on it
+        // renders nothing at all. That mistake made every slot invisible.
+        Capsule()
+            .fill(slotColor(for: state, idle: color))
+            .frame(width: chipWidth, height: chipHeight)
+            .overlay {
+                if case .pushing = state {
+                    ProgressView().tint(.black).scaleEffect(0.5)
+                }
             }
-        }
-        .frame(width: chipWidth, height: chipDiameter)
-        .background(slotColor(for: state, idle: color), in: Capsule())
-        .contentShape(Capsule())
+            .contentShape(Capsule())
     }
 
     private func slotColor(for state: Workspace.PushState, idle: Color) -> Color {

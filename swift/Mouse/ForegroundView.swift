@@ -849,7 +849,7 @@ struct Panel: View {
                 // Nudged slightly further off the right edge than the top, by request.
                 if !type.isOnboardingPreset, let deck {
                     ContainerActionsRow(deck: deck, cornerRadius: cornerRadius)
-                        .padding(.top, ContainerActionsRow.inset)
+                        .padding(.top, ContainerActionsRow.topInset)
                         .padding(.trailing, ContainerActionsRow.inset + 8)
                 }
             }

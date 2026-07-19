@@ -150,13 +150,13 @@ struct GitGraphContainerView: View {
                         .font(.custom(AppFont.asciiName, size: 11))
                         .opacity(0.55)
                         .padding(.bottom, 8)
-                    if workspace.isLocal {
-                        Text("no history yet")
+                    if let rows = workspace.graphRows, !rows.isEmpty {
+                        graph(rows, tips: workspace.graphTips)
+                    } else if workspace.hasLocalRepo || workspace.isLocal {
+                        Text("no commits yet")
                             .font(.custom(AppFont.asciiName, size: 13))
                             .opacity(0.55)
                             .padding(.top, 8)
-                    } else if let rows = workspace.graphRows {
-                        graph(rows, tips: workspace.graphTips)
                     } else if let error = workspace.graphError {
                         Text(error)
                             .font(.custom(AppFont.asciiName, size: 13))
@@ -178,10 +178,8 @@ struct GitGraphContainerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .task(id: workspace.repoFullName + "::t\(workspace.treeVersion)") {
                     // Fallback kick (deduped inside) — normally the action row has already
-                    // loaded this long before the Graph is on screen.
-                    if let token = GitHubAuth.shared.accessToken {
-                        await workspace.refreshHistory(token: token)
-                    }
+                    // loaded this long before the Graph is on screen. Local repos need no token.
+                    await workspace.refreshHistory(token: GitHubAuth.shared.accessToken)
                 }
             } else {
                 Text("open a project in the Files container")

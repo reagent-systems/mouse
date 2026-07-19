@@ -31,9 +31,12 @@ The IDE absorption: workspaces, file tree, in-place editor, commit graph,
 terminal, push/pull. Largely shipped (see below). Still on this branch's
 plate:
 
-- **libgit2**: real clones, offline commits, branches, merges, full ref
-  topology in the graph, honest conflict surfacing — and local history + a
-  **publish-to-GitHub flow for local projects** (they exist now, remote-less)
+- **Git, merges**: the local engine and the remote half are BUILT
+  (`GitCore` + `GitRemote`: clone/fetch/push over smart-HTTP, packfiles with
+  delta resolution, and push that auto-creates the GitHub repo via
+  `POST /user/repos`). Remaining: real merges with conflict surfacing, a
+  `git clone` entry in the project picker, and wiring the push action-slot
+  to the native engine for local projects
 - Editor upgrades: syntax highlighting + line numbers (Runestone/TextKit 2),
   find in file, font-size setting, large-file strategy
 - Terminal engines: the package engine (`pnpm install`, lockfile-driven,
@@ -94,6 +97,16 @@ Cross-cutting work that lands on `main` directly and unblocks branches:
 ## Shipped so far
 
 The `vs-code` direction's first wave, all on `main`:
+
+- The native git engine (`GitCore` + `GitRemote`, from scratch like
+  tar/gzip/ICMP/msh): loose objects, trees, commits, refs, branch/checkout,
+  status, log, DIRC index — plus the remote half: packfiles (write + read
+  with delta resolution), pkt-line, and clone/fetch/push over GitHub
+  smart-HTTP. `git push` **creates the GitHub repo for you** (`POST
+  /user/repos`) so you never make an empty repo first. Verified against the
+  real git CLI both directions (fsck, index-pack, pack-objects,
+  receive-pack). Local projects are born with `.git`; the Graph renders
+  local history offline
 
 - Ring/lane/strip shell with the gesture law, self-teaching onboarding,
   full persistence

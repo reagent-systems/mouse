@@ -17,9 +17,16 @@ xcodebuild -project swift/Mouse.xcodeproj -scheme Mouse \
 
 Never edit `Mouse.xcodeproj` directly — it is generated from
 `swift/project.yml`. There is no test target; verification is running the
-app (see CONTRIBUTING.md). One exception: `Shell.swift` is deliberately
-Foundation-only, so interpreter changes can be verified headlessly —
-compile it with a scratch `main.swift` of assertions via `swiftc` and run.
+app (see CONTRIBUTING.md). One exception: `Shell.swift` and
+`GitCore.swift` are deliberately app-independent, so interpreter and git
+changes verify headlessly: compile with a scratch `main.swift` of assertions
+via `swiftc` and run. For GitCore, ALSO validate interop with the real CLI:
+`git fsck --full` silent + `git status --porcelain` empty against a repo the
+engine wrote; the packfile writer must pass `git index-pack --stdin`; the
+reader must resolve a delta pack from `git pack-objects`; and a push body
+(pkt-line command + pack) must update a ref via `git receive-pack
+--stateless-rpc`. Pack inflate uses **libz** (`-lz` in project.yml), not the
+Compression framework, which can't delimit concatenated zlib members.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
@@ -148,7 +155,9 @@ it, and force-quit-relaunch to prove it.
 | `GitGraphView.swift` | Commit-graph layout + rendering, history fetch |
 | `GitHubAuth.swift` | Device Flow, Keychain, sign-in container |
 | `GitHubPush.swift` | Git Data API push (blobs → tree → commit → ref) |
-| `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins, and `ICMPPinger` (real ping) |
+| `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins incl. `git`, and `ICMPPinger` (real ping) |
+| `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line — real-git interoperable |
+| `GitRemote.swift` | The remote half: clone/fetch/push over GitHub smart-HTTP, and `POST /user/repos` auto-create on push |
 | `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field |
 | `StripPersistence.swift` | Snapshot/restore DTOs for the whole strip |
 | `AsciiArt*.swift`, `AppFont.swift` | Backdrop art, type constants |

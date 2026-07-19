@@ -31,6 +31,13 @@ final class MouseShell {
         /// happens only when a command runs solo — pipelines collect instead, so `ping -c 3 x
         /// | grep seq` still works as strings.
         var emit: (Output) -> Void = { _ in }
+        /// `git checkout` rewrote the worktree: viewers must reload their files.
+        var reloadTree: () -> Void = {}
+        /// `git commit`/`branch` changed local history: the graph should refresh.
+        var historyChanged: () -> Void = {}
+        /// GitHub identity for `git push` (auto-create + auth); nil when signed out.
+        var githubToken: () -> String? = { nil }
+        var githubLogin: () -> String? = { nil }
     }
 
     struct Output {
@@ -449,7 +456,8 @@ final class MouseShell {
         case "sha256sum", "shasum": return checksum(args, stdin: stdin, context: context, sha: true)
         case "sed": return sed(args, stdin: stdin, context: context)
         case "diff": return diff(args, context: context)
-        case "git", "npm", "pnpm", "node", "npx":
+        case "git": return await git(args, context: context)
+        case "npm", "pnpm", "node", "npx":
             return IO(err: "\(name): not built yet", status: 127)
         default:
             return IO(err: "msh: command not found: \(name) (type help)", status: 127)
@@ -462,6 +470,7 @@ final class MouseShell {
         "date", "whoami", "true", "false", "env", "export", "unset", "history", "which",
         "basename", "dirname", "open", "sleep", "ping", "curl", "wget", "tee", "xargs",
         "rev", "tac", "nl", "base64", "md5sum", "md5", "sha256sum", "shasum", "sed", "diff",
+        "git",
     ]
 
     private static let helpText = """
@@ -478,6 +487,7 @@ final class MouseShell {
       nl               rev / tac     base64 [-d]   md5sum / sha256sum
       ping [-c N] <host>             curl [-o file] <url>       sleep <s>
     grammar: 'quotes' "with $VARS"  |  > >> <  ;  &&  ||  ~  *  ?  $?
+      git <init|status|log|commit -m|branch|checkout|diff|push|fetch|remote>
     a streaming command (ping without -c) stops on any keypress
     """
 
@@ -837,6 +847,132 @@ final class MouseShell {
         return IO(out: "opened \(display(target.rel)) in the viewer\n")
     }
 
+    // MARK: - git (the native engine: GitCore)
+
+    private func git(_ args: [String], context: Context) async -> IO {
+        guard let sub = args.first else {
+            return IO(out: "usage: git <init|status|log|commit|branch|checkout|diff>\n")
+        }
+        let rest = Array(args.dropFirst())
+        let root = context.root
+        do {
+            switch sub {
+            case "init":
+                try GitCore.initRepo(root)
+                context.historyChanged()
+                return IO(out: "initialized empty repository on main\n")
+            case "status":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                let status = try GitCore.status(in: root)
+                if status.isClean { return IO(out: "clean\n") }
+                var out: [String] = []
+                out.append(contentsOf: status.added.map { "A  \($0)" })
+                out.append(contentsOf: status.modified.map { "M  \($0)" })
+                out.append(contentsOf: status.deleted.map { "D  \($0)" })
+                return IO(out: joinLines(out))
+            case "log":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                let head = try GitCore.headCommit(in: root)
+                let commits = try GitCore.log(from: head.sha, in: root)
+                return IO(out: joinLines(commits.map { "\($0.sha.prefix(7))  \($0.message.components(separatedBy: "\n")[0])" }))
+            case "commit":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                var message = "commit from mouse"
+                var iterator = rest.makeIterator()
+                while let arg = iterator.next() {
+                    if arg == "-m", let value = iterator.next() { message = value }
+                }
+                let sha = try GitCore.commitAll(in: root, message: message)
+                context.historyChanged()
+                return IO(out: "[\(GitCore.currentBranch(in: root) ?? "?") \(sha.prefix(7))] \(message)\n")
+            case "branch":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                if let name = rest.first {
+                    try GitCore.createBranch(name, in: root)
+                    context.historyChanged()
+                    return IO()
+                }
+                let current = GitCore.currentBranch(in: root)
+                let names = GitCore.branches(in: root).keys.sorted()
+                return IO(out: joinLines(names.map { ($0 == current ? "* " : "  ") + $0 }))
+            case "checkout", "switch":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                guard let name = rest.first else { return IO(err: "git checkout: usage: git checkout <branch>", status: 1) }
+                try GitCore.checkout(name, in: root)
+                context.reloadTree()
+                context.historyChanged()
+                return IO(out: "switched to \(name)\n")
+            case "diff":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                let status = try GitCore.status(in: root)
+                let paths = rest.isEmpty ? status.modified : rest
+                var out: [String] = []
+                for path in paths {
+                    guard let old = GitCore.headText(of: path, in: root) else { continue }
+                    let target = resolve(path, context: context)
+                    let new = (try? String(contentsOf: target?.url ?? root, encoding: .utf8)) ?? ""
+                    out.append("--- \(path)")
+                    out.append(contentsOf: diffLines(splitLines(old), splitLines(new)))
+                }
+                return IO(out: joinLines(out))
+            case "remote":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                if rest.first == "add", rest.count >= 3 {
+                    try GitCore.setRemote(rest[2], in: root)
+                    return IO()
+                }
+                if let url = GitCore.remoteURL(in: root) { return IO(out: "origin\t\(url)\n") }
+                return IO(out: "")
+            case "push":
+                guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
+                guard let token = context.githubToken(), let login = context.githubLogin() else {
+                    return IO(err: "git: sign in with the GitHub container first", status: 1)
+                }
+                let branch = GitCore.currentBranch(in: root) ?? "main"
+                // Target: an explicit remote, else "<login>/<project>" (auto-created on push).
+                let repoFullName = remoteRepoName(root: root, login: login)
+                let result = try await GitRemote.push(root: root, repoFullName: repoFullName, branch: branch, token: token, login: login)
+                context.historyChanged()
+                var lines: [String] = []
+                if result.createdRepo { lines.append("created \(login)/\(repoFullName.split(separator: "/").last ?? "")") }
+                lines.append(result.objectCount == 0
+                    ? "everything up-to-date"
+                    : "pushed \(result.objectCount) object\(result.objectCount == 1 ? "" : "s") to origin/\(branch)")
+                return IO(out: joinLines(lines))
+            case "fetch":
+                guard GitCore.hasRepo(root), let url = GitCore.remoteURL(in: root) else {
+                    return IO(err: "git: no origin remote", status: 1)
+                }
+                guard let token = context.githubToken() else { return IO(err: "git: sign in first", status: 1) }
+                let repoFullName = repoName(fromRemoteURL: url)
+                let result = try await GitRemote.fetch(root: root, repoFullName: repoFullName, token: token, checkout: false)
+                context.historyChanged()
+                return IO(out: "fetched \(result.objectCount) object\(result.objectCount == 1 ? "" : "s") from origin/\(result.branch)\n")
+            case "pull", "clone", "merge":
+                return IO(err: "git \(sub): not built yet", status: 1)
+            default:
+                return IO(err: "git: unknown command: \(sub)", status: 1)
+            }
+        } catch {
+            return IO(err: "git: \(error)", status: 1)
+        }
+    }
+
+    /// The GitHub "owner/name" for a push target: the origin remote if one is set, else the
+    /// project's own name under the signed-in user (which push auto-creates).
+    private func remoteRepoName(root: URL, login: String) -> String {
+        if let url = GitCore.remoteURL(in: root) { return repoName(fromRemoteURL: url) }
+        let leaf = root.lastPathComponent.replacingOccurrences(of: "local__", with: "")
+        return "\(login)/\(leaf)"
+    }
+
+    private func repoName(fromRemoteURL url: String) -> String {
+        var name = url
+        if let range = name.range(of: "github.com/") { name = String(name[range.upperBound...]) }
+        if name.hasSuffix(".git") { name = String(name.dropLast(4)) }
+        return name
+    }
+
     // MARK: - Streaming & network commands
 
     private func sleepCmd(_ args: [String]) async -> IO {
@@ -1039,10 +1175,14 @@ final class MouseShell {
         let linesA = splitLines(textA)
         let linesB = splitLines(textB)
         if linesA == linesB { return IO(status: 0) }
+        return IO(out: joinLines(diffLines(linesA, linesB)), status: 1)
+    }
+
+    /// Minimal line diff (LCS): -/+ lines, shared by the `diff` builtin and `git diff`.
+    private func diffLines(_ linesA: [String], _ linesB: [String]) -> [String] {
         guard linesA.count * linesB.count <= 4_000_000 else {
-            return IO(out: "files differ (\(linesA.count) vs \(linesB.count) lines)\n", status: 1)
+            return ["files differ (\(linesA.count) vs \(linesB.count) lines)"]
         }
-        // Classic LCS table, then walk back emitting -/+ lines.
         var table = [[Int]](repeating: [Int](repeating: 0, count: linesB.count + 1), count: linesA.count + 1)
         for i in stride(from: linesA.count - 1, through: 0, by: -1) {
             for j in stride(from: linesB.count - 1, through: 0, by: -1) {
@@ -1063,7 +1203,7 @@ final class MouseShell {
             }
             if out.count > 500 { out.append("… diff truncated at 500 lines"); break }
         }
-        return IO(out: joinLines(out), status: 1)
+        return out
     }
 
     // MARK: - Helpers
