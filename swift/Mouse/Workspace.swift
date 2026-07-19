@@ -222,6 +222,18 @@ final class Workspace {
         }
     }
 
+    /// Manual refresh (the git toolbar's refresh control): re-derive toolbar state, re-check
+    /// the remote head, and rebuild the graph — bypassing the dedupe stamp and the upstream
+    /// throttle that automatic refreshes lean on. A tap means "look again, now".
+    @MainActor
+    func refreshAll(token: String?) async {
+        historyStamp = nil
+        lastUpstreamCheck = nil
+        refreshGitState()
+        if let token { await refreshUpstream(token: token) }
+        await refreshHistory(token: token)
+    }
+
     /// Compare the remote head against `syncedSha` (throttled to once a minute).
     @MainActor
     func refreshUpstream(token: String) async {

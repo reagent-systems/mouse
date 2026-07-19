@@ -96,9 +96,10 @@ Rules:
 
 ## 6. Components
 
-- **Git module toolbar** (Graph container header): a fixed row of four
-  labeled text controls — **`commit · sync · branch · merge`** — mono, size
-  12, riding their own line beneath the `owner/repo history` title. Unlike a
+- **Git module toolbar** (Graph container header): a fixed row of five
+  labeled text controls — **`commit · sync · branch · merge · refresh`** —
+  mono, size 12, riding their own line beneath the `owner/repo history`
+  title. Unlike a
   slot that appears only when usable, these **pre-exist and dim** (white at
   0.28) until their prerequisite is met, then brighten (0.85). A tap on a
   dimmed control is never dead: it **states why it's unavailable in the ring's

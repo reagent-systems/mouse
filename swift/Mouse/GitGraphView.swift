@@ -293,8 +293,8 @@ struct GitGraphContainerView: View {
 
 }
 
-/// The git module's toolbar: four always-present controls in the Graph container's header —
-/// `commit · sync · branch · merge`. Unlike the old corner slots (which appeared only when
+/// The git module's toolbar: five always-present controls in the Graph container's header —
+/// `commit · sync · branch · merge · refresh`. Unlike the old corner slots (which appeared only when
 /// usable), these pre-exist and gray out (dim, ~0.28) until their prerequisite is met, so their
 /// place in the header is stable. A tap on a dimmed control isn't dead: it states WHY it's
 /// unavailable in the ring's terminal (the app's one honest error surface). The native git
@@ -311,6 +311,7 @@ struct GitModuleToolbar: View {
     @State private var newBranchName = ""
     @State private var askingMerge = false
     @State private var askingSyncPush = false      // tarball push needs a commit message
+    @State private var refreshing = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -318,6 +319,7 @@ struct GitModuleToolbar: View {
             control("sync", enabled: canSync, busy: isBusy(workspace.pushState), failed: isFailed(workspace.pushState)) { syncTapped() }
             control("branch", enabled: canBranch) { branchTapped() }
             control("merge", enabled: canMerge) { mergeTapped() }
+            control("refresh", enabled: true, busy: refreshing) { refreshTapped() }
         }
         // commit — message prompt
         .alert("Commit \(workspace.repoFullName)", isPresented: $askingCommit) {
@@ -410,6 +412,17 @@ struct GitModuleToolbar: View {
         if canMerge { askingMerge = true }
         else if !workspace.hasLocalRepo { report("merge: no local git repo") }
         else { report("merge: only one branch") }
+    }
+
+    /// Always usable: re-derive the toolbar's enablement, re-check the remote head, rebuild
+    /// the graph. The one control whose prerequisite is just "a workspace exists".
+    private func refreshTapped() {
+        guard !refreshing else { return }
+        refreshing = true
+        Task {
+            await workspace.refreshAll(token: GitHubAuth.shared.accessToken)
+            refreshing = false
+        }
     }
 
     // MARK: - Actions
