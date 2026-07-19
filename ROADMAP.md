@@ -14,10 +14,14 @@ order of attack.
 
 ## Platform stance
 
-**iOS/iPadOS native only.** No Android port, no web build, no cross-platform
-framework — the earlier Capacitor/web incarnation was removed deliberately
-and is not coming back. The gesture shell *is* the product, and it's built
-against one platform's touch system, done properly.
+**Native per platform, no bridges.** Two apps sharing one spec and one
+design language: `swift/` (iOS/iPadOS, the lead platform) and `kotlin/`
+(Android, at feature parity — same shell, GitHub, workspaces, containers).
+No web builds and no cross-platform
+frameworks — the earlier Capacitor/web incarnation was removed deliberately
+and is not coming back. Each platform gets the gesture shell built against
+its own touch system, done properly — and each keeps its honest advantages
+(Android apps may run the system shell; iOS gets the from-scratch `msh`).
 
 ## Product branches
 
@@ -27,14 +31,23 @@ The IDE absorption: workspaces, file tree, in-place editor, commit graph,
 terminal, push/pull. Largely shipped (see below). Still on this branch's
 plate:
 
-- **libgit2**: real clones, offline commits, branches, merges, full ref
-  topology in the graph, honest conflict surfacing
+- **Git, merges**: the local engine, the remote half, AND native merges are
+  BUILT (`GitCore` + `GitRemote`: clone/fetch/push over smart-HTTP, packfiles
+  with delta resolution, push that auto-creates the GitHub repo via
+  `POST /user/repos`, and a three-way merge engine — fast-forward /
+  merge-commit / diff3 conflict markers — verified against `git merge-file`
+  and a real repo). The git module toolbar (`commit · sync · branch · merge`
+  in the Graph header) drives them. Remaining: a `git clone` entry in the
+  project picker, and a non-clobbering fetch-into-tracking-ref so `sync` can
+  pull-and-merge from the remote, not only push
 - Editor upgrades: syntax highlighting + line numbers (Runestone/TextKit 2),
   find in file, font-size setting, large-file strategy
 - Terminal engines: the package engine (`pnpm install`, lockfile-driven,
   reusing the native tar/gzip extractor) and dev-server engine
   (statically-linked esbuild, `dev`/`build`), LAN hosting, and a Preview
   container — projects you can *run*, not just edit
+- More terminal engines behind the switcher: ssh, and `git`/`npm` becoming
+  real commands inside `msh` as their engines land
 
 ### `cursor` — the AI pair
 
@@ -88,12 +101,32 @@ Cross-cutting work that lands on `main` directly and unblocks branches:
 
 The `vs-code` direction's first wave, all on `main`:
 
+- The native git engine (`GitCore` + `GitRemote`, from scratch like
+  tar/gzip/ICMP/msh): loose objects, trees, commits, refs, branch/checkout,
+  status, log, DIRC index — plus the remote half: packfiles (write + read
+  with delta resolution), pkt-line, and clone/fetch/push over GitHub
+  smart-HTTP. `git push` **creates the GitHub repo for you** (`POST
+  /user/repos`) so you never make an empty repo first. Verified against the
+  real git CLI both directions (fsck, index-pack, pack-objects,
+  receive-pack). Local projects are born with `.git`; the Graph renders
+  local history offline
+
 - Ring/lane/strip shell with the gesture law, self-teaching onboarding,
   full persistence
 - GitHub Device Flow sign-in (Keychain), repo download via tarball API with
   a from-scratch native tar/gzip extractor
 - Files tree; in-place editor (floating keyboard, autosave, shared live
-  buffers across rings); commit graph; native terminal built-ins
+  buffers across rings); commit graph
+- `msh`, a from-scratch shell (quoting, variables, pipes, redirection,
+  globs, `&&`/`||`, history, ~50 built-ins incl. `sed`/`diff`/`base64`/
+  checksums) plus a JavaScriptCore engine, behind the terminal's switcher
+- Real networking in the terminal: `ping` (unprivileged ICMP, streaming,
+  any-keypress interrupt), `curl`/`wget` (URLSession), `sleep` — on the new
+  async streaming-command machinery
+- The Android app (`kotlin/`, Compose): feature parity with iOS — the
+  gesture shell, onboarding, GitHub sign-in, workspaces (native tar/gzip),
+  Files/Viewer/Graph, push/pull, persistence, and a terminal with both
+  `msh` and the real system `sh` behind the switcher
 - Push (Git Data API, one real commit) and pull with upstream detection
 - iPad multitasking with an iPhone-sized minimum window
 

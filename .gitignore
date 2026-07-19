@@ -7,6 +7,13 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 
+# Android / Gradle
+.gradle/
+.kotlin/
+kotlin/local.properties
+kotlin/app/build/
+*.apk
+
 # Leftover tooling
 node_modules/
 

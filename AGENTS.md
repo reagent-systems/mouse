@@ -17,7 +17,27 @@ xcodebuild -project swift/Mouse.xcodeproj -scheme Mouse \
 
 Never edit `Mouse.xcodeproj` directly — it is generated from
 `swift/project.yml`. There is no test target; verification is running the
-app (see CONTRIBUTING.md).
+app (see CONTRIBUTING.md). One exception: `Shell.swift` and
+`GitCore.swift` are deliberately app-independent, so interpreter and git
+changes verify headlessly: compile with a scratch `main.swift` of assertions
+via `swiftc` and run. For GitCore, ALSO validate interop with the real CLI:
+`git fsck --full` silent + `git status --porcelain` empty against a repo the
+engine wrote; the packfile writer must pass `git index-pack --stdin`; the
+reader must resolve a delta pack from `git pack-objects`; a push body
+(pkt-line command + pack) must update a ref via `git receive-pack
+--stateless-rpc`; and the merge engine must match `git merge-file` on the
+line merge (clean + conflict cases) and a real repo on the FF/three-way
+outcomes (`fsck` clean, both parents present, byte-identical content).
+Pack inflate uses **libz** (`-lz` in project.yml), not the Compression
+framework, which can't delimit concatenated zlib members.
+
+Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
+./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
+the `kotlin/` folder directly. It's a full parity app (Compose), not a
+seed: mirror any iOS feature change here too, or note in the PR why not.
+The two apps share no code (no cross-platform bridge) — parity is by
+faithful re-implementation, file-for-file where it helps
+(`Shell.swift`↔`MouseShell.kt`, `CarouselDeck.swift`↔`Model.kt`, etc.).
 
 ## Invariants
 
@@ -39,10 +59,12 @@ app (see CONTRIBUTING.md).
    (`CarouselLane`). A commit moves the same view instance to a new offset.
    Keying by slot/position reintroduces the unload flash.
 4. **Zero third-party dependencies** until the roadmap says otherwise.
-5. **iOS/iPadOS native only.** Do not scaffold Android, web, or
-   cross-platform anything; that direction was removed deliberately.
-   Big feature directions live on product branches (`vs-code`, `cursor`,
-   `n8n`, … — see ROADMAP.md), and slices merge to `main` when feel-tested.
+5. **Native per platform, no bridges.** Two apps: `swift/` (iOS/iPadOS) and
+   `kotlin/` (Android) — each built natively against its own platform. No
+   web builds, no Capacitor/React Native/Flutter; that direction was removed
+   deliberately. Big feature directions live on product branches (`vs-code`,
+   `cursor`, `n8n`, … — see ROADMAP.md), and slices merge to `main` when
+   feel-tested.
 
 ## Landmines — do not "fix" these
 
@@ -79,6 +101,12 @@ app (see CONTRIBUTING.md).
   "sending self" errors in the restore paths. This was tried; it fights back.
 - App-global singletons follow `GitHubAuth`: `@MainActor @Observable final
   class` with `static let shared`.
+- `TerminalSession` and `MouseShell` are `@MainActor` (not the FileBuffer
+  `@unchecked Sendable` pattern): they're inherently UI-thread state and run
+  async streaming commands, so main-actor isolation is correct and avoids
+  sending app types into the run `Task`. Background socket I/O is isolated in
+  `ICMPPinger` (`@unchecked Sendable`, `DispatchQueue` + continuations
+  returning Sendable values) — the one place that leaves the main actor.
 
 ## Persistence discipline
 
@@ -126,10 +154,13 @@ it, and force-quit-relaunch to prove it.
 | `ForegroundView.swift` | The shell: lanes, dividers, all shell gestures, ring swipes, `CarouselLane`, `Panel` |
 | `CarouselDeck.swift` | Ring model: lanes/reserve, container catalog, onboarding chain, per-ring viewport (open file, terminal, editor focus) |
 | `Workspace.swift` | Project truth: tree on disk, dirty set, sync state, graph cache, tarball download, native tar/gzip (`TarGz`) |
-| `WorkspaceViews.swift` | Files/Viewer containers, `FileBuffer` (shared live documents), action chips (push/pull) |
-| `GitGraphView.swift` | Commit-graph layout + rendering, history fetch |
+| `WorkspaceViews.swift` | Files/Viewer containers, `FileBuffer` (shared live documents) |
+| `GitGraphView.swift` | The git module: commit-graph layout + rendering, history fetch, and `GitModuleToolbar` (`commit · sync · branch · merge · refresh` in the header) |
 | `GitHubAuth.swift` | Device Flow, Keychain, sign-in container |
 | `GitHubPush.swift` | Git Data API push (blobs → tree → commit → ref) |
-| `Terminal.swift` | `TerminalSession` dispatcher + terminal container + prompt field |
+| `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins incl. `git`, and `ICMPPinger` (real ping) |
+| `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line, and the three-way merge engine (`merge`/`diff3`) — real-git interoperable |
+| `GitRemote.swift` | The remote half: clone/fetch/push over GitHub smart-HTTP, and `POST /user/repos` auto-create on push |
+| `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field |
 | `StripPersistence.swift` | Snapshot/restore DTOs for the whole strip |
 | `AsciiArt*.swift`, `AppFont.swift` | Backdrop art, type constants |

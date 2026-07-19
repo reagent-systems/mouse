@@ -6,19 +6,27 @@ the things that make it work.
 
 ## Setup
 
-1. macOS with **Xcode 16+**
-2. `brew install xcodegen`
-3. ```sh
-   cd swift
-   xcodegen generate
-   open Mouse.xcodeproj
-   ```
+Two native apps; build the one you're touching (full build/run instructions,
+including the simulator and emulator, are in the [README](README.md)).
+
+**iOS (`swift/`)** — macOS + **Xcode 16+** + `brew install xcodegen`:
+
+```sh
+cd swift && xcodegen generate && open Mouse.xcodeproj
+```
 
 `Mouse.xcodeproj` is **generated** from [swift/project.yml](swift/project.yml).
 Never hand-edit the project file; change `project.yml` and re-run
 `xcodegen generate`. Re-run it whenever you add, remove, or rename a source
 file. The regenerated `.xcodeproj` is committed, so include it in your PR if
 it changed.
+
+**Android (`kotlin/`)** — **JDK 21** + the Android SDK (open `kotlin/` in
+Android Studio, or `./gradlew assembleDebug`). No generated project file.
+
+The two apps share no code — a feature added to one should be mirrored in the
+other (or the PR should say why not). Parity is by faithful re-implementation
+(`Shell.swift` ↔ `MouseShell.kt`, `CarouselDeck.swift` ↔ `Model.kt`, …).
 
 ## Ground rules
 
@@ -52,8 +60,9 @@ There is no test target yet (unit tests for the pure cores — tar/gzip, graph
 layout — are welcome). Merging to `main` means the change was tested for
 **function and feel**:
 
-1. Build clean: `xcodebuild -project swift/Mouse.xcodeproj -scheme Mouse
-   -destination 'generic/platform=iOS Simulator' build`
+1. Build clean — iOS: `xcodebuild -project swift/Mouse.xcodeproj -scheme
+   Mouse -destination 'generic/platform=iOS Simulator' build`; Android:
+   `cd kotlin && ./gradlew assembleDebug`. Build the platform(s) you touched.
 2. Exercise what you touched **plus the gesture matrix near it**: lane
    swipe, edge swipe, divider drag, pinch, and — if you were near the
    editor — tap-to-focus, selection drag, tap-outside dismiss.

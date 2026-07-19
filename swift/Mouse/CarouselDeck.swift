@@ -155,6 +155,7 @@ final class CarouselDeck {
 
     /// This ring's own terminal session on the (possibly shared) workspace — separate scrollback
     /// and cwd per ring. Memoized; rebuilt if the ring later opens a different repo.
+    @MainActor
     func terminal(for workspace: Workspace) -> TerminalSession {
         if let ringTerminal, ringTerminal.root == workspace.root { return ringTerminal }
         let session = TerminalSession(root: workspace.root)

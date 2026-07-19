@@ -2,17 +2,22 @@ import SwiftUI
 import Security
 
 /// GitHub sign-in for the container of kind 1 (`ContainerType.gitHubKind`), via the OAuth Device
-/// Flow — the same GitHub App and flow the web client uses (`src/auth/GitHubAuth.ts`), so one
-/// GitHub App serves every Mouse frontend. Sign-in state is app-global: every instance of the
-/// GitHub container, in any ring, reflects the same session. Tokens live in the Keychain; only
-/// the (non-secret) login handle is cached in UserDefaults for instant restore at launch.
+/// Flow against a classic OAuth App with `repo` scope: the token acts as the user — every repo
+/// they can touch, no installation step, no expiry (a 401 just signs out; there is no refresh
+/// dance). A GitHub App provider (installed-repos-only, org-friendly) existed briefly and was
+/// removed — its install-and-approve requirements 403'd ordinary personal use; restore it from
+/// history if an org ever needs the narrow-permission model.
+///
+/// Sign-in state is app-global: every instance of the GitHub container, in any ring, reflects
+/// the same session. Tokens live in the Keychain; only the (non-secret) login handle is cached
+/// in UserDefaults for instant restore at launch.
 @MainActor
 @Observable
 final class GitHubAuth {
     static let shared = GitHubAuth()
 
-    /// Public identifier of the Mouse GitHub App (not a secret) — same as the web client's.
-    private static let clientID = "Iv23liFfOa5cNvXvatNB"
+    /// Public identifier of the Mouse OAuth App (not a secret).
+    private static let clientID = "Ov23liZpd88m5S0nz1ZS"
 
     enum Phase {
         case signedOut
@@ -52,9 +57,8 @@ final class GitHubAuth {
                 }
                 phase = .awaitingAuthorization(code: device.userCode, url: url)
                 let token = try await pollForToken(device)
-                Keychain.set(token.accessToken, for: "access-token")
-                if let refresh = token.refreshToken { Keychain.set(refresh, for: "refresh-token") }
-                let user = try await fetchUser(token: token.accessToken)
+                Keychain.set(token, for: "access-token")
+                let user = try await fetchUser(token: token)
                 UserDefaults.standard.set(user.login, forKey: "githubLogin")
                 phase = .signedIn(login: user.login)
             } catch is CancellationError {
@@ -75,13 +79,14 @@ final class GitHubAuth {
         signInTask?.cancel()
         signInTask = nil
         Keychain.delete("access-token")
-        Keychain.delete("refresh-token")
+        Keychain.delete("refresh-token")   // migration hygiene: GitHub-App-era sessions stored one
         UserDefaults.standard.removeObject(forKey: "githubLogin")
+        UserDefaults.standard.removeObject(forKey: "githubAuthProvider")
         phase = .signedOut
     }
 
-    /// Confirm the stored token still works; refresh it once if GitHub rejects it, and sign out
-    /// if that fails too. Network errors keep the cached session (offline shouldn't log you out).
+    /// Confirm the stored token still works. OAuth tokens don't expire, so a 401 means revoked —
+    /// sign out cleanly. Network errors keep the cached session (offline shouldn't log you out).
     private func validateSession() async {
         guard let token = Keychain.string(for: "access-token") else { return }
         do {
@@ -89,13 +94,7 @@ final class GitHubAuth {
             UserDefaults.standard.set(user.login, forKey: "githubLogin")
             phase = .signedIn(login: user.login)
         } catch let error as HTTPError where error.status == 401 {
-            if let refreshed = try? await refreshToken(),
-               let user = try? await fetchUser(token: refreshed) {
-                UserDefaults.standard.set(user.login, forKey: "githubLogin")
-                phase = .signedIn(login: user.login)
-            } else {
-                signOut()
-            }
+            signOut()
         } catch {
             // Offline or transient — leave the cached session alone.
         }
@@ -123,14 +122,8 @@ final class GitHubAuth {
 
     private struct TokenResponse: Decodable {
         let accessToken: String?
-        let refreshToken: String?
         let error: String?
         let interval: Int?
-    }
-
-    private struct Token {
-        let accessToken: String
-        let refreshToken: String?
     }
 
     private struct User: Decodable {
@@ -140,12 +133,11 @@ final class GitHubAuth {
     private func requestDeviceCode() async throws -> DeviceCode {
         try await postForm(
             to: "https://github.com/login/device/code",
-            // GitHub App user tokens take their permissions from the app — no scope parameter.
-            fields: ["client_id": Self.clientID]
+            fields: ["client_id": Self.clientID, "scope": "repo"]
         )
     }
 
-    private func pollForToken(_ device: DeviceCode) async throws -> Token {
+    private func pollForToken(_ device: DeviceCode) async throws -> String {
         var interval = max(device.interval, 5)
         let deadline = Date(timeIntervalSinceNow: TimeInterval(device.expiresIn))
         while Date() < deadline {
@@ -160,7 +152,7 @@ final class GitHubAuth {
                 ]
             )
             if let token = response.accessToken {
-                return Token(accessToken: token, refreshToken: response.refreshToken)
+                return token
             }
             switch response.error {
             case "authorization_pending":
@@ -168,30 +160,14 @@ final class GitHubAuth {
             case "slow_down":
                 interval = response.interval ?? (interval + 5)
             case "expired_token":
-                throw AuthError("The code expired — start over.")
+                throw AuthError("The code expired. Start over.")
             case "access_denied":
                 throw AuthError("Sign-in was declined on GitHub.")
             default:
                 throw AuthError("GitHub said: \(response.error ?? "unknown error")")
             }
         }
-        throw AuthError("The code expired — start over.")
-    }
-
-    private func refreshToken() async throws -> String {
-        guard let refresh = Keychain.string(for: "refresh-token") else { throw HTTPError(status: 401) }
-        let response: TokenResponse = try await postForm(
-            to: "https://github.com/login/oauth/access_token",
-            fields: [
-                "client_id": Self.clientID,
-                "refresh_token": refresh,
-                "grant_type": "refresh_token",
-            ]
-        )
-        guard let token = response.accessToken else { throw HTTPError(status: 401) }
-        Keychain.set(token, for: "access-token")
-        if let newRefresh = response.refreshToken { Keychain.set(newRefresh, for: "refresh-token") }
-        return token
+        throw AuthError("The code expired. Start over.")
     }
 
     private func fetchUser(token: String) async throws -> User {
