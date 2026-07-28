@@ -12,3 +12,5 @@ Quick anchors:
 - The gesture law and the focused-editor stand-down are architecture — never
   regress them.
 - No demo scaffolding; no leftover diagnostics; docs move with behavior.
+- No explanatory microcopy in user-facing copy (help text, labels) —
+  state the thing, never reassure about it, unless explicitly asked.

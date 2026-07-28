@@ -41,6 +41,9 @@ final class MouseShell {
         /// GitHub identity for `git push` (auto-create + auth); nil when signed out.
         var githubToken: () -> String? = { nil }
         var githubLogin: () -> String? = { nil }
+        /// Hand the terminal a full-screen interactive program (`less`, `top`). nil when the
+        /// shell runs headless — those builtins then fall back to transcript behavior.
+        var launchProgram: (@MainActor (TerminalProgram) -> Void)? = nil
     }
 
     struct Output {
@@ -364,7 +367,9 @@ final class MouseShell {
             }
             let isLastCommand = index == commands.count - 1
             let mayStream = commands.count == 1 && cmd.stdoutFile == nil
-            var io = await dispatch(cmd.argv, stdin: stdin, context: context, streaming: mayStream && isLastCommand)
+            var io = await dispatch(cmd.argv, stdin: stdin, context: context,
+                                    streaming: mayStream && isLastCommand,
+                                    interactive: isLastCommand && cmd.stdoutFile == nil)
             if !io.err.isEmpty {
                 outputs.append(Output(text: io.err, isError: true))
             }
@@ -404,7 +409,9 @@ final class MouseShell {
 
     // MARK: - Built-ins
 
-    private func dispatch(_ argv: [String], stdin: String, context: Context, streaming: Bool = false) async -> IO {
+    /// `interactive` is true when this command ends the pipeline with nowhere to redirect —
+    /// the one position where a builtin may take over the screen as a full-screen program.
+    private func dispatch(_ argv: [String], stdin: String, context: Context, streaming: Bool = false, interactive: Bool = false) async -> IO {
         let name = argv[0]
         let args = Array(argv.dropFirst())
         switch name {
@@ -460,9 +467,13 @@ final class MouseShell {
         case "sed": return sed(args, stdin: stdin, context: context)
         case "diff": return diff(args, context: context)
         case "git": return await git(args, context: context)
-        // Ubuntu muscle memory, mapped to Mouse's own organs: the scrollback IS the pager,
-        // the Viewer IS the editor.
-        case "less", "more": return cat(args, stdin: stdin, context: context)
+        // A real pager when the terminal can host one; cat into the scrollback when headless
+        // or mid-pipeline. The Viewer stays the editor.
+        case "less", "more":
+            let content = cat(args, stdin: stdin, context: context)
+            guard interactive, let launch = context.launchProgram, content.err.isEmpty else { return content }
+            launch(PagerProgram(text: content.out, title: argv.joined(separator: " ")))
+            return IO()
         case "nano", "vi", "vim": return open(args, context: context)
         // System information — real, from the device (not simulated).
         case "uname": return unameCmd(args)
@@ -471,13 +482,16 @@ final class MouseShell {
         case "free": return freeCmd()
         case "uptime": return IO(out: "up \(Self.uptimeString())\n")
         case "ps": return psCmd()
-        case "top", "htop": return topCmd()
+        case "top", "htop":
+            guard interactive, let launch = context.launchProgram else { return topCmd() }
+            launch(TopProgram(snapshot: { [weak self] in self?.topLines() ?? [] }))
+            return IO()
         case "ip", "ifconfig": return ipCmd()
         case "chmod": return chmod(args, context: context)
         // There is no root: the app user is the only user, so sudo simply runs the command.
         case "sudo":
             guard !args.isEmpty else { return IO(err: "sudo: you already are the only user", status: 1) }
-            return await dispatch(args, stdin: stdin, context: context, streaming: streaming)
+            return await dispatch(args, stdin: stdin, context: context, streaming: streaming, interactive: interactive)
         // Honesty for what iOS forbids: state the fact, never fake the feature.
         case "apt", "apt-get", "dpkg", "brew":
             return IO(err: "\(name): no system packages on iOS (the pnpm engine is on the roadmap)", status: 1)
@@ -567,12 +581,11 @@ final class MouseShell {
       ip / ifconfig
       chmod <octal> <file>
       ps / top
-      less / more (the scrollback pages)
-      nano / vi (opens the viewer)
-      sudo <cmd> (you already are the only user)
+      less / more
+      nano / vi
+      sudo <cmd>
       git <init|status|log|commit -m|branch|checkout|merge|pull|diff|push|fetch|remote>
     grammar: 'quotes' "with $VARS"  |  > >> <  ;  &&  ||  ~  *  ?  $?
-    a streaming command (ping without -c) stops on any keypress
     """
 
     // MARK: Individual commands
@@ -733,13 +746,24 @@ final class MouseShell {
     }
 
     private func topCmd() -> IO {
+        return IO(out: topLines().joined(separator: "\n") + "\n")
+    }
+
+    /// The facts `top` shows — shared by the one-shot builtin and the live TopProgram.
+    func topLines() -> [String] {
         let format = ByteCountFormatter()
         format.countStyle = .memory
         let info = ProcessInfo.processInfo
-        var out = "processes 1 (only this app is visible on iOS)\n"
-        out += "mem \(format.string(fromByteCount: Self.memoryFootprint())) of \(format.string(fromByteCount: Int64(info.physicalMemory)))"
-        out += "  cores \(info.processorCount)  up \(Self.uptimeString())\n"
-        return IO(out: out)
+        var lines = ["processes 1 (only this app is visible on iOS)"]
+        var memory = "mem \(format.string(fromByteCount: Self.memoryFootprint())) of \(format.string(fromByteCount: Int64(info.physicalMemory)))"
+        memory += "  cores \(info.processorCount)  up \(Self.uptimeString())"
+        lines.append(memory)
+        #if os(iOS)
+        lines.append("headroom \(format.string(fromByteCount: Int64(os_proc_available_memory())))")
+        #endif
+        lines.append("")
+        lines.append("pid \(getpid())  mouse  \(format.string(fromByteCount: Self.memoryFootprint()))")
+        return lines
     }
 
     /// Interfaces and addresses via getifaddrs — the LAN address matters once the dev server

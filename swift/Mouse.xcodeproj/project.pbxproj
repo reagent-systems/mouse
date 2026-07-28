@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0A6F9CDD9D58550755EB4B28 /* ForegroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */; };
+		0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */; };
 		13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */; };
 		2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */; };
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
@@ -16,6 +17,7 @@
 		3C060871009B04B75DD57460 /* MouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F529B8B560B4DB034F9698 /* MouseApp.swift */; };
 		4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */; };
 		43DE04D20436A9255595520C /* GitHubAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7281C456E2B06017F80854A /* GitHubAuth.swift */; };
+		5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 525AB48D09A783EF07137189 /* TerminalScreen.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
 		5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAE14386F75AAF0B835E324C /* GitHubPush.swift */; };
 		6E38F06822105BFE7C367992 /* GitCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 179217813E4A44F9859669C5 /* GitCore.swift */; };
@@ -31,18 +33,20 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
 		179217813E4A44F9859669C5 /* GitCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCore.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
 		2D1234209A0254A06BB8E915 /* Terminal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Terminal.swift; sourceTree = "<group>"; };
 		38F529B8B560B4DB034F9698 /* MouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseApp.swift; sourceTree = "<group>"; };
 		503560AF5D76D20B38402E7F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		525AB48D09A783EF07137189 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		5A7FDD7DE14447F992EB32D3 /* Shell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Shell.swift; sourceTree = "<group>"; };
 		5B23A8EB8050D0EFED1198A4 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
 		8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundView.swift; sourceTree = "<group>"; };
 		98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Bold.ttf"; sourceTree = "<group>"; };
+		9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPrograms.swift; sourceTree = "<group>"; };
 		A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarouselDeck.swift; sourceTree = "<group>"; };
 		A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitRemote.swift; sourceTree = "<group>"; };
 		B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtStyle.swift; sourceTree = "<group>"; };
@@ -79,6 +83,8 @@
 				5A7FDD7DE14447F992EB32D3 /* Shell.swift */,
 				F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */,
 				2D1234209A0254A06BB8E915 /* Terminal.swift */,
+				9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */,
+				525AB48D09A783EF07137189 /* TerminalScreen.swift */,
 				5B23A8EB8050D0EFED1198A4 /* Workspace.swift */,
 				BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
@@ -139,6 +145,8 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
 			};
 			buildConfigurationList = D4338ECFA28F731AD99077A2 /* Build configuration list for PBXProject "Mouse" */;
 			developmentRegion = en;
@@ -193,6 +201,8 @@
 				A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */,
 				4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */,
 				A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */,
+				0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */,
+				5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */,
 				3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */,
 				DD34307A47D2C84BD6C63C19 /* WorkspaceViews.swift in Sources */,
 			);
@@ -208,7 +218,6 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 5NBX5ZD3H6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Mouse/Info.plist;
@@ -235,7 +244,6 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 5NBX5ZD3H6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Mouse/Info.plist;

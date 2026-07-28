@@ -11,9 +11,12 @@ miss. C and C++ compile on device for real. Systems languages with
 LLVM-sized compilers stay on CI. Nothing here needs an entitlement Apple
 withholds.
 
-This is a plan, not shipped behavior. Companion to [xcode.md](xcode.md),
-which covers the one case this document defers: signing and installing a
-native iOS app.
+This is a plan, not shipped behavior. Two companions:
+**[system.md](system.md)** is the umbrella spec (platform physics, the
+runtime substrate, Mouse-as-kernel, the **Node compatibility layer** that
+makes `npx` reachable, and the unified phase map);
+**[xcode.md](xcode.md)** covers the one case this document defers — signing
+and installing a native iOS app.
 
 ## 1. The two questions
 

@@ -38,6 +38,20 @@ final class TerminalSession {
     /// run; any keypress at the prompt interrupts — the phone's Ctrl-C.
     private(set) var isRunning = false
 
+    /// The full-screen program owning the terminal right now (less, top), or nil at the
+    /// prompt. While set, the container renders `screen` instead of the scrollback and every
+    /// keystroke routes to the program — the foreground-process model without fork/exec.
+    private(set) var program: TerminalProgram?
+    /// The grid a program draws into; its output feeds through `parser`.
+    let screen = TerminalScreen()
+    /// Bumped on every program write so SwiftUI redraws the grid (TerminalScreen itself is
+    /// deliberately not observable — it's a Foundation engine).
+    private(set) var screenGeneration = 0
+    @ObservationIgnored private lazy var parser = AnsiParser(screen: screen)
+    /// Last geometry the container measured; programs are born at this size.
+    @ObservationIgnored private var gridRows = 24
+    @ObservationIgnored private var gridColumns = 80
+
     let shell = MouseShell()
     @ObservationIgnored private lazy var javascript = JSEngine()
     @ObservationIgnored private var runningTask: Task<Void, Never>?
@@ -64,7 +78,7 @@ final class TerminalSession {
     /// field can keep its text.
     @discardableResult
     func run(_ raw: String, workspace: Workspace?, deck: CarouselDeck?) -> Bool {
-        guard !isRunning else { return false }
+        guard !isRunning, program == nil else { return false }
         let command = raw.trimmingCharacters(in: .whitespaces)
         append("\(prompt) \(command)", .command)
         guard !command.isEmpty else { return true }
@@ -84,6 +98,58 @@ final class TerminalSession {
         runningTask?.cancel()
     }
 
+    // MARK: - Full-screen programs
+
+    /// Adopt a program: size the screen, hand it its IO, and give it the keyboard. Refused
+    /// (in the scrollback, honestly) if one is already running.
+    func launch(_ program: TerminalProgram) {
+        guard self.program == nil else {
+            report("\(program.title): a program is already running")
+            return
+        }
+        screen.resize(rows: gridRows, columns: gridColumns)
+        self.program = program
+        screenGeneration += 1
+        program.start(io: TerminalProgramIO(
+            rows: gridRows,
+            columns: gridColumns,
+            write: { [weak self] text in
+                guard let self else { return }
+                self.parser.feed(text)
+                self.screenGeneration += 1
+            },
+            exit: { [weak self] in self?.programExited() }
+        ))
+    }
+
+    /// A keystroke while a program runs. Returns false when no program has the keyboard.
+    @discardableResult
+    func sendKey(_ text: String) -> Bool {
+        guard let program else { return false }
+        program.input(text)
+        return true
+    }
+
+    /// The container's measured geometry; resizes the grid and tells the program (SIGWINCH).
+    func setGridSize(rows: Int, columns: Int) {
+        let rows = max(4, rows), columns = max(20, columns)
+        guard rows != gridRows || columns != gridColumns else { return }
+        gridRows = rows
+        gridColumns = columns
+        guard program != nil else { return }
+        screen.resize(rows: rows, columns: columns)
+        screenGeneration += 1
+        program?.resize(rows: rows, columns: columns)
+    }
+
+    private func programExited() {
+        guard program != nil else { return }
+        program = nil
+        // A crashed-out program must not strand the terminal on the alt screen.
+        if screen.isAlternate { parser.feed("\u{1b}[?25h\u{1b}[?1049l") }
+        screenGeneration += 1
+    }
+
     private func runShell(_ command: String, workspace: Workspace?, deck: CarouselDeck?) {
         let context = MouseShell.Context(
             root: root,
@@ -99,7 +165,8 @@ final class TerminalSession {
             githubLogin: {
                 if case .signedIn(let login) = GitHubAuth.shared.phase { return login }
                 return nil
-            }
+            },
+            launchProgram: { [weak self] program in self?.launch(program) }
         )
         isRunning = true
         runningTask = Task { @MainActor [weak self] in
@@ -145,22 +212,38 @@ struct TerminalContainerView: View {
                 // The ring's OWN session: rings sharing a repo get separate terminals.
                 let terminal = deck.terminal(for: workspace)
                 VStack(alignment: .leading, spacing: 6) {
-                    // Bottom-anchored like a chat: content sticks to the bottom as output
-                    // arrives, with no manual scrollTo to miscompute against unlaid-out lines
-                    // (which used to park the response offscreen). Scrolling up to read holds.
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(terminal.lines) { line in
-                                Text(line.text)
-                                    .font(.custom(AppFont.asciiName, size: 12))
-                                    .foregroundStyle(color(for: line.kind))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Two modes, like a real terminal: the transcript (scrollback), or the
+                    // SCREEN while a full-screen program (less, top) owns it. The geometry
+                    // reader sizes the character grid either way, so a program is born at
+                    // the size it will draw into.
+                    GeometryReader { geo in
+                        Group {
+                            if terminal.program != nil {
+                                TerminalScreenGrid(terminal: terminal)
+                            } else {
+                                // Bottom-anchored like a chat: content sticks to the bottom
+                                // as output arrives, with no manual scrollTo to miscompute
+                                // against unlaid-out lines (which used to park the response
+                                // offscreen). Scrolling up to read holds.
+                                ScrollView {
+                                    LazyVStack(alignment: .leading, spacing: 2) {
+                                        ForEach(terminal.lines) { line in
+                                            Text(line.text)
+                                                .font(.custom(AppFont.asciiName, size: 12))
+                                                .foregroundStyle(color(for: line.kind))
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                    }
+                                }
+                                .defaultScrollAnchor(.bottom)
                             }
                         }
+                        .onAppear { applyGrid(geo.size, terminal: terminal) }
+                        .onChange(of: geo.size) { _, size in applyGrid(size, terminal: terminal) }
                     }
-                    .defaultScrollAnchor(.bottom)
                     HStack(spacing: 6) {
-                        Text(terminal.prompt)
+                        // While a program runs, its name stands where the prompt was.
+                        Text(terminal.program?.title ?? terminal.prompt)
                             .font(.custom(AppFont.asciiName, size: 12))
                             .opacity(0.7)
                         TerminalPromptField(
@@ -168,6 +251,7 @@ struct TerminalContainerView: View {
                             onCommand: { command in
                                 terminal.run(command, workspace: workspace, deck: deck)
                             },
+                            onKey: { key in terminal.sendKey(key) },
                             onInterrupt: { terminal.interrupt() },
                             isBusy: { terminal.isRunning }
                         )
@@ -196,6 +280,133 @@ struct TerminalContainerView: View {
         case .error: .red
         }
     }
+
+    private func applyGrid(_ size: CGSize, terminal: TerminalSession) {
+        terminal.setGridSize(rows: Int(size.height / TerminalCellMetrics.height),
+                             columns: Int(size.width / TerminalCellMetrics.width))
+    }
+}
+
+/// The terminal's character-cell geometry, measured once from the mono font — the view and
+/// the session must agree on how many cells fit.
+enum TerminalCellMetrics {
+    static let uiFont = UIFont(name: AppFont.asciiName, size: 12)
+        ?? .monospacedSystemFont(ofSize: 12, weight: .regular)
+    static let width: CGFloat = ("M" as NSString).size(withAttributes: [.font: uiFont]).width
+    static let height: CGFloat = uiFont.lineHeight
+}
+
+/// The SCREEN renderer: rows of styled cells while a program owns the terminal. Redraws are
+/// driven by `screenGeneration` (the grid itself is a Foundation engine, not observable).
+/// No gestures of its own — the gesture law: content gets taps and the keyboard, the shell
+/// keeps the drags.
+private struct TerminalScreenGrid: View {
+    let terminal: TerminalSession
+
+    var body: some View {
+        let _ = terminal.screenGeneration
+        let screen = terminal.screen
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(0..<screen.rows, id: \.self) { row in
+                Text(attributed(screen: screen, row: row))
+                    .font(.custom(AppFont.asciiName, size: 12))
+                    .lineLimit(1)
+                    .frame(height: TerminalCellMetrics.height, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func attributed(screen: TerminalScreen, row: Int) -> AttributedString {
+        var result = AttributedString()
+        let showCursor = screen.cursorVisible && row == screen.cursorRow
+        let cells = screen.grid[row]
+        var index = 0
+        while index < cells.count {
+            var style = cells[index].style
+            if showCursor && index == min(screen.cursorColumn, cells.count - 1) {
+                style.inverse.toggle()
+                var cell = AttributedString(String(cells[index].character))
+                apply(style, to: &cell)
+                result += cell
+                index += 1
+                continue
+            }
+            // Run-length batching: consecutive cells sharing a style render as one chunk.
+            var text = ""
+            let runStart = index
+            while index < cells.count, cells[index].style == style,
+                  !(showCursor && index == min(screen.cursorColumn, cells.count - 1)) {
+                text.append(cells[index].character)
+                index += 1
+            }
+            if index == runStart { index += 1; continue }
+            var chunk = AttributedString(text)
+            apply(style, to: &chunk)
+            result += chunk
+        }
+        return result
+    }
+
+    private func apply(_ style: CellStyle, to text: inout AttributedString) {
+        var foreground = color(style.foreground) ?? .white.opacity(0.9)
+        var background = color(style.background)
+        if style.inverse {
+            let fg = foreground
+            foreground = background ?? .black
+            background = fg
+        }
+        if style.dim { foreground = foreground.opacity(0.55) }
+        text.foregroundColor = foreground
+        if let background { text.backgroundColor = background }
+        if style.underline { text.underlineStyle = .single }
+    }
+
+    /// nil means "the terminal's own default" — white text on the container's black.
+    private func color(_ ansi: AnsiColor) -> Color? {
+        switch ansi {
+        case .default:
+            return nil
+        case .rgb(let r, let g, let b):
+            return Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
+        case .indexed(let index):
+            return Self.indexed(index)
+        }
+    }
+
+    /// The xterm 256-color table: 16 named, a 6×6×6 cube, a 24-step gray ramp.
+    private static func indexed(_ index: Int) -> Color {
+        func rgb(_ r: Int, _ g: Int, _ b: Int) -> Color {
+            Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255)
+        }
+        switch index {
+        case 0: return rgb(0, 0, 0)
+        case 1: return rgb(205, 49, 49)
+        case 2: return rgb(13, 188, 121)
+        case 3: return rgb(229, 229, 16)
+        case 4: return rgb(36, 114, 200)
+        case 5: return rgb(188, 63, 188)
+        case 6: return rgb(17, 168, 205)
+        case 7: return rgb(229, 229, 229)
+        case 8: return rgb(102, 102, 102)
+        case 9: return rgb(241, 76, 76)
+        case 10: return rgb(35, 209, 139)
+        case 11: return rgb(245, 245, 67)
+        case 12: return rgb(59, 142, 234)
+        case 13: return rgb(214, 112, 214)
+        case 14: return rgb(41, 184, 219)
+        case 15: return rgb(255, 255, 255)
+        case 16...231:
+            let value = index - 16
+            let steps = [0, 95, 135, 175, 215, 255]
+            return rgb(steps[value / 36], steps[(value / 6) % 6], steps[value % 6])
+        case 232...255:
+            let gray = 8 + (index - 232) * 10
+            return rgb(gray, gray, gray)
+        default:
+            return .white
+        }
+    }
 }
 
 
@@ -210,6 +421,9 @@ private struct TerminalPromptField: UIViewRepresentable {
     @Binding var isFocused: Bool
     /// Returns true if the command was accepted (clear the field) or false if refused (busy).
     let onCommand: (String) -> Bool
+    /// A raw keystroke while a full-screen program has the keyboard. Returns true when a
+    /// program consumed it (the key never reaches the field).
+    let onKey: (String) -> Bool
     let onInterrupt: () -> Void
     let isBusy: () -> Bool
 
@@ -245,6 +459,10 @@ private struct TerminalPromptField: UIViewRepresentable {
         init(_ parent: TerminalPromptField) { self.parent = parent }
 
         func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+            // A full-screen program has the keyboard: keys go to it, not into the field.
+            if !string.isEmpty, parent.onKey(string) {
+                return false
+            }
             // While a command runs, any keypress interrupts it (the phone's Ctrl-C). New input
             // is refused during a run anyway, so a keystroke can only mean "stop" — the key is
             // swallowed rather than typed.
@@ -256,6 +474,10 @@ private struct TerminalPromptField: UIViewRepresentable {
         }
 
         func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            // Return is a keystroke too while a program runs (the pager's "next line").
+            if parent.onKey("\r") {
+                return false
+            }
             // Refused while busy (except the interrupt path above); keep the typed text.
             if parent.onCommand(textField.text ?? "") {
                 textField.text = ""

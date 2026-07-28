@@ -108,7 +108,10 @@ assembling running ones.
 The substrate the terminal, the Preview container, and the `xcode` branch
 all stand on: **processes, `$PATH`, packages, and Mouse as their kernel.**
 
-**Full plan: [compile.md](compile.md).** The short version: iOS grants
+**Entry point: [system.md](system.md)** (the umbrella spec — platform
+physics, execution substrates, Mouse-as-kernel, the Node compatibility
+layer, and the unified phase map across every plan doc). Language-by-
+language detail: **[compile.md](compile.md)**. The short version: iOS grants
 exactly one JIT — WebKit's — so a `WKWebView` used as a compute engine is
 the fastest execution surface available to Mouse, and the JavaScript/wasm
 toolchain runs there at full speed (Mouse's current in-process `JSContext`

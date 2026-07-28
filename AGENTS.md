@@ -33,6 +33,14 @@ cases) and a real repo on the FF/three-way outcomes (`fsck` clean, both
 parents present, byte-identical content).
 Pack inflate uses **libz** (`-lz` in project.yml), not the Compression
 framework, which can't delimit concatenated zlib members.
+`TerminalScreen.swift` and `TerminalPrograms.swift` are also
+app-independent: verify the screen against xterm semantics AND cross-check
+against a known-good emulator (`pip install pyte`; feed both the same
+escape streams — structured + seeded-random — and diff final screen text;
+pyte needs two harness-side patches: materialize its sparse buffer rows
+before IL/DL, and clamp CUU/CUD at margins only when the cursor starts
+inside the region). Programs verify by wiring `TerminalProgramIO.write`
+into an `AnsiParser` and asserting the grid after keystrokes.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
@@ -137,6 +145,13 @@ it, and force-quit-relaunch to prove it.
   gestures, UI-test drivers, seeded fixtures — great while exploring, gone
   before merge. (A leftover auto-swipe once shipped a haunted onboarding
   ring.)
+- **No explanatory microcopy.** User-facing copy (help text, labels,
+  chips) states the thing, never explains or reassures about the thing.
+  `sudo <cmd>` — not `sudo <cmd> (you already are the only user)`;
+  `ps / top` — not `ps / top (top is live: q quits)`. Command syntax
+  (`[-la]`, `<file…>`, `(!!, !N)`) is content; parenthetical asides are
+  not. Never add such copy unless explicitly asked. Rationale lives in
+  code comments and docs, not in the UI.
 - **Show, don't just describe.** Anything visible gets a screenshot or short
   clip in the PR description (GitHub hosts them). Exploration artifacts
   worth keeping — mockups, direction studies — live in `sketches/`.
@@ -164,6 +179,8 @@ it, and force-quit-relaunch to prove it.
 | `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins incl. `git`, and `ICMPPinger` (real ping) |
 | `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line, and the three-way merge engine (`merge`/`diff3`) — real-git interoperable |
 | `GitRemote.swift` | The remote half: clone/fetch/push over GitHub smart-HTTP, and `POST /user/repos` auto-create on push |
-| `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field |
+| `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field, screen-grid renderer |
+| `TerminalScreen.swift` | The terminal SCREEN: VT100/xterm cell grid (cursor, scroll regions, SGR, alt screen) + `AnsiParser` — verified against pyte |
+| `TerminalPrograms.swift` | `TerminalProgram` (full-screen program contract — the fork/exec-less PTY substitute) + the pager (`less`) and live `top` |
 | `StripPersistence.swift` | Snapshot/restore DTOs for the whole strip |
 | `AsciiArt*.swift`, `AppFont.swift` | Backdrop art, type constants |
