@@ -1,6 +1,9 @@
 import CryptoKit
 import Darwin
 import Foundation
+#if os(iOS)
+import os   // os_proc_available_memory (free's "available to the app")
+#endif
 
 /// `msh` — Mouse's shell, written from scratch for platforms with no fork/exec (the a-Shell
 /// model). It speaks the everyday subset of POSIX shell grammar people's fingers expect:
@@ -457,6 +460,37 @@ final class MouseShell {
         case "sed": return sed(args, stdin: stdin, context: context)
         case "diff": return diff(args, context: context)
         case "git": return await git(args, context: context)
+        // Ubuntu muscle memory, mapped to Mouse's own organs: the scrollback IS the pager,
+        // the Viewer IS the editor.
+        case "less", "more": return cat(args, stdin: stdin, context: context)
+        case "nano", "vi", "vim": return open(args, context: context)
+        // System information — real, from the device (not simulated).
+        case "uname": return unameCmd(args)
+        case "lsb_release": return IO(out: "Mouse msh on \(ProcessInfo.processInfo.operatingSystemVersionString)\n")
+        case "df": return df(context: context)
+        case "free": return freeCmd()
+        case "uptime": return IO(out: "up \(Self.uptimeString())\n")
+        case "ps": return psCmd()
+        case "top", "htop": return topCmd()
+        case "ip", "ifconfig": return ipCmd()
+        case "chmod": return chmod(args, context: context)
+        // There is no root: the app user is the only user, so sudo simply runs the command.
+        case "sudo":
+            guard !args.isEmpty else { return IO(err: "sudo: you already are the only user", status: 1) }
+            return await dispatch(args, stdin: stdin, context: context, streaming: streaming)
+        // Honesty for what iOS forbids: state the fact, never fake the feature.
+        case "apt", "apt-get", "dpkg", "brew":
+            return IO(err: "\(name): no system packages on iOS (the pnpm engine is on the roadmap)", status: 1)
+        case "kill", "killall":
+            return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
+        case "ss", "netstat":
+            return IO(err: "\(name): nothing is listening (the dev-server engine is on the roadmap)", status: 1)
+        case "systemctl", "service":
+            return IO(err: "\(name): no systemd on iOS", status: 1)
+        case "chown":
+            return IO(err: "chown: single-user sandbox, ownership is fixed", status: 1)
+        case "passwd":
+            return IO(err: "passwd: no user accounts on iOS", status: 1)
         case "npm", "pnpm", "node", "npx":
             return IO(err: "\(name): not built yet", status: 127)
         default:
@@ -470,24 +504,74 @@ final class MouseShell {
         "date", "whoami", "true", "false", "env", "export", "unset", "history", "which",
         "basename", "dirname", "open", "sleep", "ping", "curl", "wget", "tee", "xargs",
         "rev", "tac", "nl", "base64", "md5sum", "md5", "sha256sum", "shasum", "sed", "diff",
-        "git",
+        "git", "less", "more", "nano", "vi", "vim", "uname", "lsb_release", "df", "free",
+        "uptime", "ps", "top", "htop", "ip", "ifconfig", "chmod", "chown", "passwd", "sudo",
+        "apt", "apt-get", "dpkg", "brew", "kill", "killall", "ss", "netstat", "systemctl",
+        "service",
     ]
 
+    // One command per line: the terminal wraps and scrolls vertically, so a single column
+    // reads cleanly on a phone where multi-column layouts fold into noise.
     private static let helpText = """
     msh — built-ins:
-      ls [-a] [path]   cd [path]     pwd           cat [file…]
-      echo [-n]        printf        mkdir <dir>   touch <file>
-      rm [-r]          mv <a> <b>    cp [-r]       head/tail [-n N]
-      wc [-l -w -c]    sort [-r]     uniq [-c]     tr <set1> <set2>
-      cut -d X -f N    seq [a] b     grep [-i] <pattern> [file…]
-      find <name>      date          env           export NAME=value
-      unset NAME       history (!!, !N)            which <name>
-      basename/dirname open <file>   clear         help
-      sed 's/re/sub/g' diff <a> <b>  tee [-a]      xargs <cmd>
-      nl               rev / tac     base64 [-d]   md5sum / sha256sum
-      ping [-c N] <host>             curl [-o file] <url>       sleep <s>
+      ls [-la] [path]
+      cd [path]
+      pwd
+      cat [file…]
+      echo [-n]
+      printf <format> [args…]
+      mkdir <dir>
+      touch <file>
+      rm [-r] <path>
+      mv <a> <b>
+      cp [-r] <a> <b>
+      head [-n N] [file]
+      tail [-n N] [file]
+      wc [-l -w -c]
+      sort [-r]
+      uniq [-c]
+      tr <set1> <set2>
+      cut -d X -f N
+      seq [a] b
+      grep [-i] <pattern> [file…]
+      find <name>
+      date
+      whoami
+      env
+      export NAME=value
+      unset NAME
+      history (!!, !N)
+      which <name>
+      basename <path>
+      dirname <path>
+      open <file>
+      clear
+      help
+      sed 's/re/sub/g'
+      diff <a> <b>
+      tee [-a] <file>
+      xargs <cmd>
+      nl
+      rev
+      tac
+      base64 [-d]
+      md5sum / sha256sum
+      ping [-c N] <host>
+      curl [-o file] <url>
+      wget <url>
+      sleep <s>
+      uname [-a]
+      df
+      free
+      uptime
+      ip / ifconfig
+      chmod <octal> <file>
+      ps / top
+      less / more (the scrollback pages)
+      nano / vi (opens the viewer)
+      sudo <cmd> (you already are the only user)
+      git <init|status|log|commit -m|branch|checkout|merge|pull|diff|push|fetch|remote>
     grammar: 'quotes' "with $VARS"  |  > >> <  ;  &&  ||  ~  *  ?  $?
-      git <init|status|log|commit -m|branch|checkout|diff|push|fetch|remote>
     a streaming command (ping without -c) stops on any keypress
     """
 
@@ -508,29 +592,54 @@ final class MouseShell {
     }
 
     private func ls(_ args: [String], context: Context) -> IO {
-        let showHidden = args.contains("-a")
+        // Flags combine (-la == -l -a), like the real thing.
+        let flags = Set(args.filter { $0.hasPrefix("-") }.flatMap { $0.dropFirst() })
+        let showHidden = flags.contains("a")
+        let long = flags.contains("l")
         let path = args.first { !$0.hasPrefix("-") } ?? "."
         guard let target = resolve(path, context: context) else { return IO(err: "ls: invalid path", status: 1) }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: target.url.path, isDirectory: &isDirectory) else {
             return IO(err: "ls: no such path: \(display(target.rel))", status: 1)
         }
-        guard isDirectory.boolValue else { return IO(out: display(target.rel) + "\n") }
+        guard isDirectory.boolValue else {
+            return IO(out: (long ? longLine(target.url) : display(target.rel)) + "\n")
+        }
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: target.url, includingPropertiesForKeys: [.isDirectoryKey]) else {
             return IO(err: "ls: can't read: \(display(target.rel))", status: 1)
         }
-        let names = entries
+        let sorted = entries
             .filter { showHidden || !$0.lastPathComponent.hasPrefix(".") }
-            .map { url -> (String, Bool) in
-                (url.lastPathComponent, (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false)
+            .map { url -> (url: URL, name: String, isDir: Bool) in
+                (url, url.lastPathComponent, (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false)
             }
             .sorted { lhs, rhs in
-                if lhs.1 != rhs.1 { return lhs.1 }
-                return lhs.0.localizedCaseInsensitiveCompare(rhs.0) == .orderedAscending
+                if lhs.isDir != rhs.isDir { return lhs.isDir }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
             }
-            .map { $0.1 ? $0.0 + "/" : $0.0 }
-        return IO(out: names.isEmpty ? "(empty)\n" : names.joined(separator: "  ") + "\n")
+        if sorted.isEmpty { return IO(out: "(empty)\n") }
+        if long {
+            return IO(out: joinLines(sorted.map { longLine($0.url) }))
+        }
+        return IO(out: sorted.map { $0.isDir ? $0.name + "/" : $0.name }.joined(separator: "  ") + "\n")
+    }
+
+    /// One `ls -l` row: permissions, size, modified date, name — real values from the sandbox.
+    private func longLine(_ url: URL) -> String {
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+        let isDir = (attrs[.type] as? FileAttributeType) == .typeDirectory
+        let mode = (attrs[.posixPermissions] as? Int) ?? 0
+        let size = (attrs[.size] as? Int) ?? 0
+        let date = (attrs[.modificationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        let sets = [(mode >> 6) & 7, (mode >> 3) & 7, mode & 7]
+        let perms = (isDir ? "d" : "-") + sets.map { s in
+            "\(s & 4 != 0 ? "r" : "-")\(s & 2 != 0 ? "w" : "-")\(s & 1 != 0 ? "x" : "-")"
+        }.joined()
+        let sizeColumn = String(repeating: " ", count: max(0, 8 - String(size).count)) + String(size)
+        return "\(perms) \(sizeColumn)  \(formatter.string(from: date))  \(url.lastPathComponent)\(isDir ? "/" : "")"
     }
 
     private func cat(_ args: [String], stdin: String, context: Context) -> IO {
@@ -575,6 +684,127 @@ final class MouseShell {
             i = format.index(after: i)
         }
         return IO(out: out)
+    }
+
+    // MARK: - System information (real device facts; nothing simulated)
+
+    private func unameCmd(_ args: [String]) -> IO {
+        var uts = utsname()
+        uname(&uts)
+        func field<T>(_ value: T) -> String {
+            withUnsafeBytes(of: value) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
+        }
+        if args.contains("-a") {
+            return IO(out: "\(field(uts.sysname)) \(field(uts.nodename)) \(field(uts.release)) \(field(uts.version)) \(field(uts.machine))\n")
+        }
+        if args.contains("-m") { return IO(out: field(uts.machine) + "\n") }
+        if args.contains("-r") { return IO(out: field(uts.release) + "\n") }
+        return IO(out: field(uts.sysname) + "\n")
+    }
+
+    private func df(context: Context) -> IO {
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: context.root.path),
+              let total = (attrs[.systemSize] as? NSNumber)?.int64Value,
+              let free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value else {
+            return IO(err: "df: couldn't stat the filesystem", status: 1)
+        }
+        let format = ByteCountFormatter()
+        format.countStyle = .file
+        let used = total - free
+        let percent = total > 0 ? Int((Double(used) / Double(total) * 100).rounded()) : 0
+        return IO(out: "size \(format.string(fromByteCount: total))  used \(format.string(fromByteCount: used)) (\(percent)%)  avail \(format.string(fromByteCount: free))\n")
+    }
+
+    private func freeCmd() -> IO {
+        let format = ByteCountFormatter()
+        format.countStyle = .memory
+        var out = "device memory \(format.string(fromByteCount: Int64(ProcessInfo.processInfo.physicalMemory)))\n"
+        out += "app footprint \(format.string(fromByteCount: Self.memoryFootprint()))\n"
+        #if os(iOS)
+        out += "available to the app \(format.string(fromByteCount: Int64(os_proc_available_memory())))\n"
+        #endif
+        return IO(out: out)
+    }
+
+    private func psCmd() -> IO {
+        let format = ByteCountFormatter()
+        format.countStyle = .memory
+        return IO(out: "only this app is visible on iOS\npid \(getpid())  mouse  \(format.string(fromByteCount: Self.memoryFootprint()))\n")
+    }
+
+    private func topCmd() -> IO {
+        let format = ByteCountFormatter()
+        format.countStyle = .memory
+        let info = ProcessInfo.processInfo
+        var out = "processes 1 (only this app is visible on iOS)\n"
+        out += "mem \(format.string(fromByteCount: Self.memoryFootprint())) of \(format.string(fromByteCount: Int64(info.physicalMemory)))"
+        out += "  cores \(info.processorCount)  up \(Self.uptimeString())\n"
+        return IO(out: out)
+    }
+
+    /// Interfaces and addresses via getifaddrs — the LAN address matters once the dev server
+    /// hosts on the network.
+    private func ipCmd() -> IO {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
+            return IO(err: "ip: couldn't read interfaces", status: 1)
+        }
+        defer { freeifaddrs(ifaddr) }
+        var lines: [String] = []
+        var pointer: UnsafeMutablePointer<ifaddrs>? = first
+        while let ifa = pointer {
+            defer { pointer = ifa.pointee.ifa_next }
+            guard let sa = ifa.pointee.ifa_addr else { continue }
+            let family = sa.pointee.sa_family
+            guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+            let name = String(cString: ifa.pointee.ifa_name)
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let length = family == UInt8(AF_INET)
+                ? socklen_t(MemoryLayout<sockaddr_in>.size)
+                : socklen_t(MemoryLayout<sockaddr_in6>.size)
+            if getnameinfo(sa, length, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let addr = String(decoding: host.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+                lines.append("\(name)  \(family == UInt8(AF_INET) ? "inet" : "inet6")  \(addr)")
+            }
+        }
+        return IO(out: joinLines(lines))
+    }
+
+    private func chmod(_ args: [String], context: Context) -> IO {
+        guard args.count >= 2, let mode = Int(args[0], radix: 8) else {
+            return IO(err: "chmod: usage: chmod <octal-mode> <file…>", status: 1)
+        }
+        for file in args.dropFirst() {
+            guard let target = resolve(file, context: context),
+                  FileManager.default.fileExists(atPath: target.url.path) else {
+                return IO(err: "chmod: no such file: \(file)", status: 1)
+            }
+            do { try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: target.url.path) }
+            catch { return IO(err: "chmod: \(error.localizedDescription)", status: 1) }
+        }
+        return IO()
+    }
+
+    private static func uptimeString() -> String {
+        let up = Int(ProcessInfo.processInfo.systemUptime)
+        let days = up / 86400, hours = (up % 86400) / 3600, minutes = (up % 3600) / 60
+        var pieces: [String] = []
+        if days > 0 { pieces.append("\(days)d") }
+        if hours > 0 { pieces.append("\(hours)h") }
+        pieces.append("\(minutes)m")
+        return pieces.joined(separator: " ")
+    }
+
+    /// The app's physical memory footprint (the number Xcode's gauge shows), via task_info.
+    private static func memoryFootprint() -> Int64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Int64(info.phys_footprint) : 0
     }
 
     private func mkdir(_ args: [String], context: Context) -> IO {
@@ -945,9 +1175,45 @@ final class MouseShell {
                 }
                 guard let token = context.githubToken() else { return IO(err: "git: sign in first", status: 1) }
                 let repoFullName = repoName(fromRemoteURL: url)
-                let result = try await GitRemote.fetch(root: root, repoFullName: repoFullName, token: token, checkout: false)
+                let result = try await GitRemote.fetch(root: root, repoFullName: repoFullName, token: token)
                 context.historyChanged()
                 return IO(out: "fetched \(result.objectCount) object\(result.objectCount == 1 ? "" : "s") from origin/\(result.branch)\n")
+            case "pull":
+                guard GitCore.hasRepo(root), let url = GitCore.remoteURL(in: root) else {
+                    return IO(err: "git: no origin remote", status: 1)
+                }
+                guard let token = context.githubToken() else { return IO(err: "git: sign in first", status: 1) }
+                let repoFullName = repoName(fromRemoteURL: url)
+                let fetched = try await GitRemote.fetch(root: root, repoFullName: repoFullName, token: token)
+                let branch = GitCore.currentBranch(in: root) ?? fetched.branch
+                guard let local = GitCore.refSha(branch, in: root) else {
+                    // No local commits yet: adopt the remote branch wholesale (first pull).
+                    try GitCore.setRef(fetched.branch, to: fetched.sha, in: root)
+                    try GitCore.setHead(branch: fetched.branch, in: root)
+                    try GitCore.checkout(fetched.branch, in: root)
+                    context.reloadTree()
+                    context.historyChanged()
+                    return IO(out: "pulled \(fetched.objectCount) object\(fetched.objectCount == 1 ? "" : "s"), now at \(fetched.sha.prefix(7))\n")
+                }
+                if local != fetched.sha, try GitCore.mergeBase(local, fetched.sha, in: root) != fetched.sha {
+                    // A real integration is coming: refuse over uncommitted edits, like git does.
+                    guard try GitCore.status(in: root).isClean else {
+                        return IO(err: "git pull: you have uncommitted changes — commit first", status: 1)
+                    }
+                }
+                let merged = try GitCore.merge(commit: fetched.sha, label: "origin/\(fetched.branch)", in: root)
+                context.reloadTree()
+                context.historyChanged()
+                switch merged {
+                case .upToDate:
+                    return IO(out: "already up to date\n")
+                case .fastForward(let sha):
+                    return IO(out: "fast-forward to \(sha.prefix(7))\n")
+                case .merged(let sha):
+                    return IO(out: "merge made by the three-way strategy (\(sha.prefix(7)))\n")
+                case .conflicts(let files):
+                    return IO(err: "conflicts in \(files.joined(separator: ", ")) — resolve the markers and commit", status: 1)
+                }
             case "merge":
                 guard GitCore.hasRepo(root) else { return IO(err: "git: not a repository (git init)", status: 1) }
                 guard let name = rest.first else { return IO(err: "git merge: usage: git merge <branch>", status: 1) }
@@ -964,8 +1230,8 @@ final class MouseShell {
                 case .conflicts(let files):
                     return IO(err: "conflicts in \(files.joined(separator: ", ")) — resolve the markers and commit", status: 1)
                 }
-            case "pull", "clone":
-                return IO(err: "git \(sub): not built yet", status: 1)
+            case "clone":
+                return IO(err: "git clone: not built yet", status: 1)
             default:
                 return IO(err: "git: unknown command: \(sub)", status: 1)
             }

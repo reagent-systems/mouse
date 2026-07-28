@@ -25,9 +25,12 @@ via `swiftc` and run. For GitCore, ALSO validate interop with the real CLI:
 engine wrote; the packfile writer must pass `git index-pack --stdin`; the
 reader must resolve a delta pack from `git pack-objects`; a push body
 (pkt-line command + pack) must update a ref via `git receive-pack
---stateless-rpc`; and the merge engine must match `git merge-file` on the
-line merge (clean + conflict cases) and a real repo on the FF/three-way
-outcomes (`fsck` clean, both parents present, byte-identical content).
+--stateless-rpc`; a fetch body (want/have) must round-trip through `git
+upload-pack --stateless-rpc` with the ACK/NAK preamble demuxed and haves
+honored (incremental pack smaller than the full closure); and the merge
+engine must match `git merge-file` on the line merge (clean + conflict
+cases) and a real repo on the FF/three-way outcomes (`fsck` clean, both
+parents present, byte-identical content).
 Pack inflate uses **libz** (`-lz` in project.yml), not the Compression
 framework, which can't delimit concatenated zlib members.
 
