@@ -1276,8 +1276,24 @@ final class MouseShell {
         return await runNode(source: source, path: "/" + binPath, args: args, stdin: stdin, context: context)
     }
 
+    /// node → sh → node … recursion (a JS tool exec-ing itself) stops here, not in a stack
+    /// overflow.
+    private var nodeDepth = 0
+
     private func runNode(source: String, path: String, args: [String], stdin: String, context: Context) async -> IO {
-        let engine = NodeEngine(root: context.root, env: env)
+        guard nodeDepth < 8 else { return IO(err: "node: recursion too deep\n", status: 1) }
+        nodeDepth += 1
+        defer { nodeDepth -= 1 }
+        let bridge = NodeEngine.ShellBridge { @MainActor [weak self] command in
+            guard let self else { return ("", "msh: shell gone\n", 1) }
+            let outputs = await self.runProgram(command, context: context, interactive: false)
+            var out = outputs.filter { !$0.isError }.map(\.text).joined(separator: "\n")
+            var err = outputs.filter { $0.isError }.map(\.text).joined(separator: "\n")
+            if !out.isEmpty { out += "\n" }
+            if !err.isEmpty { err += "\n" }
+            return (out, err, self.lastStatus)
+        }
+        let engine = NodeEngine(root: context.root, env: env, shell: bridge)
         let result = await engine.run(source: source, path: path, argv: ["node", path] + args,
                                       cwd: "/" + cwd, stdin: stdin)
         context.reloadTree()   // scripts write files

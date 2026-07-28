@@ -62,7 +62,13 @@ argv/env/exit codes, nextTick/promise/timer ordering, async/await, util,
 assert) — plus an installed bin (mkdirp) executed by our engine mutating
 the real filesystem. Known divergences to keep out of fixtures: absolute
 host paths in cwd, setTimeout-vs-setImmediate order from the main module,
-stderr text.
+stderr text. Part-2 surfaces verify the same way: ESM fixtures (all
+import/export forms + chalk@5, a real ESM-only package), child_process
+with the harness bridge running /bin/sh (matching real node's /bin/sh
+exactly; msh semantics proven separately end-to-end), and fetch/https
+against a live local HTTP server. The engine runs JS on a background
+queue — never block the main actor from JS; `execSync` blocks the JS
+thread on a semaphore while msh runs on main.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens

@@ -14,8 +14,12 @@ import JavaScriptCore
 ///
 /// Foundation + JavaScriptCore only: verified headlessly against REAL Node's output for the
 /// same fixture scripts (per AGENTS.md).
-@MainActor
-final class NodeEngine {
+///
+/// Threading (the ICMPPinger pattern): ALL JavaScript runs on `queue`, a dedicated serial
+/// queue — never the main actor. That is what lets `child_process.execSync` block its own
+/// thread on a semaphore while msh runs on the main actor, and lets URLSession completions
+/// re-enter the event loop as jobs. JSValues are touched only on `queue`.
+final class NodeEngine: @unchecked Sendable {
 
     struct Result {
         var out = ""
@@ -23,13 +27,22 @@ final class NodeEngine {
         var status: Int32 = 0
     }
 
+    /// The kernel doorway back into msh: `child_process` commands run through this, on the
+    /// main actor, while the JS thread waits. nil when no shell is attached (harness).
+    struct ShellBridge: @unchecked Sendable {
+        let execute: @MainActor (String) async -> (out: String, err: String, status: Int32)
+    }
+
     private let root: URL
     private let env: [String: String]
+    private let shell: ShellBridge?
+    private let queue = DispatchQueue(label: "mouse.node", qos: .userInitiated)
     private var context: JSContext!
     private var out = ""
     private var err = ""
     private var exitCode: Int32? = nil
     private var moduleCache: [String: JSValue] = [:]
+    private var packageTypeCache: [String: String] = [:]
 
     private struct Timer {
         let id: Int
@@ -42,15 +55,44 @@ final class NodeEngine {
     private var immediates: [(JSValue, [Any])] = []
     private var nextTimerID = 1
 
-    init(root: URL, env: [String: String]) {
+    /// Cross-thread wakeups: async completions (HTTP) enqueue jobs and signal; the loop
+    /// sleeps on the semaphore between timers.
+    private let wakeup = DispatchSemaphore(value: 0)
+    private let jobsLock = NSLock()
+    private var jobs: [() -> Void] = []
+    private var outstanding = 0
+    private var cancelled = false
+
+    init(root: URL, env: [String: String], shell: ShellBridge? = nil) {
         self.root = root
         self.env = env
+        self.shell = shell
+    }
+
+    private func enqueueJob(_ job: @escaping () -> Void) {
+        jobsLock.lock()
+        jobs.append(job)
+        jobsLock.unlock()
+        wakeup.signal()
     }
 
     // MARK: - Entry
 
     /// Run one script as the main module. `path` is workspace-virtual ("/tool/cli.js").
-    func run(source rawSource: String, path: String, argv: [String], cwd: String, stdin: String) async -> Result {
+    func run(source: String, path: String, argv: [String], cwd: String, stdin: String) async -> Result {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    continuation.resume(returning: self.runOnQueue(source: source, path: path, argv: argv, cwd: cwd, stdin: stdin))
+                }
+            }
+        } onCancel: {
+            cancelled = true
+            wakeup.signal()
+        }
+    }
+
+    private func runOnQueue(source rawSource: String, path: String, argv: [String], cwd: String, stdin: String) -> Result {
         var source = rawSource
         if source.hasPrefix("#!") {   // executables carry shebangs; the wrapper won't parse them
             source = source.drop(while: { $0 != "\n" }).isEmpty ? "" : String(source.drop(while: { $0 != "\n" }))
@@ -70,6 +112,9 @@ final class NodeEngine {
         context.evaluateScript(Self.bootstrap)
 
         let dir = virtualDirname(path)
+        if isESModule(id: normalize(path), source: source) {
+            source = Self.transpileESM(source)
+        }
         let wrapped = wrapModule(source)
         if let function = wrapped {
             let module = context.evaluateScript("({exports: {}})")!
@@ -81,7 +126,7 @@ final class NodeEngine {
             exitCode = 1
         }
 
-        await runEventLoop()
+        runEventLoop()
 
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
@@ -99,9 +144,23 @@ final class NodeEngine {
 
     // MARK: - Event loop
 
-    private func runEventLoop() async {
+    private func runEventLoop() {
         while exitCode == nil {
+            if cancelled { exitCode = 130; break }
             drainTicks()
+
+            jobsLock.lock()
+            let pendingJobs = jobs
+            jobs = []
+            jobsLock.unlock()
+            if !pendingJobs.isEmpty {
+                for job in pendingJobs {
+                    guard exitCode == nil else { break }
+                    job()
+                }
+                continue
+            }
+
             if !immediates.isEmpty {
                 let batch = immediates
                 immediates = []
@@ -111,20 +170,26 @@ final class NodeEngine {
                 }
                 continue
             }
-            guard let next = timers.min(by: { $0.due < $1.due }) else { break }
-            let wait = next.due.timeIntervalSinceNow
-            if wait > 0 {
-                try? await Task.sleep(for: .seconds(min(wait, 60)))
-                if Task.isCancelled { exitCode = 130; break }
-                continue
+
+            let next = timers.min(by: { $0.due < $1.due })
+            if next == nil, outstanding == 0 { break }
+            if let next {
+                let wait = next.due.timeIntervalSinceNow
+                if wait > 0 {
+                    _ = wakeup.wait(timeout: .now() + min(wait, 60))
+                    continue
+                }
+                timers.removeAll { $0.id == next.id }
+                if let interval = next.interval {
+                    var repeated = next
+                    repeated.due = Date().addingTimeInterval(interval)
+                    timers.append(repeated)
+                }
+                next.callback.call(withArguments: next.arguments)
+            } else {
+                // Only in-flight I/O remains: sleep until a completion signals.
+                _ = wakeup.wait(timeout: .now() + 60)
             }
-            timers.removeAll { $0.id == next.id }
-            if let interval = next.interval {
-                var repeated = next
-                repeated.due = Date().addingTimeInterval(interval)
-                timers.append(repeated)
-            }
-            next.callback.call(withArguments: next.arguments)
         }
         drainTicks()
     }
@@ -239,6 +304,61 @@ final class NodeEngine {
         expose("clearTimer", clearTimer)
         expose("setImmediate", setImmediateBlock)
 
+        // -- child_process → msh: block THIS thread while the shell runs on the main actor --
+        // (Safe: the JS thread only waits; the box is written before signal, read after wait.)
+        final class ShellResultBox: @unchecked Sendable {
+            var value: (out: String, err: String, status: Int32) = ("", "", 1)
+        }
+        let shellBridge = self.shell
+        let shellExec: @convention(block) (String) -> [String: Any] = { command in
+            guard let shellBridge else {
+                return ["stdout": "", "stderr": "child_process: no shell attached\n", "status": 127]
+            }
+            let semaphore = DispatchSemaphore(value: 0)
+            let box = ShellResultBox()
+            Task { @MainActor in
+                box.value = await shellBridge.execute(command)
+                semaphore.signal()
+            }
+            semaphore.wait()
+            return ["stdout": box.value.out, "stderr": box.value.err, "status": Int(box.value.status)]
+        }
+        expose("shellExec", shellExec)
+
+        // -- HTTP over URLSession: fire on any thread, complete as an event-loop job --
+        let httpRequest: @convention(block) (String, String, [String: String], String, JSValue) -> Void = { [weak self] urlText, method, headers, bodyBase64, callback in
+            guard let self else { return }
+            guard let url = URL(string: urlText) else {
+                self.enqueueJob { callback.call(withArguments: [["error": "invalid URL: \(urlText)"]]) }
+                return
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = method
+            for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+            if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
+            self.outstanding += 1
+            URLSession.shared.dataTask(with: request) { data, response, error in
+                self.enqueueJob {
+                    self.outstanding -= 1
+                    if let error {
+                        callback.call(withArguments: [["error": error.localizedDescription]])
+                        return
+                    }
+                    let http = response as? HTTPURLResponse
+                    var headerMap: [String: String] = [:]
+                    for (name, value) in http?.allHeaderFields ?? [:] {
+                        headerMap[String(describing: name).lowercased()] = String(describing: value)
+                    }
+                    callback.call(withArguments: [[
+                        "status": http?.statusCode ?? 0,
+                        "headers": headerMap,
+                        "body": (data ?? Data()).base64EncodedString(),
+                    ]])
+                }
+            }.resume()
+        }
+        expose("httpRequest", httpRequest)
+
         context.setObject(bridge, forKeyedSubscript: "__mouse" as NSString)
         context.setObject(argv, forKeyedSubscript: "__argv" as NSString)
         context.setObject(env, forKeyedSubscript: "__env" as NSString)
@@ -290,6 +410,25 @@ final class NodeEngine {
         var request = rawRequest
         if request.hasPrefix("node:") { request = String(request.dropFirst(5)) }
         if Self.coreModules.contains(request) { return .core(request) }
+
+        // "#name": the package.json "imports" field of the requiring package.
+        if request.hasPrefix("#") {
+            var dir = fromDir
+            while true {
+                let packageJSON = realURL(dir + "/package.json")
+                if let data = try? Data(contentsOf: packageJSON),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let imports = json["imports"] as? [String: Any] {
+                    if let target = exportsTarget(imports[request]) ?? (imports[request] as? String) {
+                        if let found = loadAsFileOrDirectory(normalize(dir + "/" + target)) { return found }
+                    }
+                    break
+                }
+                if dir == "/" || dir.isEmpty { break }
+                dir = virtualDirname(dir)
+            }
+            return .notFound("Cannot find module '\(rawRequest)'")
+        }
 
         if request.hasPrefix("./") || request.hasPrefix("../") || request.hasPrefix("/") {
             let base = request.hasPrefix("/") ? request : fromDir + "/" + request
@@ -354,12 +493,12 @@ final class NodeEngine {
     }
 
     /// The subset of "exports" real packages use for their root: a string, or a "." entry
-    /// that is a string or a conditions object (require/node/default).
+    /// that is a string or a conditions object (require/node/import/default).
     private func exportsTarget(_ exports: Any?) -> String? {
         func fromConditions(_ value: Any?) -> String? {
             if let text = value as? String { return text }
             guard let object = value as? [String: Any] else { return nil }
-            for key in ["require", "node", "default"] {
+            for key in ["require", "node", "import", "default"] {
                 if let found = fromConditions(object[key]) { return found }
             }
             return nil
@@ -379,8 +518,20 @@ final class NodeEngine {
             guard let self else { return NSNull() }
             return self.requireModule(request, fromDir: fromDir)
         }
-        let require = JSValue(object: requireBlock, in: context)!
-        return require
+        // Errors must throw IN the requiring frame — a native block can't, so a JS wrapper
+        // inspects the marker and throws there.
+        let factory = context.evaluateScript("""
+            (function(native){ return function require(specifier){
+                const result = native(String(specifier));
+                if (result && result.__mouseRequireError) {
+                    const error = new Error(result.__mouseRequireError);
+                    error.code = 'MODULE_NOT_FOUND';
+                    throw error;
+                }
+                return result;
+            }; })
+            """)!
+        return factory.call(withArguments: [JSValue(object: requireBlock, in: context)!])!
     }
 
     private func requireModule(_ request: String, fromDir: String) -> Any {
@@ -404,15 +555,14 @@ final class NodeEngine {
         case .file(let id):
             if let cached = moduleCache[id] { return cached }
             guard let data = try? Data(contentsOf: realURL(id)),
-                  let source = String(data: data, encoding: .utf8) else {
+                  var source = String(data: data, encoding: .utf8) else {
                 return throwInJS("Cannot read '\(id)'")
             }
-            if source.contains("import ") || source.contains("export ") {
-                // Only reject when it actually fails to parse as CJS — many files merely
-                // mention the words. Try CJS first; JSC reports ES-module syntax errors.
+            if isESModule(id: id, source: source) {
+                source = Self.transpileESM(source)
             }
             guard let function = wrapModule(source) else {
-                return throwInJS("Cannot parse '\(id)' (ES modules aren't supported yet — CommonJS only)")
+                return throwInJS("Cannot parse '\(id)'")
             }
             let module = context.evaluateScript("({exports: {}})")!
             moduleCache[id] = module.forProperty("exports")
@@ -427,9 +577,150 @@ final class NodeEngine {
         }
     }
 
+    // MARK: - ES modules (transpiled to CommonJS at load)
+
+    /// .mjs is ESM, .cjs is CJS; .js follows the nearest package.json "type"; and a file
+    /// with top-of-line import/export statements is ESM regardless (entry scripts).
+    private func isESModule(id: String, source: String) -> Bool {
+        if id.hasSuffix(".mjs") { return true }
+        if id.hasSuffix(".cjs") { return false }
+        if packageType(forDir: virtualDirname(id)) == "module" { return true }
+        return source.range(of: #"(?m)^\s*(import\s+[\w{*'"]|import\s*\(|export\s+(default|const|let|var|function|class|\{|\*))"#,
+                            options: .regularExpression) != nil
+            && source.range(of: #"(?m)^\s*(module\.exports|exports\.)"#, options: .regularExpression) == nil
+    }
+
+    private func packageType(forDir dir: String) -> String {
+        if let cached = packageTypeCache[dir] { return cached }
+        var current = dir
+        while true {
+            if let data = try? Data(contentsOf: realURL(current + "/package.json")),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let type = json["type"] as? String ?? "commonjs"
+                packageTypeCache[dir] = type
+                return type
+            }
+            if current == "/" || current.isEmpty { break }
+            current = virtualDirname(current)
+        }
+        packageTypeCache[dir] = "commonjs"
+        return "commonjs"
+    }
+
+    /// ESM → CJS, statement-shaped: the rigid grammar of import/export declarations makes a
+    /// regex transform reliable for real packages; expressions stay untouched. Named exports
+    /// are assigned at EOF (function/class hoist; const/let are bound by then).
+    static func transpileESM(_ source: String) -> String {
+        var text = source
+        var epilogue: [String] = []
+        var counter = 0
+
+        func replace(_ pattern: String, _ transform: (NSTextCheckingResult, NSString) -> String) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { return }
+            while true {
+                let ns = text as NSString
+                guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { break }
+                let replacement = transform(match, ns)
+                text = ns.replacingCharacters(in: match.range, with: replacement)
+            }
+        }
+        func group(_ match: NSTextCheckingResult, _ index: Int, _ ns: NSString) -> String? {
+            guard index < match.numberOfRanges, match.range(at: index).location != NSNotFound else { return nil }
+            return ns.substring(with: match.range(at: index))
+        }
+        func isIdentifier(_ text: String) -> Bool {
+            guard let first = text.first, first.isLetter || first == "_" || first == "$" else { return false }
+            return text.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$" }
+        }
+        /// `a, b as c, // comment` → [(a, a), (b, c)] — comments stripped, whitespace-split,
+        /// junk skipped.
+        func bindings(_ clause: String) -> [(source: String, alias: String)] {
+            var text = clause
+            text = text.replacingOccurrences(of: #"//[^\n]*"#, with: "", options: .regularExpression)
+            text = text.replacingOccurrences(of: #"/\*[\s\S]*?\*/"#, with: "", options: .regularExpression)
+            var result: [(String, String)] = []
+            for piece in text.split(separator: ",") {
+                let words = piece.split(whereSeparator: { $0.isWhitespace }).map(String.init).filter { $0 != "as" }
+                guard let source = words.first, isIdentifier(source) else { continue }
+                let alias = words.count > 1 ? words[1] : source
+                guard isIdentifier(alias) else { continue }
+                result.append((source, alias))
+            }
+            return result
+        }
+        func namedBindings(_ clause: String) -> String {
+            bindings(clause).map { $0.source == $0.alias ? $0.source : "\($0.source): \($0.alias)" }
+                .joined(separator: ", ")
+        }
+
+        // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns
+        replace(#"^\s*import\s+(?:(\w+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+(\w+)|(\w+))\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+            counter += 1
+            let temp = "__esm\(counter)"
+            let module = group(match, 5, ns)!
+            var lines = ["const \(temp) = require('\(module)');"]
+            if let defaultName = group(match, 1, ns) ?? group(match, 4, ns) {
+                lines.append("const \(defaultName) = __esmDefault(\(temp));")
+            }
+            if let named = group(match, 2, ns) {
+                lines.append("const { \(namedBindings(named)) } = \(temp);")
+            }
+            if let namespace = group(match, 3, ns) {
+                lines.append("const \(namespace) = \(temp);")
+            }
+            return lines.joined(separator: " ")
+        }
+        // import 'mod'
+        replace(#"^\s*import\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+            "require('\(group(match, 1, ns)!)');"
+        }
+        // export * from 'mod'  /  export { a, b as c } from 'mod'
+        replace(#"^\s*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+            "Object.assign(module.exports, require('\(group(match, 1, ns)!)'));"
+        }
+        replace(#"^\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+            counter += 1
+            let temp = "__esm\(counter)"
+            let module = group(match, 2, ns)!
+            var lines = ["const \(temp) = require('\(module)');"]
+            for binding in bindings(group(match, 1, ns)!) {
+                lines.append("module.exports.\(binding.alias) = \(temp).\(binding.source);")
+            }
+            return lines.joined(separator: " ")
+        }
+        // export { a, b as c };
+        replace(#"^\s*export\s*\{([^}]*)\}\s*;?\s*$"#) { match, ns in
+            bindings(group(match, 1, ns)!)
+                .map { "module.exports.\($0.alias) = \($0.source);" }
+                .joined(separator: " ")
+        }
+        // export default function name() / class Name — keep the declaration, alias at EOF.
+        replace(#"^\s*export\s+default\s+(function\s+(\w+)|class\s+(\w+))"#) { match, ns in
+            let name = group(match, 2, ns) ?? group(match, 3, ns)!
+            epilogue.append("module.exports.default = \(name);")
+            return group(match, 1, ns)!
+        }
+        // export default <expression>
+        replace(#"^\s*export\s+default\s+"#) { _, _ in "module.exports.default = " }
+        // export const/let/var/function/class NAME — strip keyword, assign at EOF.
+        replace(#"^\s*export\s+(const|let|var|function|class|async\s+function)\s+(\w+)"#) { match, ns in
+            let name = group(match, 2, ns)!
+            epilogue.append("module.exports.\(name) = \(name);")
+            return "\(group(match, 1, ns)!) \(name)"
+        }
+        // dynamic import() and import.meta.url
+        text = text.replacingOccurrences(of: "import.meta.url", with: "('file://' + __filename)")
+        if let regex = try? NSRegularExpression(pattern: #"\bimport\s*\("#) {
+            let ns = text as NSString
+            text = regex.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: ns.length),
+                                                  withTemplate: "__dynamicImport(require, ")
+        }
+
+        return "module.exports.__esModule = true;\n" + text + "\n;" + epilogue.joined(separator: "\n")
+    }
+
     private func throwInJS(_ message: String) -> Any {
-        context.evaluateScript("(function(){ var e = new Error(\(jsString(message))); e.code = 'MODULE_NOT_FOUND'; throw e; })()")
-        return NSNull()
+        return ["__mouseRequireError": message]
     }
 
     private func jsString(_ text: String) -> String {
@@ -538,6 +829,15 @@ final class NodeEngine {
         toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
       }
       globalThis.Buffer = Buffer;
+
+      // ---- ESM interop (the transpiler emits these) ----
+      globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
+      globalThis.__dynamicImport = function(require, specifier) {
+        return Promise.resolve().then(function() {
+          const m = require(specifier);
+          return m && m.__esModule ? m : Object.assign({ default: m }, m);
+        });
+      };
 
       // ---- inspect / format (console + util) ----
       function inspect(value, depth) {
@@ -1032,7 +1332,153 @@ final class NodeEngine {
       coreFactories.process = function() { return process; };
       coreFactories.buffer = function() { return { Buffer: Buffer }; };
 
-      for (const missing of ['child_process', 'http', 'https', 'net', 'crypto', 'zlib', 'readline']) {
+      // ---- child_process → msh (the bridge no other Node-on-iOS has) ----
+      coreFactories.child_process = function() {
+        function shellQuote(text) { return "'" + String(text).replace(/'/g, "'\\''") + "'"; }
+        function runShell(command) { return bridge.shellExec(String(command)); }
+        function failure(command, r) {
+          const error = new Error('Command failed: ' + command + (r.stderr ? '\n' + r.stderr : ''));
+          error.status = r.status;
+          error.code = r.status;
+          error.stdout = Buffer.from(r.stdout);
+          error.stderr = Buffer.from(r.stderr);
+          return error;
+        }
+        function normalizeExecArgs(options, callback) {
+          if (typeof options === 'function') return { options: {}, callback: options };
+          return { options: options || {}, callback: callback || function(){} };
+        }
+        const child_process = {
+          execSync: function(command, options) {
+            const r = runShell(command);
+            if (r.status !== 0) throw failure(command, r);
+            const encoding = options && options.encoding;
+            return encoding && encoding !== 'buffer' ? r.stdout : Buffer.from(r.stdout);
+          },
+          exec: function(command, options, callback) {
+            const args = normalizeExecArgs(options, callback);
+            setImmediate(function() {
+              const r = runShell(command);
+              args.callback(r.status !== 0 ? failure(command, r) : null, r.stdout, r.stderr);
+            });
+            return { on: function(){ return this; }, stdout: { on: function(){ return this; } }, stderr: { on: function(){ return this; } } };
+          },
+          spawnSync: function(command, argv, options) {
+            const parts = [command].concat((argv || []).map(shellQuote));
+            const r = runShell(parts.join(' '));
+            return { status: r.status, signal: null, pid: 1,
+                     stdout: Buffer.from(r.stdout), stderr: Buffer.from(r.stderr),
+                     output: [null, Buffer.from(r.stdout), Buffer.from(r.stderr)] };
+          },
+          execFileSync: function(command, argv, options) {
+            const result = child_process.spawnSync(command, argv, options);
+            if (result.status !== 0) throw failure(command, { status: result.status, stdout: result.stdout.toString(), stderr: result.stderr.toString() });
+            const encoding = options && options.encoding;
+            return encoding && encoding !== 'buffer' ? result.stdout.toString() : result.stdout;
+          },
+          spawn: function(command, argv, options) {
+            const EventEmitter = coreRequire('events');
+            const child = new EventEmitter();
+            child.stdout = new EventEmitter();
+            child.stderr = new EventEmitter();
+            child.pid = 1;
+            child.kill = function(){};
+            setImmediate(function() {
+              const parts = [command].concat((argv || []).map(shellQuote));
+              const r = runShell(parts.join(' '));
+              if (r.stdout) child.stdout.emit('data', Buffer.from(r.stdout));
+              if (r.stderr) child.stderr.emit('data', Buffer.from(r.stderr));
+              child.stdout.emit('end');
+              child.emit('close', r.status, null);
+              child.emit('exit', r.status, null);
+            });
+            return child;
+          },
+        };
+        return child_process;
+      };
+
+      // ---- HTTP: fetch (the modern surface) + https.get/request over it ----
+      function rawRequest(url, method, headers, bodyBase64) {
+        return new Promise(function(resolve, reject) {
+          bridge.httpRequest(String(url), method, headers, bodyBase64, function(result) {
+            if (result.error) reject(new Error(result.error));
+            else resolve(result);
+          });
+        });
+      }
+      globalThis.fetch = function(url, options) {
+        options = options || {};
+        const headers = {};
+        if (options.headers) {
+          for (const key of Object.keys(options.headers)) headers[key] = String(options.headers[key]);
+        }
+        let bodyBase64 = '';
+        if (options.body !== undefined && options.body !== null) {
+          bodyBase64 = (Buffer.isBuffer(options.body) ? options.body : Buffer.from(String(options.body))).toString('base64');
+        }
+        return rawRequest(url, options.method || 'GET', headers, bodyBase64).then(function(result) {
+          const bodyBuffer = Buffer.from(result.body || '', 'base64');
+          return {
+            ok: result.status >= 200 && result.status < 300,
+            status: result.status,
+            statusText: String(result.status),
+            url: String(url),
+            headers: { get: function(name) { return result.headers[String(name).toLowerCase()] || null; },
+                       has: function(name) { return String(name).toLowerCase() in result.headers; } },
+            text: function() { return Promise.resolve(bodyBuffer.toString()); },
+            json: function() { return Promise.resolve(JSON.parse(bodyBuffer.toString())); },
+            arrayBuffer: function() { return Promise.resolve(bodyBuffer.buffer.slice(bodyBuffer.byteOffset, bodyBuffer.byteOffset + bodyBuffer.length)); },
+          };
+        });
+      };
+      function makeHttpModule(defaultProtocol) {
+        function request(url, options, callback) {
+          if (typeof url === 'object') { callback = options; options = url; url = (options.protocol || defaultProtocol) + '//' + options.hostname + (options.port ? ':' + options.port : '') + (options.path || '/'); }
+          if (typeof options === 'function') { callback = options; options = {}; }
+          options = options || {};
+          const EventEmitter = coreRequire('events');
+          const clientRequest = new EventEmitter();
+          let body = '';
+          clientRequest.write = function(chunk) { body += chunk; return true; };
+          clientRequest.setHeader = function(name, value) { (options.headers = options.headers || {})[name] = value; };
+          clientRequest.end = function(chunk) {
+            if (chunk) body += chunk;
+            const headers = {};
+            for (const key of Object.keys(options.headers || {})) headers[key] = String(options.headers[key]);
+            rawRequest(url, options.method || 'GET', headers, body ? Buffer.from(body).toString('base64') : '')
+              .then(function(result) {
+                const response = new EventEmitter();
+                response.statusCode = result.status;
+                response.headers = result.headers;
+                response.setEncoding = function(){ return response; };
+                if (callback) callback(response);
+                clientRequest.emit('response', response);
+                setImmediate(function() {
+                  const buffer = Buffer.from(result.body || '', 'base64');
+                  if (buffer.length) response.emit('data', buffer);
+                  response.emit('end');
+                });
+              })
+              .catch(function(error) { clientRequest.emit('error', error); });
+          };
+          clientRequest.abort = function(){};
+          clientRequest.on = EventEmitter.prototype.on.bind(clientRequest);
+          return clientRequest;
+        }
+        return {
+          request: request,
+          get: function(url, options, callback) {
+            const clientRequest = request(url, options, callback);
+            clientRequest.end();
+            return clientRequest;
+          },
+        };
+      }
+      coreFactories.http = function() { return makeHttpModule('http:'); };
+      coreFactories.https = function() { return makeHttpModule('https:'); };
+
+      for (const missing of ['net', 'crypto', 'zlib', 'readline']) {
         coreFactories[missing] = (function(name){
           return function() {
             const stub = {};

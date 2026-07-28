@@ -19,10 +19,11 @@ pick up the work.
 language), F (package manager), and G-core (Node layer) are BUILT and
 verified** — one commit per phase, verification recorded below. The
 install rule holds end-to-end for pure-JS CJS tools: `npm install <pkg>`
-then `<bin>` executes on device. **Next in G:** ES modules,
-`child_process`→msh, `http` over URLSession, stdin/TTY through
-`TerminalProgram` (so ink-style CLIs draw on the phase-T screen), then
-phase B (WebView JIT) for speed.
+then `<bin>` executes on device. **Phase G part 2 landed too**: ES modules
+(transpile-to-CJS), the `child_process`→msh bridge (JS calls Mouse's
+native git), and `fetch`/`https` over URLSession. **Next:** stdin/TTY
+through `TerminalProgram` (so ink-style CLIs draw on the phase-T screen),
+stream depth, then phase B (WebView JIT) for speed.
 
 ### Shipped and verified this cycle
 
@@ -77,9 +78,21 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   End-to-end through msh: `npm install mkdirp && mkdirp deep/nested/dir`
   runs the installed JavaScript bin and the directories appear; `node
   file.js`, `node -e`, `npx <pkg>`, and `#!/usr/bin/env node` shebangs all
-  execute. Remaining gaps (honest): ES modules, `child_process`→msh
-  bridge, `http`/`net`, streams beyond a sketch, TTY/raw stdin (needs the
-  TerminalProgram wiring), and the WebView JIT surface (phase B) for speed
+  execute
+- **Node layer part 2** — the engine moved to a background queue (JS never
+  blocks the UI thread), enabling: **`child_process`→msh** (`execSync`/
+  `exec`/`spawnSync`/`spawn` run msh builtins — JS calling `git status`
+  gets Mouse's native git; verified with the bridge running /bin/sh
+  against real node's /bin/sh, byte-identical), **ES modules** (transpiled
+  to CJS at load: all import/export statement forms, dynamic `import()`,
+  `import.meta.url`, package.json `type`, `exports` incl. conditions,
+  `#imports` — proven by chalk@5, an ESM-only package, matching real node
+  byte-for-byte), and **`fetch` + `http`/`https`.get/request** over
+  URLSession (verified against a live local HTTP server, both engines).
+  19 fixtures total, all matching. Remaining gaps (honest): raw TTY/stdin
+  through TerminalProgram (ink-style TUIs), stream depth, unhandled
+  promise rejections don't exit(1), and the WebView JIT surface (phase B)
+  for speed
 
 Method to reproduce: `Shell.swift`, `GitCore.swift`, and `GitRemote.swift`
 are Foundation-only by design. Compile them with a scratch `main.swift` via
@@ -439,7 +452,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ CORE DONE (CJS+fixtures; gaps: ESM, child_process→msh, http, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https; gaps: raw TTY, streams depth, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
