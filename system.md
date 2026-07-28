@@ -57,6 +57,15 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   starts inside the region; documented in AGENTS.md)
 - Pager and top programs — keys fed through `TerminalProgram.input`, grid
   asserted after every action (paging, wrap, resize, quit, ^C)
+- **msh language vs `/bin/sh`** — 25-script corpus, stdout + exit status
+  identical (phase A)
+- **Package manager (phase F)** — semver corpus; resolution identical to
+  `pnpm install --lockfile-only` on left-pad/mkdirp/debug/chalk/glob
+  (1–11 package trees); installed layout proven by **real `node`**
+  requiring chalk and glob from our `node_modules`; sha512 integrity
+  verified before unpacking. `npm install` / `pnpm` / `npx` work in the
+  terminal today — installed bins state their engine gap honestly until
+  phase G
 
 Method to reproduce: `Shell.swift`, `GitCore.swift`, and `GitRemote.swift`
 are Foundation-only by design. Compile them with a scratch `main.swift` via
@@ -415,7 +424,7 @@ B  WebView compute engine the only legal JIT; 10–30× on JS     small, huge le
 C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3×
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
-F  package manager        pkg + pnpm on existing tar/gzip
+F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
 G  Node layer             API shim + child_process→msh bridge  npx becomes real
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3

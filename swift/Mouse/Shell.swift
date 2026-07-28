@@ -1213,7 +1213,9 @@ final class MouseShell {
             return await dispatch(args, stdin: stdin, context: context, streaming: streaming, interactive: interactive)
         // Honesty for what iOS forbids: state the fact, never fake the feature.
         case "apt", "apt-get", "dpkg", "brew":
-            return IO(err: "\(name): no system packages on iOS (the pnpm engine is on the roadmap)", status: 1)
+            return IO(err: "\(name): no system packages on iOS; npm installs JavaScript packages", status: 1)
+        case "npm", "pnpm", "yarn": return await npmCmd(tool: name, args, context: context)
+        case "npx": return await npxCmd(args, context: context)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1227,8 +1229,102 @@ final class MouseShell {
         case "npm", "pnpm", "node", "npx":
             return IO(err: "\(name): not built yet", status: 127)
         default:
+            // An installed package bin is a real command whose engine hasn't landed yet —
+            // that is a different fact than "not found".
+            if let manifest = PackageManager.readManifest(root: context.root), manifest.bins[name] != nil {
+                return IO(err: "\(name): installed; the node engine is on the roadmap", status: 126)
+            }
             return IO(err: "msh: command not found: \(name) (type help)", status: 127)
         }
+    }
+
+    // MARK: - npm / pnpm / npx
+
+    private static func splitSpec(_ spec: String) -> (name: String, requirement: String) {
+        // name[@range], where @scope/name keeps its leading @.
+        if let at = spec.dropFirst().lastIndex(of: "@"), at != spec.startIndex {
+            return (String(spec[..<at]), String(spec[spec.index(after: at)...]))
+        }
+        return (spec, "latest")
+    }
+
+    private func npmCmd(tool: String, _ args: [String], context: Context) async -> IO {
+        let sub = args.first ?? "install"
+        let specs = args.dropFirst().filter { !$0.hasPrefix("-") }
+        switch sub {
+        case "install", "i", "add", "ci", "update":
+            var requirements: [String: String] = [:]
+            if specs.isEmpty {
+                guard let json = PackageManager.readPackageJSON(root: context.root) else {
+                    return IO(err: "\(tool): no package.json here", status: 1)
+                }
+                for key in ["dependencies", "devDependencies"] {
+                    for (depName, range) in json[key] as? [String: String] ?? [:] { requirements[depName] = range }
+                }
+                guard !requirements.isEmpty else { return IO(out: "up to date\n") }
+            } else {
+                for spec in specs {
+                    let (depName, range) = Self.splitSpec(spec)
+                    requirements[depName] = range
+                }
+            }
+            do {
+                let report = try await PackageManager.install(requirements: requirements, into: context.root)
+                if !specs.isEmpty {
+                    var json = PackageManager.readPackageJSON(root: context.root)
+                        ?? ["name": context.root.lastPathComponent, "version": "1.0.0"]
+                    var dependencies = json["dependencies"] as? [String: String] ?? [:]
+                    for spec in specs {
+                        let (depName, _) = Self.splitSpec(spec)
+                        if let placement = report.placements.first(where: { $0.package.name == depName && $0.atRoot }) {
+                            dependencies[depName] = "^" + placement.package.version
+                        }
+                    }
+                    json["dependencies"] = dependencies
+                    try PackageManager.writePackageJSON(json, root: context.root)
+                }
+                context.reloadTree()
+                var out = "added \(report.placements.count) packages\n"
+                if !report.bins.isEmpty {
+                    out += "bin: " + report.bins.keys.sorted().joined(separator: " ") + "\n"
+                }
+                return IO(out: out)
+            } catch {
+                return IO(err: "\(tool): \(error.localizedDescription)", status: 1)
+            }
+        case "ls", "list":
+            guard let manifest = PackageManager.readManifest(root: context.root), !manifest.packages.isEmpty else {
+                return IO(out: "no packages installed\n")
+            }
+            let lines = manifest.packages.sorted { $0.key < $1.key }.map { path, version in
+                "\(path.split(separator: "/").dropFirst().joined(separator: "/"))@\(version)"
+            }
+            return IO(out: joinLines(lines))
+        default:
+            return IO(err: "\(tool): supported: install ls", status: 1)
+        }
+    }
+
+    private func npxCmd(_ args: [String], context: Context) async -> IO {
+        guard let spec = args.first(where: { !$0.hasPrefix("-") }) else {
+            return IO(err: "npx: usage: npx <package>", status: 2)
+        }
+        let (name, requirement) = Self.splitSpec(spec)
+        let short = name.split(separator: "/").last.map(String.init) ?? name
+        var manifest = PackageManager.readManifest(root: context.root)
+        if manifest?.bins[short] == nil {
+            do {
+                _ = try await PackageManager.install(requirements: [name: requirement], into: context.root)
+            } catch {
+                return IO(err: "npx: \(error.localizedDescription)", status: 1)
+            }
+            context.reloadTree()
+            manifest = PackageManager.readManifest(root: context.root)
+        }
+        guard manifest?.bins[short] != nil || manifest?.bins.isEmpty == false else {
+            return IO(err: "npx: \(name) installs no executables", status: 1)
+        }
+        return IO(err: "npx: \(short): installed; the node engine is on the roadmap", status: 126)
     }
 
     static let builtinNames: Set<String> = [
@@ -1313,6 +1409,8 @@ final class MouseShell {
       eval <text>
       source <file> / . <file>
       sh <file> / sh -c <cmd> / ./<script.sh>
+      npm <install [pkg[@range]…] | ls>   (pnpm / yarn alias)
+      npx <package>
     language:
       if …; then …; elif …; else …; fi
       for NAME in …; do …; done
