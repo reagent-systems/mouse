@@ -15,8 +15,13 @@ pick up the work.
 
 ## 0. State of the world
 
-**Branch:** `vs-code-features`. **Phase T (the ANSI screen model) is BUILT
-and verified** — see the updated table below. Nothing else in flight.
+**Branch:** `vs-code-features`. **Phases T (ANSI screen), A (msh
+language), and F (package manager) are BUILT and verified** — one commit
+per phase, verification recorded below. **Next: phase G, the Node layer**
+— a CommonJS module loader over the installed `node_modules` plus core
+module shims (`fs` `path` `os` `process` `child_process`→msh) on
+JSContext, targeting single-file CLIs first; then `node file.js` and
+`npx <bin>` execute for real.
 
 ### Shipped and verified this cycle
 
