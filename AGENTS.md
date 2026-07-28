@@ -54,6 +54,15 @@ corpus against spec truths; `resolveTree` against real `pnpm install
 `install()` by running **real `node`** in the installed root and
 requiring the package — the layout is correct only if Node's own
 resolver agrees. Integrity (sha512/sha1) is checked before unpacking.
+The NODE LAYER (`NodeEngine.swift`) verifies against **real `node`**: the
+same fixture scripts run through both engines in twin directory trees,
+stdout and exit status compared (console formatting, path, fs round-trips,
+CommonJS + JSON + node_modules requires, EventEmitter, Buffer encodings,
+argv/env/exit codes, nextTick/promise/timer ordering, async/await, util,
+assert) — plus an installed bin (mkdirp) executed by our engine mutating
+the real filesystem. Known divergences to keep out of fixtures: absolute
+host paths in cwd, setTimeout-vs-setImmediate order from the main module,
+stderr text.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
@@ -192,6 +201,7 @@ it, and force-quit-relaunch to prove it.
 | `Shell.swift` | `msh` — the from-scratch shell: AST evaluator (control flow, functions, pipelines, redirects), expansion (fields, globs, `${…}` ops, `$(…)`), ~60 built-ins incl. `git` and `sh`, and `ICMPPinger` (real ping) |
 | `ShellLanguage.swift` | The msh language: lexer, AST, recursive-descent parser, `$((…))` arithmetic — pure, no I/O, no state |
 | `PackageManager.swift` | Phase F: semver, npm registry client, tree resolver (classic hoisting), tarball installer (integrity-checked), `node_modules` manifest, and `TarGz` (moved from Workspace) |
+| `NodeEngine.swift` | Phase G: the Node layer on JavaScriptCore — CommonJS loader over `node_modules` (main/exports/index), core modules (`fs` `path` `os` `util` `events` `buffer` …), event loop (timers/immediates/nextTick), workspace-virtual paths |
 | `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line, and the three-way merge engine (`merge`/`diff3`) — real-git interoperable |
 | `GitRemote.swift` | The remote half: clone/fetch/push over GitHub smart-HTTP, and `POST /user/repos` auto-create on push |
 | `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field, screen-grid renderer |

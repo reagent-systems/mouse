@@ -526,8 +526,17 @@ final class MouseShell {
             if let resolved = resolve(name, context: state.context),
                FileManager.default.fileExists(atPath: resolved.url.path),
                let source = try? String(contentsOf: resolved.url, encoding: .utf8) {
+                if name.hasSuffix(".js") || source.hasPrefix("#!") && source.prefix(while: { $0 != "\n" }).contains("node") {
+                    return await runNode(source: source, path: "/" + resolved.rel, args: args, stdin: stdin, context: state.context)
+                }
                 return try await runScript(source: source, name: name, args: args, stdin: stdin, state: state)
             }
+        }
+
+        // Installed package bins are commands: run them on the Node layer.
+        if let manifest = PackageManager.readManifest(root: state.context.root),
+           let binPath = manifest.bins[name] {
+            return await runInstalledBin(binPath, args: args, stdin: stdin, context: state.context)
         }
 
         let clean = !redirectedOut && state.sink.captureBuffer == nil
@@ -606,6 +615,10 @@ final class MouseShell {
         if body.hasPrefix("#!") {
             let firstLine = String(body.prefix(while: { $0 != "\n" }))
             let interpreter = firstLine.dropFirst(2).trimmingCharacters(in: .whitespaces)
+            if interpreter.contains("node") {
+                return await runNode(source: source, path: "/" + (name ?? "script.js"), args: args,
+                                     stdin: stdin, context: state.context)
+            }
             let isShell = interpreter.hasSuffix("sh") || interpreter.contains("sh ") || interpreter.hasSuffix("bash")
             guard isShell else {
                 return IO(err: "msh: no interpreter for \(interpreter)\n", status: 126)
@@ -1215,7 +1228,8 @@ final class MouseShell {
         case "apt", "apt-get", "dpkg", "brew":
             return IO(err: "\(name): no system packages on iOS; npm installs JavaScript packages", status: 1)
         case "npm", "pnpm", "yarn": return await npmCmd(tool: name, args, context: context)
-        case "npx": return await npxCmd(args, context: context)
+        case "npx": return await npxCmd(args, stdin: stdin, context: context)
+        case "node": return await nodeCmd(args, stdin: stdin, context: context)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1229,13 +1243,45 @@ final class MouseShell {
         case "npm", "pnpm", "node", "npx":
             return IO(err: "\(name): not built yet", status: 127)
         default:
-            // An installed package bin is a real command whose engine hasn't landed yet —
-            // that is a different fact than "not found".
-            if let manifest = PackageManager.readManifest(root: context.root), manifest.bins[name] != nil {
-                return IO(err: "\(name): installed; the node engine is on the roadmap", status: 126)
+            if let manifest = PackageManager.readManifest(root: context.root), let binPath = manifest.bins[name] {
+                return await runInstalledBin(binPath, args: args, stdin: stdin, context: context)
             }
             return IO(err: "msh: command not found: \(name) (type help)", status: 127)
         }
+    }
+
+    // MARK: - node (the phase-G engine behind `node`, bins, and npx)
+
+    private func nodeCmd(_ args: [String], stdin: String, context: Context) async -> IO {
+        if args.first == "-v" || args.first == "--version" { return IO(out: "v20.19.0\n") }
+        if args.first == "-e" || args.first == "--eval" {
+            guard args.count >= 2 else { return IO(err: "node: -e needs code\n", status: 2) }
+            return await runNode(source: args[1], path: "/[eval].js", args: Array(args.dropFirst(2)),
+                                 stdin: stdin, context: context)
+        }
+        guard let file = args.first else { return IO(err: "node: usage: node <file> | -e <code>\n", status: 2) }
+        guard let resolved = resolve(file, context: context),
+              let source = try? String(contentsOf: resolved.url, encoding: .utf8) else {
+            return IO(err: "node: can't read \(file)\n", status: 1)
+        }
+        return await runNode(source: source, path: "/" + resolved.rel, args: Array(args.dropFirst()),
+                             stdin: stdin, context: context)
+    }
+
+    private func runInstalledBin(_ binPath: String, args: [String], stdin: String, context: Context) async -> IO {
+        let url = context.root.appendingPathComponent(binPath)
+        guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+            return IO(err: "msh: missing bin file: \(binPath)\n", status: 127)
+        }
+        return await runNode(source: source, path: "/" + binPath, args: args, stdin: stdin, context: context)
+    }
+
+    private func runNode(source: String, path: String, args: [String], stdin: String, context: Context) async -> IO {
+        let engine = NodeEngine(root: context.root, env: env)
+        let result = await engine.run(source: source, path: path, argv: ["node", path] + args,
+                                      cwd: "/" + cwd, stdin: stdin)
+        context.reloadTree()   // scripts write files
+        return IO(out: result.out, err: result.err, status: result.status)
     }
 
     // MARK: - npm / pnpm / npx
@@ -1305,10 +1351,11 @@ final class MouseShell {
         }
     }
 
-    private func npxCmd(_ args: [String], context: Context) async -> IO {
+    private func npxCmd(_ args: [String], stdin: String, context: Context) async -> IO {
         guard let spec = args.first(where: { !$0.hasPrefix("-") }) else {
             return IO(err: "npx: usage: npx <package>", status: 2)
         }
+        let extraArgs = Array(args.drop(while: { $0 != spec }).dropFirst())
         let (name, requirement) = Self.splitSpec(spec)
         let short = name.split(separator: "/").last.map(String.init) ?? name
         var manifest = PackageManager.readManifest(root: context.root)
@@ -1321,10 +1368,11 @@ final class MouseShell {
             context.reloadTree()
             manifest = PackageManager.readManifest(root: context.root)
         }
-        guard manifest?.bins[short] != nil || manifest?.bins.isEmpty == false else {
+        guard let binPath = manifest?.bins[short]
+                ?? manifest.flatMap({ $0.bins.count == 1 ? $0.bins.first?.value : nil }) else {
             return IO(err: "npx: \(name) installs no executables", status: 1)
         }
-        return IO(err: "npx: \(short): installed; the node engine is on the roadmap", status: 126)
+        return await runInstalledBin(binPath, args: extraArgs, stdin: stdin, context: context)
     }
 
     static let builtinNames: Set<String> = [
@@ -1411,6 +1459,7 @@ final class MouseShell {
       sh <file> / sh -c <cmd> / ./<script.sh>
       npm <install [pkg[@range]…] | ls>   (pnpm / yarn alias)
       npx <package>
+      node <file> / node -e <code>
     language:
       if …; then …; elif …; else …; fi
       for NAME in …; do …; done
