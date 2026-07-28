@@ -381,18 +381,23 @@ before `npx n8n` is realistic.
 
 ## 5. The terminal's own gaps
 
-Independent of everything above, `msh` is a shell without a *language*:
+`msh` **has a language now** (phase A, shipped): control flow
+(`if`/`for`/`while`/`until`/`case`, functions), `$(…)` and backticks,
+`$((…))` arithmetic, `${…}` operators, field splitting, positional
+parameters, `test`/`[`, `read`, `set -e/-x/-o pipefail`, `local`/`shift`/
+`break`/`continue`/`return`/`exit`, `eval`/`source`, and script execution
+(`sh file`, `sh -c`, `./script.sh` with shebang, `curl url | sh`).
+Verified against real `/bin/sh` on a 25-script corpus (method in
+AGENTS.md).
 
-- **No control flow** — `if`, `for`, `while`, `case`, functions
-- **No command substitution** — `$(...)`, backticks
-- **No script execution** — `sh build.sh`, shebang handling
-- **No job control** — `&`, `jobs`, `fg` (needs §3's processes to be real)
-- **No aliases, no tab completion, no ANSI**
+Still missing, in rough priority for install scripts:
 
-So one-liners work; real scripts do not. All of this is interpreter work in
-[Shell.swift](swift/Mouse/Shell.swift) with **no iOS barrier** — the
-cheapest large win available, and a prerequisite for anything that runs a
-build script.
+- **Heredocs** (`<<EOF`) — install scripts use them constantly
+- **stderr redirects** (`2>`, `2>&1`)
+- **Subshells** (`( … )`) and `$(…)` env isolation (ours mutates)
+- **Job control** — `&`, `jobs`, `fg` (needs §3's processes to be real)
+- **Aliases, tab completion, multi-line prompt continuation**
+  (`ShellParseError.incomplete` is already reported for the prompt to use)
 
 Cheap adjacent win: the `js` engine is REPL-only. `js script.js` with a
 small `fs` shim gives a real scripting language immediately.
@@ -405,7 +410,7 @@ Merging this document, [compile.md](compile.md), and [xcode.md](xcode.md)
 into one order. Each ships something usable alone.
 
 ```
-A  msh language           control flow, $(), script files      no blockers
+A  msh language           control flow, $(), script files      ✅ DONE — see §5
 B  WebView compute engine the only legal JIT; 10–30× on JS     small, huge leverage
 C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3×
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone

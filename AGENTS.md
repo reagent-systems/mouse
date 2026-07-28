@@ -41,6 +41,13 @@ pyte needs two harness-side patches: materialize its sparse buffer rows
 before IL/DL, and clamp CUU/CUD at margins only when the cursor starts
 inside the region). Programs verify by wiring `TerminalProgramIO.write`
 into an `AnsiParser` and asserting the grid after keystrokes.
+The msh LANGUAGE (`ShellLanguage.swift` + the evaluator in `Shell.swift`)
+verifies against **real `/bin/sh`**: the same script corpus runs through
+`shell.runProgram("sh script.sh", …)` and through `/bin/sh script.sh` in
+twin scratch directories, comparing stdout and exit status. Keep the
+corpus wide — control flow, functions, `$(…)`, `$((…))`, `${…}` operators,
+field splitting, globs in loops, `set -e`, redirects on compounds,
+`while read` from files and pipes, script/shebang execution.
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
@@ -176,7 +183,8 @@ it, and force-quit-relaunch to prove it.
 | `GitGraphView.swift` | The git module: commit-graph layout + rendering, history fetch, and `GitModuleToolbar` (`commit · sync · branch · merge · refresh` in the header) |
 | `GitHubAuth.swift` | Device Flow, Keychain, sign-in container |
 | `GitHubPush.swift` | Git Data API push (blobs → tree → commit → ref) |
-| `Shell.swift` | `msh` — the from-scratch shell: lexer, pipes, redirects, globs, env, ~50 built-ins incl. `git`, and `ICMPPinger` (real ping) |
+| `Shell.swift` | `msh` — the from-scratch shell: AST evaluator (control flow, functions, pipelines, redirects), expansion (fields, globs, `${…}` ops, `$(…)`), ~60 built-ins incl. `git` and `sh`, and `ICMPPinger` (real ping) |
+| `ShellLanguage.swift` | The msh language: lexer, AST, recursive-descent parser, `$((…))` arithmetic — pure, no I/O, no state |
 | `GitCore.swift` | The native git engine: loose objects (zlib+SHA-1), trees, commits, refs, checkout, status, DIRC index, packfile codec (with delta resolution), pkt-line, and the three-way merge engine (`merge`/`diff3`) — real-git interoperable |
 | `GitRemote.swift` | The remote half: clone/fetch/push over GitHub smart-HTTP, and `POST /user/repos` auto-create on push |
 | `Terminal.swift` | `TerminalSession` (engines: msh, js), JS engine, switcher chip, container, prompt field, screen-grid renderer |

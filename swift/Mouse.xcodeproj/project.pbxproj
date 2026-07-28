@@ -24,6 +24,7 @@
 		7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2B92464EFB49888F46248A5 /* Assets.xcassets */; };
 		8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E73E50FC2D809F76902185C /* AsciiArt.swift */; };
 		8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503560AF5D76D20B38402E7F /* ContentView.swift */; };
+		95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */; };
 		A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7FDD7DE14447F992EB32D3 /* Shell.swift */; };
 		A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D1234209A0254A06BB8E915 /* Terminal.swift */; };
 		AE73F32B4C2FD5EF9A76994C /* GitGraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B299975B30C229DCCCB015 /* GitGraphView.swift */; };
@@ -34,6 +35,7 @@
 
 /* Begin PBXFileReference section */
 		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellLanguage.swift; sourceTree = "<group>"; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
 		179217813E4A44F9859669C5 /* GitCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCore.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
@@ -81,6 +83,7 @@
 				FB01C138F6E8F2292E1D3EC4 /* Info.plist */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
 				5A7FDD7DE14447F992EB32D3 /* Shell.swift */,
+				080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */,
 				F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */,
 				2D1234209A0254A06BB8E915 /* Terminal.swift */,
 				9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */,
@@ -199,6 +202,7 @@
 				13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */,
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
 				A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */,
+				95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */,
 				4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */,
 				A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */,
 				0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */,
