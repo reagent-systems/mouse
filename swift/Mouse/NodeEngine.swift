@@ -162,12 +162,14 @@ final class NodeEngine: @unchecked Sendable {
         context = JSContext()!
         context.name = "mouse-node"
         var fatal: String? = nil
+        var fatalValue: JSValue? = nil
         context.exceptionHandler = { [weak self] _, exception in
             guard let self, self.exitCode == nil else { return }
             let text = exception?.toString() ?? "unknown error"
             if text.contains("__mouse_exit__") { return }
             let stack = exception?.forProperty("stack")?.toString() ?? text
             fatal = stack.contains(text) ? stack : text + "\n" + stack
+            fatalValue = exception
         }
 
         installNativeBridge(argv: argv, cwd: cwd, stdin: stdin)
@@ -208,8 +210,17 @@ final class NodeEngine: @unchecked Sendable {
             }
         }
         if let fatal, exitCode == nil {
-            err += fatal.hasSuffix("\n") ? fatal : fatal + "\n"
-            exitCode = 1
+            // A synchronous top-level throw: an installed `uncaughtException` handler gets
+            // first refusal, matching real node — handled means no exit 1 (the handler may
+            // itself `process.exit`, which the exit bridge already recorded). This is the
+            // synchronous half of error handling; the async half (unhandledRejection) needs
+            // JSC's private rejection hook and stays parked (see below / system.md).
+            let handled = context.objectForKeyedSubscript("__mouseEmitUncaught")?
+                .call(withArguments: [fatalValue ?? JSValue(nullIn: context)!])?.toBool() ?? false
+            if !handled, exitCode == nil {
+                err += fatal.hasSuffix("\n") ? fatal : fatal + "\n"
+                exitCode = 1
+            }
         }
 
         runEventLoop()
@@ -1728,6 +1739,14 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.__mouseSigint = function() {
         if (!signalHandlers.SIGINT.length) return false;
         for (const handler of signalHandlers.SIGINT.slice()) handler('SIGINT');
+        return true;
+      };
+      // The host routes an uncaught synchronous exception here. Returns true when a
+      // 'uncaughtException' handler ran (node then does NOT exit 1); false means unhandled.
+      globalThis.__mouseEmitUncaught = function(error) {
+        const handlers = processEvents.uncaughtException;
+        if (!handlers || !handlers.length) return false;
+        for (const handler of handlers.slice()) handler(error, 'uncaughtException');
         return true;
       };
 

@@ -301,11 +301,26 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   then/catch patch — cannot see await-handled rejections and would
   false-positive on every `await` in a try/catch, killing healthy
   programs. Correct tracking needs JSC's private
-  `JSGlobalContextSetUnhandledRejectionCallback`. Stays parked until that
-  API is public or phase B's WebView engine offers a hook. (The ESM entry
-  promise's rejection IS handled — exit 1 — so the common "async main
-  throws" case is already correct; it's arbitrary mid-graph promises that
-  can't be tracked.)
+  `JSGlobalContextSetUnhandledRejectionCallback` — and a public-header
+  audit now confirms it: `JSContext.h`/`JSContextRef.h`/`JSObjectRef.h`/
+  `JSValue.h` expose only `exceptionHandler` (synchronous throws) and
+  promise *creation* (`JSObjectMakeDeferredPromise`), NO rejection hook.
+  So the async half is impossible with the public API, doubly confirmed
+  (behavior test + header audit). Stays parked until that API is public or
+  phase B's WebView engine offers a hook. (The ESM entry promise's
+  rejection IS handled — exit 1 — so the common "async main throws" case is
+  already correct; it's arbitrary mid-graph promises that can't be tracked.)
+- **`uncaughtException` — the synchronous half, done correctly.** The
+  async rejection hook is unavailable, but SYNCHRONOUS uncaught exceptions
+  ARE visible (via `exceptionHandler`), so the `process.on('uncaughtException')`
+  path is implementable and now matches real node exactly. A top-level
+  throw routes through `__mouseEmitUncaught`: an installed handler runs and
+  the process does NOT exit 1 (it may itself `process.exit`, which the exit
+  bridge records); no handler → exit 1, unchanged. Three fixtures
+  byte-identical to real node v22: handler prints and the process exits 0
+  (code after the throw never runs), handler calls `process.exit(42)` →
+  exit 42, and the no-handler throw still exits 1. 37 node fixtures total,
+  56 TTY assertions, e2e, sh corpus, Swift 6 app build — all green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

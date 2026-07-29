@@ -101,7 +101,12 @@ argv/env/exit codes, nextTick/promise/timer ordering, async/await, util,
 assert) — plus an installed bin (mkdirp) executed by our engine mutating
 the real filesystem. Known divergences to keep out of fixtures: absolute
 host paths in cwd, setTimeout-vs-setImmediate order from the main module,
-stderr text. Part-2 surfaces verify the same way: ESM fixtures (all
+stderr text. `uncaughtException` is honored for SYNCHRONOUS top-level
+throws (handler runs → no exit 1; may `process.exit`); the async sibling
+`unhandledRejection` stays unimplemented — the public JavaScriptCore API
+has no rejection hook (header-audited: only `exceptionHandler` + promise
+creation), so tracking it would false-positive on awaited rejections. Do
+not add a `Promise.prototype.then` patch for it. Part-2 surfaces verify the same way: ESM fixtures (all
 import/export forms + chalk@5, a real ESM-only package), child_process
 with the harness bridge running /bin/sh (matching real node's /bin/sh
 exactly; msh semantics proven separately end-to-end), and fetch/https
