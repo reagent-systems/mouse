@@ -42,10 +42,14 @@ require-error eviction (a failing module can't linger as partial
 exports), `module.createRequire`, `require.resolve`, web globals
 (TextDecoder/TextEncoder/atob/btoa/URL), and a sync-backed
 `WebAssembly.instantiate` (JSC's async wasm never settles on a bare
-JSContext) — the yoga-layout wasm engine compiles and runs. 32 fixtures
-matching real node (v22), 42 TTY-harness assertions. **Next:** the last
-ink seam (yoga's exports arrive through one import path without
-Node/Config — under investigation), then phase B (WebView JIT).
+JSContext) — the yoga-layout wasm engine compiles and runs. **INK RUNS**:
+React 19 + react-reconciler + yoga-wasm render real frames, keystrokes
+re-render through React onto the phase-T grid, `useApp().exit()` ends
+the program — the ink-style TUI milestone, the shape of Claude Code's
+UI, real on our engine. 32 fixtures matching real node (v22), 47
+TTY-harness assertions. **Next:** `npx @anthropic-ai/claude-code`
+itself, API breadth as its startup reveals gaps, then phase B (WebView
+JIT).
 Unhandled-rejection exit codes are parked, with the reason recorded
 below.
 
@@ -193,6 +197,25 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   real node v22 (new: esm-tla — TLA entry + infected import + dynamic
   import + attributes; commander-cli end-to-end from our installed
   tree), 42 TTY assertions, e2e-through-msh, sh corpus, Swift 6 build
+- **INK RENDERS AND RUNS INTERACTIVELY** — the phase-G milestone. The
+  remaining walls, each found by running the real package: `export *
+  from` re-export must EXCLUDE `default`/`__esModule` (spec semantics —
+  yoga's `export * from './YGEnums.js'` was clobbering its default
+  export, which is why Node/Config vanished on one path);
+  `console.Console` (ink's patchConsole builds one over its own
+  streams); a `performance` polyfill (React's commit timing);
+  EventEmitter's missing surface (`setMaxListeners`, `prependListener`,
+  `eventNames`, static `once`); `addListener` aliases on the stdio
+  shims; and stdin's paused-mode contract — ink v6 reads keys via
+  `'readable'` + `read()`, so a host keystroke now fills the buffer and
+  pokes `'readable'` when no `'data'` listener is flowing. End-to-end in
+  the TTY harness (47 assertions total): ink + react@19 installed by our
+  own PackageManager on the spot, `useInput`/`useApp` app launched as a
+  NodeProgram — first frame reaches the scrollback (raw mode flips after
+  mount, the two-mode model working as designed), a keypress re-renders
+  through React onto the grid, `q` exits via `useApp().exit()`. One
+  step from an agent CLI's UI: `npx @anthropic-ai/claude-code` is now an
+  API-breadth question, not an architecture question
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

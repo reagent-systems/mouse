@@ -960,10 +960,12 @@ final class NodeEngine: @unchecked Sendable {
             return requireSettled(temp, group(match, 2, ns)!) + " module.exports.\(group(match, 1, ns)!) = \(temp);"
         }
         // export * from 'mod'  /  export { a, b as c } from 'mod'
+        // Star re-export excludes `default` and `__esModule` (spec semantics — yoga-layout's
+        // `export * from './YGEnums.js'` must not clobber its own default export).
         replace(#"^\s*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
-            return requireSettled(temp, group(match, 1, ns)!) + " Object.assign(module.exports, \(temp));"
+            return requireSettled(temp, group(match, 1, ns)!) + " __reexportStar(module.exports, \(temp));"
         }
         replace(#"^\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
@@ -1147,6 +1149,11 @@ final class NodeEngine: @unchecked Sendable {
           return buffer.toString(this.encoding === 'utf-16le' ? 'utf16le' : 'utf8');
         }
       };
+      globalThis.performance = {
+        timeOrigin: Date.now(),
+        now: function(){ return Date.now() - globalThis.performance.timeOrigin; },
+        mark: function(){}, measure: function(){},
+      };
       globalThis.atob = function(base64) { return Buffer.from(String(base64), 'base64').toString('binary'); };
       globalThis.btoa = function(binary) { return Buffer.from(String(binary), 'binary').toString('base64'); };
       // JSC's ASYNC wasm APIs never settle on a bare JSContext (their completion needs a
@@ -1197,6 +1204,12 @@ final class NodeEngine: @unchecked Sendable {
 
       // ---- ESM interop (the transpiler emits these) ----
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
+      globalThis.__reexportStar = function(target, source) {
+        for (const key of Object.keys(source)) {
+          if (key === 'default' || key === '__esModule') continue;
+          target[key] = source[key];
+        }
+      };
       globalThis.__dynamicImport = function(require, specifier) {
         // Promise flattening settles a pending (top-level-await) module before wrapping.
         return Promise.resolve().then(function() { return require(specifier); }).then(function(m) {
@@ -1258,6 +1271,24 @@ final class NodeEngine: @unchecked Sendable {
         return args.map(formatOne).join(' ');
       }
 
+      // console.Console: a console over any pair of writable streams (ink's patchConsole
+      // builds one to intercept logs while it owns the screen).
+      function Console(stdout, stderr) {
+        if (stdout && stdout.stdout) { stderr = stdout.stderr; stdout = stdout.stdout; }
+        const errStream = stderr || stdout;
+        this.log = function(){ stdout.write(format.apply(null, arguments) + '\n'); };
+        this.info = this.log;
+        this.warn = function(){ errStream.write(format.apply(null, arguments) + '\n'); };
+        this.error = this.warn;
+        this.debug = this.warn;
+        this.trace = function(){ errStream.write('Trace: ' + format.apply(null, arguments) + '\n'); };
+        this.dir = this.log;
+        this.assert = function(condition){ if (!condition) errStream.write('Assertion failed\n'); };
+        this.table = this.log;
+        this.group = this.log; this.groupEnd = function(){}; this.groupCollapsed = this.log;
+        this.count = function(){}; this.countReset = function(){};
+        this.time = function(){}; this.timeEnd = function(){}; this.timeLog = function(){};
+      }
       globalThis.console = {
         log: function(){ bridge.stdout(format.apply(null, arguments) + '\n'); },
         info: function(){ bridge.stdout(format.apply(null, arguments) + '\n'); },
@@ -1265,6 +1296,7 @@ final class NodeEngine: @unchecked Sendable {
         error: function(){ bridge.stderr(format.apply(null, arguments) + '\n'); },
         debug: function(){ bridge.stderr(format.apply(null, arguments) + '\n'); },
         trace: function(){ bridge.stderr('Trace: ' + format.apply(null, arguments) + '\n'); },
+        Console: Console,
       };
 
       // ---- process ----
@@ -1290,9 +1322,17 @@ final class NodeEngine: @unchecked Sendable {
             return true;
           },
           on: function(event, handler){ (listeners[event] = listeners[event] || []).push(handler); return this; },
+          addListener: function(event, handler){ return this.on(event, handler); },
           once: function(event, handler){ return this.on(event, handler); },
-          off: function(){ return this; },
-          removeListener: function(){ return this; },
+          off: function(event, handler){
+            const list = listeners[event] || [];
+            const index = list.indexOf(handler);
+            if (index >= 0) list.splice(index, 1);
+            return this;
+          },
+          removeListener: function(event, handler){ return this.off(event, handler); },
+          listenerCount: function(event){ return (listeners[event] || []).length; },
+          setMaxListeners: function(){ return this; },
           emit: function(event){
             const args = Array.prototype.slice.call(arguments, 1);
             for (const handler of listeners[event] || []) handler.apply(null, args);
@@ -1336,6 +1376,7 @@ final class NodeEngine: @unchecked Sendable {
             updateLiveness();
             return this;
           },
+          addListener: function(event, handler){ return this.on(event, handler); },
           once: function(event, handler){ return this.on(event, handler); },
           off: function(event, handler){
             const list = listeners[event] || [];
@@ -1345,6 +1386,7 @@ final class NodeEngine: @unchecked Sendable {
             return this;
           },
           removeListener: function(event, handler){ return this.off(event, handler); },
+          setMaxListeners: function(){ return this; },
           removeAllListeners: function(event){ if (event) delete listeners[event]; else for (const k of Object.keys(listeners)) delete listeners[k]; updateLiveness(); return this; },
           listenerCount: function(event){ return (listeners[event] || []).length; },
           emit: function(event){
@@ -1354,7 +1396,23 @@ final class NodeEngine: @unchecked Sendable {
           },
           resume: function(){ paused = false; updateLiveness(); return this; },
           pause: function(){ paused = true; updateLiveness(); return this; },
-          read: function(){ const value = buffered; buffered = ''; return value.length ? value : null; },
+          read: function(){
+            const value = buffered;
+            buffered = '';
+            if (!value.length) return null;
+            return stream._encoding ? value : Buffer.from(value);
+          },
+          // A keystroke from the host: flowing listeners get 'data'; paused-mode consumers
+          // (ink reads via 'readable' + read()) get the buffer filled and a 'readable' poke.
+          _push: function(text){
+            if ((listeners['data'] || []).length) {
+              stream.emit('data', stream._encoding ? text : Buffer.from(text));
+              if ((listeners['readable'] || []).length) { buffered += text; stream.emit('readable'); }
+            } else {
+              buffered += text;
+              stream.emit('readable');
+            }
+          },
           pipe: function(destination){ stream.on('data', c => destination.write(c)); return destination; },
           unref: function(){ return this; }, ref: function(){ return this; },
         };
@@ -1364,8 +1422,7 @@ final class NodeEngine: @unchecked Sendable {
       // Host → JS: one keystroke, delivered as data — never a signal. The host owns the
       // terminal discipline: cooked-mode ^C arrives via __mouseSigint instead.
       globalThis.__mouseDeliverInput = function(text) {
-        const stdin = process.stdin;
-        stdin.emit('data', stdin._encoding ? text : Buffer.from(text));
+        process.stdin._push(text);
       };
       globalThis.__mouseResize = function(rows, columns) {
         process.stdout.rows = rows; process.stdout.columns = columns;
@@ -1540,9 +1597,22 @@ final class NodeEngine: @unchecked Sendable {
           }
           listenerCount(name) { return (this._events[name] || []).length; }
           listeners(name) { return (this._events[name] || []).slice(); }
+          rawListeners(name) { return (this._events[name] || []).slice(); }
+          eventNames() { return Object.keys(this._events); }
+          setMaxListeners() { return this; }
+          getMaxListeners() { return Infinity; }
+          prependListener(name, handler) { (this._events[name] = this._events[name] || []).unshift(handler); return this; }
+          prependOnceListener(name, handler) {
+            const wrapper = (...args) => { this.off(name, wrapper); handler.apply(this, args); };
+            wrapper.listener = handler;
+            return this.prependListener(name, wrapper);
+          }
         }
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.default = EventEmitter;
+        EventEmitter.once = function(emitter, name) {
+          return new Promise(function(resolve){ emitter.once(name, function(){ resolve(Array.from(arguments)); }); });
+        };
         return EventEmitter;
       };
 
