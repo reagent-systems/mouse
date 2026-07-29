@@ -408,6 +408,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   build — green. With this the stdin leg is complete: characters, special
   keys (incl. DECCKM), Ctrl-combos, backspace, and now paste all reach a
   program the way a real terminal delivers them
+- **Resize+repaint cross-checked against pyte — the rotate-mid-TUI path.**
+  The one output path left unverified with real content: a device rotation
+  resizes the grid (`TerminalScreen.resize`) while a program is live, and
+  the program re-renders at the new width. Ran a real ink app that renders
+  a bordered box sized to `process.stdout.columns`, resized the TTY 60→40
+  mid-run (firing ink's `resize` event → re-render), captured the byte
+  stream split at the resize point, and replayed it through both
+  `TerminalScreen` and pyte with the same `resize(12,40)` at the split.
+  Both final grids are byte-identical: the box re-renders cleanly at width
+  40 ("width is 40"), no stale 60-wide content surviving the shrink.
+  `TerminalScreen.resize` (top-left preserve, margins reset) is correct
+  with a real program's resize re-render; verification pass, no code
+  change. The phase-T output path is now verified end-to-end against pyte
+  at every stage: first frame (ONLCR), width/height repaints, query
+  replies, and resize.
+  **Live in-app verification (running the app in the iOS Simulator) is
+  blocked** on the host's Xcode selection — the simulator integration
+  needs `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`,
+  which requires the user's password. `xcodebuild` works (builds pass);
+  only the Simulator attach is gated. Everything provable headlessly is
+  proven; the remaining feel-test waits on that one host fix or moves to
+  phase B.
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming
