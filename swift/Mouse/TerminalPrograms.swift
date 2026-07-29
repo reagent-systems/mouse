@@ -309,7 +309,12 @@ final class NodeProgram: TerminalProgram {
             enterScreenMode()
         }
         if rendersScreen {
-            io?.write(text)
+            // ONLCR, the TTY's job, not the emulator's: a real PTY maps NL→CR-NL on output,
+            // so a program that ends lines with a bare `\n` (ink's inline frames, every
+            // logUpdate-style repaint) lands each line at column 0. Without it the screen —
+            // correctly xterm-faithful, LF is index — shears the frame diagonally. We are
+            // the PTY substitute, so the translation belongs here.
+            io?.write(Self.onlcr(text))
             return
         }
         // Transcript mode: line-buffer, and emit complete lines with escapes stripped.
@@ -338,6 +343,22 @@ final class NodeProgram: TerminalProgram {
         guard !rendersScreen else { return }
         flushPendingLine()
         rendersScreen = true
+    }
+
+    /// ONLCR: a bare `\n` (not already preceded by `\r`) becomes `\r\n`. A stray `\r\n`
+    /// split across two writes yields a harmless `\r\r\n` (CR to column 0 is idempotent),
+    /// so no cross-chunk state is needed.
+    static func onlcr(_ text: String) -> String {
+        guard text.unicodeScalars.contains("\n") else { return text }
+        var result = String.UnicodeScalarView()
+        result.reserveCapacity(text.unicodeScalars.count + 8)
+        var previous: Unicode.Scalar = "\0"
+        for scalar in text.unicodeScalars {
+            if scalar == "\n", previous != "\r" { result.append("\r") }
+            result.append(scalar)
+            previous = scalar
+        }
+        return String(result)
     }
 
     /// Drop ANSI escape sequences (CSI, OSC, and two-byte ESC forms) and carriage returns —

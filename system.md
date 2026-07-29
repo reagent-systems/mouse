@@ -65,7 +65,10 @@ per statement); a single-pass all-matches rebuild is 31× faster (40.8 s →
 1.3 s on the 9.3 MB bundle), byte-identical output. **Next:** drive the UI
 through the phase-T grid on device, then phase B (WebView JIT) for raw JS
 speed. Unhandled-rejection exit codes are parked, with the reason
-recorded below.
+recorded below. **A real claude-code ink frame now renders aligned on the
+phase-T screen** — the config-recovery dialog, a clean bordered box —
+after adding ONLCR (NL→CR-NL) at the NodeProgram PTY boundary; without it
+ink's bare-`\n` frames sheared diagonally.
 
 ### Shipped and verified this cycle
 
@@ -297,6 +300,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   promise's rejection IS handled — exit 1 — so the common "async main
   throws" case is already correct; it's arbitrary mid-graph promises that
   can't be tracked.)
+- **A real claude-code ink frame renders ALIGNED on the phase-T screen —
+  ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
+  UI (a bordered "Configuration Error / Choose an option" dialog) from the
+  live engine, fed it into `TerminalScreen`: the box SHEARED diagonally.
+  Cross-checked against pyte — pyte sheared identically, so the emulator
+  is correct (bare LF is index, xterm-faithful). The real cause: ink's
+  inline frames end each line with a bare `\n` and rely on the TTY's ONLCR
+  (map NL→CR-NL on output) — an output-termios flag that stays on even
+  when stdin is raw. Our PTY substitute wasn't applying it. Added
+  `NodeProgram.onlcr` at the program→screen boundary (bare `\n` → `\r\n`,
+  a split `\r\n` becoming a harmless `\r\r\n`), keeping `TerminalScreen`
+  pure so the pyte cross-check still holds. The exact captured frame now
+  renders byte-for-byte against pyte's ONLCR render — a clean bordered
+  dialog — and a control assertion proves it shears without the fix. This
+  is the loop's headline ask ("Node programs drive the phase-T screen for
+  ink-style TUIs") verified with real published-CLI output. 51 TTY
+  assertions, 35 node fixtures, e2e, sh corpus, Swift 6 build — green
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

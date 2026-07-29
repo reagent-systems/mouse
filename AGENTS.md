@@ -41,6 +41,15 @@ pyte needs two harness-side patches: materialize its sparse buffer rows
 before IL/DL, and clamp CUU/CUD at margins only when the cursor starts
 inside the region). Programs verify by wiring `TerminalProgramIO.write`
 into an `AnsiParser` and asserting the grid after keystrokes.
+**ONLCR lives in `NodeProgram`, not the emulator.** The screen is
+deliberately xterm-faithful — bare LF is *index* (cursor down, same
+column), matching pyte. A real PTY maps NL→CR-NL on output, so ink-style
+inline frames (lines ending in bare `\n`) land at column 0. That
+translation belongs at the PTY substitute (`NodeProgram.onlcr`), never in
+`TerminalScreen` — putting it in the emulator would break the pyte
+cross-check. Regression: a captured real ink frame (claude-code's
+config-recovery box) must render byte-for-byte against pyte with ONLCR
+applied, and shear without it.
 The msh LANGUAGE (`ShellLanguage.swift` + the evaluator in `Shell.swift`)
 verifies against **real `/bin/sh`**: the same script corpus runs through
 `shell.runProgram("sh script.sh", …)` and through `/bin/sh script.sh` in
