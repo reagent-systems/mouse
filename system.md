@@ -59,11 +59,13 @@ DANGLE IS FOUND AND CLEARED — claude-code 1.0.128 now renders its
 interactive UI through our engine**: a bordered, ANSI-colored ink prompt
 box, `stdin.setRawMode(true)`, listening for keypresses. Startup runs
 its full init chain; what remains is the live REPL, which keeps the
-process alive on a TTY exactly as it should. **Next:** drive the UI
-through the phase-T grid on device, then phase B (WebView JIT) for the
-~40 s transpile cost.
-Unhandled-rejection exit codes are parked, with the reason recorded
-below.
+process alive on a TTY exactly as it should. **The ~40 s transpile cost
+is FIXED** — the ESM→CJS rewrite was O(n²) (firstMatch + full-string copy
+per statement); a single-pass all-matches rebuild is 31× faster (40.8 s →
+1.3 s on the 9.3 MB bundle), byte-identical output. **Next:** drive the UI
+through the phase-T grid on device, then phase B (WebView JIT) for raw JS
+speed. Unhandled-rejection exit codes are parked, with the reason
+recorded below.
 
 ### Shipped and verified this cycle
 
@@ -251,8 +253,7 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   corpus stay green; Swift 6 build passes. Startup now runs the entire
   module graph and stops at ONE dangling top-level await — exit 13, no
   crash — the open lead. (Also noted: the transpiler's regex passes take
-  ~40 s on a 9.3 MB bundle — a performance target for later, likely a
-  single-pass rewrite or phase B)
+  ~40 s on a 9.3 MB bundle — fixed in a later boundary, see below.)
 - **claude-code renders its UI** — the dangle traced (marker-injection
   into a copy of the bundle, then a `.catch` on the entry promise) to a
   chain of missing Node surface, each a real correctness gap: EventEmitter
@@ -271,6 +272,31 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   fs-fd-sync), 47 TTY assertions, e2e, sh corpus, Swift 6 build — all
   green. What's left is live-driving that UI on the phase-T grid and the
   transpile-speed pass
+- **Transpile speed: 31× (40.8 s → 1.3 s)** — the ESM→CJS rewriter's
+  `replace` helper was O(n²): a `firstMatch` + `NSString.replacingCharacters`
+  loop that recopied and rescanned the ENTIRE source once per matched
+  statement. On the 9.3 MB claude-code bundle (hundreds of import/export
+  sites) that was ~41 s. Rewritten as one pass per pattern — collect every
+  match against the current text, rebuild the string once — since matches
+  are statement-anchored/non-overlapping and no replacement introduces new
+  import/export syntax. Correctness proven the strong way: the transpiled
+  bundle is BYTE-IDENTICAL to the old loop's output (diff clean, 9,342,939
+  bytes), so runtime behavior cannot change; all 35 fixtures still match
+  real node, TTY/e2e/sh green, Swift 6 build passes. This is what makes
+  running a real bundled CLI on device practical rather than a 40 s stall
+- **Unhandled-rejection exit codes — parking now EMPIRICALLY confirmed,
+  not just reasoned.** Tested directly in a bare JSContext: `await p`
+  triggers a patched `Promise.prototype.then` ZERO times (JSC uses the
+  internal PerformPromiseThen), and neither `reportUnhandledRejection` nor
+  `onunhandledrejection` is exposed. So the only userland tracker — a
+  then/catch patch — cannot see await-handled rejections and would
+  false-positive on every `await` in a try/catch, killing healthy
+  programs. Correct tracking needs JSC's private
+  `JSGlobalContextSetUnhandledRejectionCallback`. Stays parked until that
+  API is public or phase B's WebView engine offers a hook. (The ESM entry
+  promise's rejection IS handled — exit 1 — so the common "async main
+  throws" case is already correct; it's arbitrary mid-graph promises that
+  can't be tracked.)
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

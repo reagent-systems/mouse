@@ -892,14 +892,31 @@ final class NodeEngine: @unchecked Sendable {
         var epilogue: [String] = []
         var counter = 0
 
+        // One pass per pattern: collect every match against the current text, then rebuild
+        // the string ONCE. The old firstMatch+replacingCharacters loop recopied and
+        // rescanned the whole source per match — O(n²), ~40 s on a 9 MB bundle. Matches are
+        // statement-anchored and non-overlapping, and replacements never introduce new
+        // import/export syntax, so a single pass is equivalent.
         func replace(_ pattern: String, _ transform: (NSTextCheckingResult, NSString) -> String) {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { return }
-            while true {
-                let ns = text as NSString
-                guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { break }
-                let replacement = transform(match, ns)
-                text = ns.replacingCharacters(in: match.range, with: replacement)
+            let ns = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            guard !matches.isEmpty else { return }
+            var result = ""
+            result.reserveCapacity(ns.length)
+            var cursor = 0
+            for match in matches {
+                let range = match.range
+                if range.location > cursor {
+                    result += ns.substring(with: NSRange(location: cursor, length: range.location - cursor))
+                }
+                result += transform(match, ns)
+                cursor = range.location + range.length
             }
+            if cursor < ns.length {
+                result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+            }
+            text = result
         }
         func group(_ match: NSTextCheckingResult, _ index: Int, _ ns: NSString) -> String? {
             guard index < match.numberOfRanges, match.range(at: index).location != NSNotFound else { return nil }
