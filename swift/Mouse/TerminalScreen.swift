@@ -78,6 +78,11 @@ final class TerminalScreen {
     /// modes to render.
     private(set) var isAlternate = false
 
+    /// DECCKM: while set (`ESC[?1h`), the arrow/Home/End keys encode as SS3 (`ESC O A`)
+    /// instead of CSI (`ESC[A`). Readline and vim enable it and bind the application form —
+    /// the keyboard layer reads this to encode arrows the way the running program expects.
+    private(set) var applicationCursorKeys = false
+
     /// True when anything changed since the last render — lets the view skip untouched frames.
     private(set) var isDirty = true
 
@@ -132,6 +137,10 @@ final class TerminalScreen {
         clearAll()
         moveCursor(row: 0, column: 0)
         isDirty = true
+    }
+
+    func setApplicationCursorKeys(_ enabled: Bool) {
+        applicationCursorKeys = enabled
     }
 
     // MARK: - Cursor
@@ -389,6 +398,8 @@ final class AnsiParser {
         case csi
         /// Inside `ESC ] … BEL/ST` (window title and friends — parsed, then discarded).
         case osc
+        /// After `ESC O` (SS3): the single next byte is a cursor/function final.
+        case ss3
     }
 
     private let screen: TerminalScreen
@@ -419,6 +430,7 @@ final class AnsiParser {
         case .escape: escape(scalar)
         case .csi: csi(scalar)
         case .osc: osc(scalar)
+        case .ss3: ss3(scalar)
         }
     }
 
@@ -453,6 +465,8 @@ final class AnsiParser {
             screen.saveCursor(); state = .ground
         case "8":
             screen.restoreCursor(); state = .ground
+        case "O":
+            state = .ss3   // SS3 — the application-cursor-key form (ESC O A/B/C/D/H/F)
         case "M":
             screen.reverseIndex(); state = .ground
         case "c":
@@ -463,6 +477,22 @@ final class AnsiParser {
             intermediates = String(Character(scalar)); state = .escape
         default:
             state = .ground
+        }
+    }
+
+    /// SS3: one final byte after `ESC O`. The cursor/Home/End forms move the cursor exactly
+    /// like their CSI twins, so a program that draws in application-cursor mode positions the
+    /// same. Function-key finals (P–S) carry no screen action.
+    private func ss3(_ scalar: Unicode.Scalar) {
+        defer { state = .ground }
+        switch scalar {
+        case "A": screen.cursorUp(1)
+        case "B": screen.cursorDown(1)
+        case "C": screen.moveCursor(deltaColumn: 1)
+        case "D": screen.moveCursor(deltaColumn: -1)
+        case "H": screen.moveCursor(row: 0, column: 0)
+        case "F": screen.moveCursor(row: screen.cursorRow, column: screen.columns - 1)
+        default: break
         }
     }
 
@@ -596,6 +626,7 @@ final class AnsiParser {
     private func setMode(_ modes: [Int], enabled: Bool) {
         for mode in modes {
             switch mode {
+            case 1: screen.setApplicationCursorKeys(enabled)   // DECCKM
             case 25: screen.cursorVisible = enabled
             case 1049, 47, 1047:
                 enabled ? screen.enterAlternate() : screen.leaveAlternate()

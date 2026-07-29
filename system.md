@@ -375,6 +375,22 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   trip proving `encoded()` arrows move the parser's cursor exactly as the
   escape says. Screen corpus, pyte cross-check, 55 TTY assertions, node
   fixtures, e2e, and the Swift 6 app build all stay green
+- **DECCKM — application cursor keys.** The encoding above always emitted
+  CSI arrows (`ESC[A`), but a program that sets DECCKM (`ESC[?1h` — vim,
+  readline) expects and binds the SS3 form (`ESC O A`). Our `setMode`
+  ignored mode 1 and `TerminalKey` had no notion of it, so a strict TUI's
+  arrows would miss. `TerminalScreen` now tracks `applicationCursorKeys`
+  (set/reset by mode 1); `TerminalKey.encoded(_, applicationCursor:)`
+  emits SS3 for the unmodified arrows/Home/End when it's on and CSI
+  otherwise (modified keys always CSI, per xterm); and the encoding moved
+  from the field to `TerminalSession.sendSpecialKey`, which reads the
+  screen's live mode — the only place that knows it. The parser also
+  learned to READ SS3 (`ESC O A/B/C/D/H/F` move the cursor like their CSI
+  twins), so application-mode output positions identically. Verified:
+  DECCKM flips the encoding both ways, modified arrows stay CSI, SS3 and
+  CSI arrows move the cursor identically, and mode 1 round-trips through
+  the parser; the pyte cross-check still matches (SS3 included), and the
+  screen corpus, TTY, node fixtures, e2e, and app build stay green
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

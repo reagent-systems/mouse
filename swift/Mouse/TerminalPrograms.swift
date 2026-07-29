@@ -19,12 +19,16 @@ enum TerminalKey: Equatable {
     }
 
     /// The byte sequence for this key. `modifiers` shapes cursor/navigation keys the xterm
-    /// way (`ESC[1;<n><final>`, n = 1 + shift + 2·alt + 4·ctrl).
-    func encoded(_ modifiers: Modifiers = []) -> String {
+    /// way (`ESC[1;<n><final>`, n = 1 + shift + 2·alt + 4·ctrl). `applicationCursor` is DECCKM
+    /// (`ESC[?1h`): while set, the unmodified arrows/Home/End encode as SS3 (`ESC O <final>`)
+    /// rather than CSI — modified keys always stay CSI, matching xterm.
+    func encoded(_ modifiers: Modifiers = [], applicationCursor: Bool = false) -> String {
         let esc = "\u{1b}"
-        // A letter-final cursor key: `ESC[<final>`, or `ESC[1;<n><final>` with modifiers.
+        // A letter-final cursor key: `ESC[<final>` (or SS3 `ESC O <final>` in application
+        // mode), or `ESC[1;<n><final>` with modifiers.
         func letterKey(_ final: String) -> String {
-            modifiers.isEmpty ? "\(esc)[\(final)" : "\(esc)[1;\(1 + modifiers.rawValue)\(final)"
+            if modifiers.isEmpty { return applicationCursor ? "\(esc)O\(final)" : "\(esc)[\(final)" }
+            return "\(esc)[1;\(1 + modifiers.rawValue)\(final)"
         }
         // A tilde-final navigation key: `ESC[<num>~`, or `ESC[<num>;<n>~` with modifiers.
         func tildeKey(_ num: Int) -> String {

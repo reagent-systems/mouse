@@ -66,9 +66,13 @@ xterm byte sequences a program reads on stdin (`ESC[A`, `ESC[1;5A` with
 modifiers, `ESC[15~`, DEL for Backspace, control bytes for Ctrl+letter).
 `TerminalKey.encoded(_:)`/`.control(for:)` are Foundation-pure and verified
 in the screen harness; `pressesBegan` maps `UIKey` → `TerminalKey` and
-routes through `onKey`, and the delegate turns a soft-keyboard backspace
-(empty replacement over a range) into DEL. Only keys a running program
-consumes are intercepted.
+routes through `TerminalSession.sendSpecialKey`, and the delegate turns a
+soft-keyboard backspace (empty replacement over a range) into DEL. Only
+keys a running program consumes are intercepted. The arrows' form depends
+on DECCKM (`ESC[?1h` → SS3 `ESC O A`, else CSI `ESC[A`), a mode the SCREEN
+owns — so `sendSpecialKey` encodes with `screen.applicationCursorKeys`,
+never the field. The parser also READS SS3 cursor forms (they move the
+cursor like their CSI twins), which the pyte cross-check covers.
 The msh LANGUAGE (`ShellLanguage.swift` + the evaluator in `Shell.swift`)
 verifies against **real `/bin/sh`**: the same script corpus runs through
 `shell.runProgram("sh script.sh", …)` and through `/bin/sh script.sh` in

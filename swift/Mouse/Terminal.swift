@@ -140,6 +140,15 @@ final class TerminalSession {
         return true
     }
 
+    /// A special key (arrow, Home/End, F-key…) while a program runs. Encoded HERE because the
+    /// arrows' form depends on DECCKM — a mode the screen owns, not the keyboard layer.
+    @discardableResult
+    func sendSpecialKey(_ key: TerminalKey, _ modifiers: TerminalKey.Modifiers) -> Bool {
+        guard let program else { return false }
+        program.input(key.encoded(modifiers, applicationCursor: screen.applicationCursorKeys))
+        return true
+    }
+
     /// The container's measured geometry; resizes the grid and tells the program (SIGWINCH).
     func setGridSize(rows: Int, columns: Int) {
         let rows = max(4, rows), columns = max(20, columns)
@@ -263,6 +272,7 @@ struct TerminalContainerView: View {
                                 terminal.run(command, workspace: workspace, deck: deck)
                             },
                             onKey: { key in terminal.sendKey(key) },
+                            onSpecialKey: { key, modifiers in terminal.sendSpecialKey(key, modifiers) },
                             onInterrupt: { terminal.interrupt() },
                             isBusy: { terminal.isRunning }
                         )
@@ -435,6 +445,8 @@ private struct TerminalPromptField: UIViewRepresentable {
     /// A raw keystroke while a full-screen program has the keyboard. Returns true when a
     /// program consumed it (the key never reaches the field).
     let onKey: (String) -> Bool
+    /// A special key (arrow, Home/End, F-key…), encoded by the terminal so DECCKM is honored.
+    let onSpecialKey: (TerminalKey, TerminalKey.Modifiers) -> Bool
     let onInterrupt: () -> Void
     let isBusy: () -> Bool
 
@@ -443,7 +455,7 @@ private struct TerminalPromptField: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextField {
         let field = ProgramKeyTextField()
         field.onSpecialKey = { [weak coordinator = context.coordinator] key, modifiers in
-            coordinator?.parent.onKey(key.encoded(modifiers)) ?? false
+            coordinator?.parent.onSpecialKey(key, modifiers) ?? false
         }
         field.onControlBytes = { [weak coordinator = context.coordinator] bytes in
             coordinator?.parent.onKey(bytes) ?? false
