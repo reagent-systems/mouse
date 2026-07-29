@@ -1,5 +1,83 @@
 import Foundation
 
+/// A physical key, encoded to the bytes a terminal program reads on stdin. The keyboard
+/// layer (`pressesBegan`, or the field's backspace) maps a hardware key to one of these; the
+/// encoding is xterm's, so a TUI navigates with the arrows, edits with backspace, and reads
+/// Ctrl-combos exactly as it would on a real terminal. Pure/Foundation, so it verifies in the
+/// screen harness alongside the parser.
+enum TerminalKey: Equatable {
+    case up, down, right, left
+    case home, end, pageUp, pageDown, insert, delete
+    case backspace, tab, backTab, escape, enter
+    case function(Int)        // F1…F12
+
+    struct Modifiers: OptionSet {
+        let rawValue: Int
+        static let shift = Modifiers(rawValue: 1)
+        static let alt   = Modifiers(rawValue: 2)
+        static let ctrl  = Modifiers(rawValue: 4)
+    }
+
+    /// The byte sequence for this key. `modifiers` shapes cursor/navigation keys the xterm
+    /// way (`ESC[1;<n><final>`, n = 1 + shift + 2·alt + 4·ctrl).
+    func encoded(_ modifiers: Modifiers = []) -> String {
+        let esc = "\u{1b}"
+        // A letter-final cursor key: `ESC[<final>`, or `ESC[1;<n><final>` with modifiers.
+        func letterKey(_ final: String) -> String {
+            modifiers.isEmpty ? "\(esc)[\(final)" : "\(esc)[1;\(1 + modifiers.rawValue)\(final)"
+        }
+        // A tilde-final navigation key: `ESC[<num>~`, or `ESC[<num>;<n>~` with modifiers.
+        func tildeKey(_ num: Int) -> String {
+            modifiers.isEmpty ? "\(esc)[\(num)~" : "\(esc)[\(num);\(1 + modifiers.rawValue)~"
+        }
+        switch self {
+        case .up:       return letterKey("A")
+        case .down:     return letterKey("B")
+        case .right:    return letterKey("C")
+        case .left:     return letterKey("D")
+        case .home:     return letterKey("H")
+        case .end:      return letterKey("F")
+        case .insert:   return tildeKey(2)
+        case .delete:   return tildeKey(3)
+        case .pageUp:   return tildeKey(5)
+        case .pageDown: return tildeKey(6)
+        case .backspace: return "\u{7f}"          // DEL, what terminals send for Backspace
+        case .tab:       return "\t"
+        case .backTab:   return "\(esc)[Z"
+        case .escape:    return esc
+        case .enter:     return "\r"
+        case .function(let n):
+            switch n {
+            case 1: return "\(esc)OP"
+            case 2: return "\(esc)OQ"
+            case 3: return "\(esc)OR"
+            case 4: return "\(esc)OS"
+            case 5: return "\(esc)[15~"
+            case 6: return "\(esc)[17~"
+            case 7: return "\(esc)[18~"
+            case 8: return "\(esc)[19~"
+            case 9: return "\(esc)[20~"
+            case 10: return "\(esc)[21~"
+            case 11: return "\(esc)[23~"
+            case 12: return "\(esc)[24~"
+            default: return ""
+            }
+        }
+    }
+
+    /// Ctrl+letter → its control byte (Ctrl-A = 0x01 … Ctrl-Z = 0x1a). Also the handful of
+    /// symbol controls terminals define (`Ctrl-[` = ESC, `Ctrl-\`, `Ctrl-]`, `Ctrl-_`).
+    static func control(for character: Character) -> String? {
+        guard let ascii = character.asciiValue else { return nil }
+        switch ascii {
+        case 0x40...0x5f: return String(Unicode.Scalar(ascii & 0x1f))   // @A–Z[\]^_
+        case 0x61...0x7a: return String(Unicode.Scalar((ascii - 0x20) & 0x1f)) // a–z
+        case 0x20: return "\u{0}"     // Ctrl-Space → NUL
+        default: return nil
+        }
+    }
+}
+
 /// A full-screen terminal PROGRAM — the second thing the terminal can host.
 ///
 /// The prompt-and-scrollback model runs a command to completion and appends what it said. A

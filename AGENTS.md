@@ -59,6 +59,16 @@ renders) queries are consumed silently and the screen is untouched, so
 the cross-check is unaffected — verify both: a program that emits the
 three queries must receive the exact replies on stdin and not hang, and
 the pyte cross-check must still pass.
+**Keyboard input encoding lives in `TerminalKey` (pure), UIKit glue in
+`ProgramKeyTextField`.** Physical special keys — arrows, Home/End, Page
+keys, Insert/Delete, F1–F12, Tab/BackTab, Escape, Ctrl-combos — become
+xterm byte sequences a program reads on stdin (`ESC[A`, `ESC[1;5A` with
+modifiers, `ESC[15~`, DEL for Backspace, control bytes for Ctrl+letter).
+`TerminalKey.encoded(_:)`/`.control(for:)` are Foundation-pure and verified
+in the screen harness; `pressesBegan` maps `UIKey` → `TerminalKey` and
+routes through `onKey`, and the delegate turns a soft-keyboard backspace
+(empty replacement over a range) into DEL. Only keys a running program
+consumes are intercepted.
 The msh LANGUAGE (`ShellLanguage.swift` + the evaluator in `Shell.swift`)
 verifies against **real `/bin/sh`**: the same script corpus runs through
 `shell.runProgram("sh script.sh", …)` and through `/bin/sh script.sh` in

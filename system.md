@@ -71,7 +71,10 @@ after adding ONLCR (NL→CR-NL) at the NodeProgram PTY boundary; without it
 ink's bare-`\n` frames sheared diagonally. **The terminal now ANSWERS
 queries too** (DSR/DA/DECRQM via `AnsiParser.respond` → the program's
 stdin), so a TUI that probes cursor position or feature support gets its
-reply instead of hanging.
+reply instead of hanging. **And the input leg is encoded** (`TerminalKey`
++ `ProgramKeyTextField`): hardware arrows/Home/End/F-keys/Ctrl-combos and
+soft-keyboard backspace become the xterm byte sequences a program reads,
+so a TUI navigates and edits.
 
 ### Shipped and verified this cycle
 
@@ -351,6 +354,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   so queries stay screen-invisible there and BOTH the ~60-assertion xterm
   corpus and the pyte cross-check still pass. 55 TTY assertions, 35 node
   fixtures, e2e, sh corpus, Swift 6 build — green
+- **Keyboard input encoding — the stdin leg.** The prompt field handled
+  typed characters and Return, but nothing else: a soft-keyboard backspace
+  (empty replacement over a range) fell through to the field and never
+  reached the program, and hardware special keys (arrows, Home/End, Page,
+  F-keys, Ctrl-combos) arrive via `pressesBegan`, which was unhandled —
+  so a TUI couldn't navigate or edit. Added `TerminalKey` (pure,
+  Foundation, in `TerminalPrograms.swift`): `.encoded(modifiers)` maps each
+  key to its xterm bytes — cursor keys `ESC[A`…`ESC[D` (and `ESC[1;<n>X`
+  with the modifier parameter n = 1 + shift + 2·alt + 4·ctrl), Home/End
+  `ESC[H`/`ESC[F`, tilde-keys `ESC[2~`/`3~`/`5~`/`6~`, F1–F4 as SS3
+  (`ESCOP`…), F5–F12 as CSI-tilde, Backspace→DEL, BackTab `ESC[Z`,
+  Escape, Enter→CR — and `.control(for:)` for Ctrl+letter (0x01–0x1a,
+  `Ctrl-[`→ESC, Ctrl-Space→NUL). The UIKit glue is thin:
+  `ProgramKeyTextField.pressesBegan` maps `UIKey`/`UIKeyboardHIDUsage` →
+  `TerminalKey` and routes through `onKey`; the delegate turns backspace
+  into DEL. Only keys a running program consumes are intercepted; ordinary
+  typing and Return are untouched. Verified in the screen harness (~35
+  assertions): every encoding checked against the xterm spec, plus a round
+  trip proving `encoded()` arrows move the parser's cursor exactly as the
+  escape says. Screen corpus, pyte cross-check, 55 TTY assertions, node
+  fixtures, e2e, and the Swift 6 app build all stay green
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

@@ -441,7 +441,13 @@ private struct TerminalPromptField: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> UITextField {
-        let field = UITextField()
+        let field = ProgramKeyTextField()
+        field.onSpecialKey = { [weak coordinator = context.coordinator] key, modifiers in
+            coordinator?.parent.onKey(key.encoded(modifiers)) ?? false
+        }
+        field.onControlBytes = { [weak coordinator = context.coordinator] bytes in
+            coordinator?.parent.onKey(bytes) ?? false
+        }
         field.delegate = context.coordinator
         field.font = UIFont(name: AppFont.asciiName, size: 12) ?? .monospacedSystemFont(ofSize: 12, weight: .bold)
         field.textColor = .white
@@ -474,6 +480,11 @@ private struct TerminalPromptField: UIViewRepresentable {
             if !string.isEmpty, parent.onKey(string) {
                 return false
             }
+            // Backspace on the soft keyboard is an empty replacement over a one-char range.
+            // A program reads it as DEL (0x7f), the way every terminal encodes Backspace.
+            if string.isEmpty, range.length > 0, parent.onKey(TerminalKey.backspace.encoded()) {
+                return false
+            }
             // While a command runs, any keypress interrupts it (the phone's Ctrl-C). New input
             // is refused during a run anyway, so a keystroke can only mean "stop" — the key is
             // swallowed rather than typed.
@@ -502,6 +513,71 @@ private struct TerminalPromptField: UIViewRepresentable {
 
         func textFieldDidEndEditing(_ textField: UITextField) {
             DispatchQueue.main.async { self.parent.isFocused = false }
+        }
+    }
+}
+
+/// A `UITextField` that hands hardware special keys (arrows, Home/End, Page keys, F-keys,
+/// Tab, Escape, Ctrl-combos) to a running program as terminal escape sequences. Ordinary
+/// characters and Return still flow through the delegate; only keys the field would otherwise
+/// swallow or ignore are intercepted, and only while a program actually consumes them.
+private final class ProgramKeyTextField: UITextField {
+    /// Given the encoded bytes for a special key, returns true when a program took it (the
+    /// field must not also edit itself). nil bytes mean "not a special key" — leave it to the
+    /// field, whose delegate routes ordinary characters to the program.
+    var onSpecialKey: ((TerminalKey, TerminalKey.Modifiers) -> Bool)?
+    /// Ctrl-combos produce a bare control byte (no `TerminalKey` case) — this carries them.
+    var onControlBytes: ((String) -> Bool)?
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses {
+            guard let key = press.key else { continue }
+            var modifiers: TerminalKey.Modifiers = []
+            if key.modifierFlags.contains(.shift) { modifiers.insert(.shift) }
+            if key.modifierFlags.contains(.alternate) { modifiers.insert(.alt) }
+            if key.modifierFlags.contains(.control) { modifiers.insert(.ctrl) }
+
+            if let named = Self.named(key.keyCode, shift: modifiers.contains(.shift)) {
+                if onSpecialKey?(named, modifiers) == true { return }
+            } else if modifiers.contains(.ctrl),
+                      let character = key.charactersIgnoringModifiers.first,
+                      let bytes = TerminalKey.control(for: character) {
+                if onControlBytes?(bytes) == true { return }
+            }
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
+    /// A hardware key code → a named `TerminalKey`, or nil for ordinary text keys (which the
+    /// field types normally and the delegate forwards).
+    private static func named(_ code: UIKeyboardHIDUsage, shift: Bool) -> TerminalKey? {
+        switch code {
+        case .keyboardUpArrow: return .up
+        case .keyboardDownArrow: return .down
+        case .keyboardRightArrow: return .right
+        case .keyboardLeftArrow: return .left
+        case .keyboardHome: return .home
+        case .keyboardEnd: return .end
+        case .keyboardPageUp: return .pageUp
+        case .keyboardPageDown: return .pageDown
+        case .keyboardInsert: return .insert
+        case .keyboardDeleteForward: return .delete
+        case .keyboardDeleteOrBackspace: return .backspace
+        case .keyboardTab: return shift ? .backTab : .tab
+        case .keyboardEscape: return .escape
+        case .keyboardF1: return .function(1)
+        case .keyboardF2: return .function(2)
+        case .keyboardF3: return .function(3)
+        case .keyboardF4: return .function(4)
+        case .keyboardF5: return .function(5)
+        case .keyboardF6: return .function(6)
+        case .keyboardF7: return .function(7)
+        case .keyboardF8: return .function(8)
+        case .keyboardF9: return .function(9)
+        case .keyboardF10: return .function(10)
+        case .keyboardF11: return .function(11)
+        case .keyboardF12: return .function(12)
+        default: return nil
         }
     }
 }
