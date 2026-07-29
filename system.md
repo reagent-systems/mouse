@@ -25,8 +25,11 @@ native git), and `fetch`/`https` over URLSession. **The T↔G join landed
 next**: `node`/`npx`/installed bins run as terminal *programs* —
 `process.stdin` gets real keystrokes, raw mode or the alt screen hands the
 program the phase-T grid (the ink model), cooked-mode ^C is SIGINT,
-rotation is a `resize` event. **Next:** stream depth and API breadth for
-real agent CLIs, then phase B (WebView JIT) for speed.
+rotation is a `resize` event. **Streams are real now too** (Readable/
+Writable/Duplex/Transform, pipe/pipeline/finished, async iteration, fs
+streams — 8 new fixtures, 27 total matching real node). **Next:**
+`readline`, unhandled-rejection exit codes, API breadth for real agent
+CLIs, then phase B (WebView JIT) for speed.
 
 ### Shipped and verified this cycle
 
@@ -93,9 +96,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   `#imports` — proven by chalk@5, an ESM-only package, matching real node
   byte-for-byte), and **`fetch` + `http`/`https`.get/request** over
   URLSession (verified against a live local HTTP server, both engines).
-  19 fixtures total, all matching. Remaining gaps (honest): stream depth,
-  unhandled promise rejections don't exit(1), `readline`/`net`/`crypto`/
-  `zlib`, and the WebView JIT surface (phase B) for speed
+  19 fixtures total, all matching. Remaining gaps (honest): unhandled
+  promise rejections don't exit(1), `readline`/`net`/`crypto`/`zlib`, and
+  the WebView JIT surface (phase B) for speed
+- **Stream depth** — the `stream` sketch became the real thing: Readable
+  with paused-vs-flowing modes, an internal buffer, `_read` pull,
+  `'readable'`, async iteration, and `Readable.from`; Writable with
+  `_write`/`_final`, drain, and write-after-end errors; Duplex/Transform/
+  PassThrough (writable methods grafted onto the Readable ancestry — JS
+  has one prototype chain); `pipe` with backpressure (pause on a false
+  `write`, resume on `'drain'`); `finished` + `pipeline` in callback and
+  promise forms (`stream/promises`); and `fs.createReadStream`/
+  `createWriteStream` riding those classes (64 KiB chunks through the
+  event loop). 8 new fixtures byte-identical to real node — readable
+  modes, custom writables with `final`, transform+flush pipe chains,
+  pipeline clean and error paths, promises form, for-await iteration, and
+  an fs write-then-read-stream round trip — 27 fixtures total, all
+  matching; TTY harness and sh corpus stay green
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming
@@ -471,7 +488,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen; gaps: streams depth, readline, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, real streams; gaps: readline, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
