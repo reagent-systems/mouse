@@ -317,6 +317,20 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   is the loop's headline ask ("Node programs drive the phase-T screen for
   ink-style TUIs") verified with real published-CLI output. 51 TTY
   assertions, 35 node fixtures, e2e, sh corpus, Swift 6 build — green
+- **Ink REPAINT path cross-checked against pyte — no bug, confirmed
+  correct.** Static frames alone don't exercise how a live TUI updates:
+  cursor-up over the prior frame, erase-line, erase-below, overwrite. Ran
+  two real ink apps through the engine capturing their raw multi-frame
+  output — one changing content WIDTH per frame (wide→narrow→wide, stresses
+  leftover-tail erase), one changing HEIGHT (a 4-line box collapsing to a
+  single line, stresses erase-display-below) — and rendered each full
+  stream through `TerminalScreen` (with ONLCR) and through pyte. Both
+  final grids are byte-identical to pyte: clean borders, no stale rows or
+  tails from taller/wider prior frames. The repaint path is correct as-is;
+  this iteration adds verification, not code. The ink-TUI goal is now
+  verified end-to-end headlessly (load → first frame → width/height
+  repaints), all against the pyte reference; what remains is live-driving
+  on device and phase B
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming
