@@ -83,6 +83,12 @@ final class TerminalScreen {
     /// the keyboard layer reads this to encode arrows the way the running program expects.
     private(set) var applicationCursorKeys = false
 
+    /// Bracketed paste (`ESC[?2004h`): while set, pasted text reaches the program wrapped in
+    /// `ESC[200~` … `ESC[201~`, so a multi-line paste is one atomic block instead of a burst
+    /// of Enters. Agent CLIs and editors enable it precisely so a pasted snippet doesn't
+    /// submit line-by-line.
+    private(set) var bracketedPaste = false
+
     /// True when anything changed since the last render — lets the view skip untouched frames.
     private(set) var isDirty = true
 
@@ -141,6 +147,10 @@ final class TerminalScreen {
 
     func setApplicationCursorKeys(_ enabled: Bool) {
         applicationCursorKeys = enabled
+    }
+
+    func setBracketedPaste(_ enabled: Bool) {
+        bracketedPaste = enabled
     }
 
     // MARK: - Cursor
@@ -615,9 +625,11 @@ final class AnsiParser {
         guard let mode = numericParameters.first else { return }
         let state: Int
         switch mode {
+        case 1: state = screen.applicationCursorKeys ? 1 : 2
         case 25: state = screen.cursorVisible ? 1 : 2
         case 1049, 47, 1047: state = screen.isAlternate ? 1 : 2
-        case 2026, 2004: state = 2   // recognized, not currently set
+        case 2004: state = screen.bracketedPaste ? 1 : 2
+        case 2026: state = 2   // synchronized output: recognized, never persistently set
         default: state = 0           // not recognized
         }
         respond("\u{1b}[?\(mode);\(state)$y")
@@ -628,9 +640,10 @@ final class AnsiParser {
             switch mode {
             case 1: screen.setApplicationCursorKeys(enabled)   // DECCKM
             case 25: screen.cursorVisible = enabled
+            case 2004: screen.setBracketedPaste(enabled)
             case 1049, 47, 1047:
                 enabled ? screen.enterAlternate() : screen.leaveAlternate()
-            default: break   // bracketed paste, mouse reporting, etc: accepted and ignored
+            default: break   // mouse reporting, focus events, etc: accepted and ignored
             }
         }
     }

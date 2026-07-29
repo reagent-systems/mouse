@@ -73,6 +73,12 @@ on DECCKM (`ESC[?1h` → SS3 `ESC O A`, else CSI `ESC[A`), a mode the SCREEN
 owns — so `sendSpecialKey` encodes with `screen.applicationCursorKeys`,
 never the field. The parser also READS SS3 cursor forms (they move the
 cursor like their CSI twins), which the pyte cross-check covers.
+**Bracketed paste (`ESC[?2004h`) is honored, not just accepted.** When a
+program enables it, `TerminalSession.sendPaste` wraps the pasted text in
+`ESC[200~`…`ESC[201~` so a multi-line paste is one atomic block instead of
+a burst of Enters (the agent-CLI "paste a snippet" case); off, it goes raw.
+The mode lives on the screen (`bracketedPaste`), so the wrapping is decided
+there and `ProgramKeyTextField.paste` just forwards the pasteboard text.
 The msh LANGUAGE (`ShellLanguage.swift` + the evaluator in `Shell.swift`)
 verifies against **real `/bin/sh`**: the same script corpus runs through
 `shell.runProgram("sh script.sh", …)` and through `/bin/sh script.sh` in

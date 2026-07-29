@@ -149,6 +149,20 @@ final class TerminalSession {
         return true
     }
 
+    /// Pasted text while a program runs. Wrapped in the bracketed-paste markers when the
+    /// program asked for them (`ESC[?2004h`), so a multi-line paste is one block, not a burst
+    /// of Enters. Returns false when no program has the keyboard (the field pastes normally).
+    @discardableResult
+    func sendPaste(_ text: String) -> Bool {
+        guard let program else { return false }
+        if screen.bracketedPaste {
+            program.input("\u{1b}[200~" + text + "\u{1b}[201~")
+        } else {
+            program.input(text)
+        }
+        return true
+    }
+
     /// The container's measured geometry; resizes the grid and tells the program (SIGWINCH).
     func setGridSize(rows: Int, columns: Int) {
         let rows = max(4, rows), columns = max(20, columns)
@@ -273,6 +287,7 @@ struct TerminalContainerView: View {
                             },
                             onKey: { key in terminal.sendKey(key) },
                             onSpecialKey: { key, modifiers in terminal.sendSpecialKey(key, modifiers) },
+                            onPaste: { text in terminal.sendPaste(text) },
                             onInterrupt: { terminal.interrupt() },
                             isBusy: { terminal.isRunning }
                         )
@@ -447,6 +462,8 @@ private struct TerminalPromptField: UIViewRepresentable {
     let onKey: (String) -> Bool
     /// A special key (arrow, Home/End, F-key…), encoded by the terminal so DECCKM is honored.
     let onSpecialKey: (TerminalKey, TerminalKey.Modifiers) -> Bool
+    /// Pasted text; the terminal brackets it when the program enabled bracketed paste.
+    let onPaste: (String) -> Bool
     let onInterrupt: () -> Void
     let isBusy: () -> Bool
 
@@ -459,6 +476,9 @@ private struct TerminalPromptField: UIViewRepresentable {
         }
         field.onControlBytes = { [weak coordinator = context.coordinator] bytes in
             coordinator?.parent.onKey(bytes) ?? false
+        }
+        field.onPaste = { [weak coordinator = context.coordinator] text in
+            coordinator?.parent.onPaste(text) ?? false
         }
         field.delegate = context.coordinator
         field.font = UIFont(name: AppFont.asciiName, size: 12) ?? .monospacedSystemFont(ofSize: 12, weight: .bold)
@@ -540,6 +560,14 @@ private final class ProgramKeyTextField: UITextField {
     var onSpecialKey: ((TerminalKey, TerminalKey.Modifiers) -> Bool)?
     /// Ctrl-combos produce a bare control byte (no `TerminalKey` case) — this carries them.
     var onControlBytes: ((String) -> Bool)?
+    /// A paste while a program has the keyboard — the whole pasteboard text as one delivery,
+    /// so the terminal can bracket it. Returns true when the program took it.
+    var onPaste: ((String) -> Bool)?
+
+    override func paste(_ sender: Any?) {
+        if let text = UIPasteboard.general.string, onPaste?(text) == true { return }
+        super.paste(sender)   // no program: paste into the prompt field as normal
+    }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {

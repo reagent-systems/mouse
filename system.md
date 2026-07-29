@@ -391,6 +391,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   CSI arrows move the cursor identically, and mode 1 round-trips through
   the parser; the pyte cross-check still matches (SS3 included), and the
   screen corpus, TTY, node fixtures, e2e, and app build stay green
+- **Bracketed paste — honored, not just accepted.** Mode 2004 was
+  advertised as understood but never acted on: the DECRQM reply even
+  hard-coded "reset", a lie once a program set it. So a multi-line paste
+  into a TUI arrived as raw newlines and a naive prompt fired line-by-line
+  — the wrong thing for the agent-CLI case of pasting a code snippet or
+  error log. Now `TerminalScreen` tracks `bracketedPaste` (set/reset by
+  2004, reported truthfully by DECRQM), and `TerminalSession.sendPaste`
+  wraps the text in `ESC[200~`…`ESC[201~` when it's on (raw otherwise),
+  encoded where the mode lives; `ProgramKeyTextField.paste` overrides the
+  field's paste to forward the pasteboard text as one delivery. Verified
+  end-to-end: a program enables 2004, receives a 3-line paste as a single
+  bracketed block (markers present, inner text intact), and a control on
+  the screen state confirms 2004 flips both ways. 56 TTY assertions,
+  screen corpus, pyte cross-check, 35 node fixtures, e2e, Swift 6 app
+  build — green. With this the stdin leg is complete: characters, special
+  keys (incl. DECCKM), Ctrl-combos, backspace, and now paste all reach a
+  program the way a real terminal delivers them
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming
