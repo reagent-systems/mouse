@@ -54,8 +54,14 @@ JS engine anywhere can run it, so the roadmap target is claude-code
 1.0.128, the last JS build. Finding 2: that 9.3 MB minified bundle now
 FULLY PARSES AND LOADS through our engine — the chase filled the API
 tail (below) — and startup currently stops at one dangling top-level
-await (exit 13, the honest signal), the next thing to hunt. **Next:**
-find the dangle, then phase B (WebView JIT).
+await (exit 13, the honest signal), the next thing to hunt. **THE
+DANGLE IS FOUND AND CLEARED — claude-code 1.0.128 now renders its
+interactive UI through our engine**: a bordered, ANSI-colored ink prompt
+box, `stdin.setRawMode(true)`, listening for keypresses. Startup runs
+its full init chain; what remains is the live REPL, which keeps the
+process alive on a TTY exactly as it should. **Next:** drive the UI
+through the phase-T grid on device, then phase B (WebView JIT) for the
+~40 s transpile cost.
 Unhandled-rejection exit codes are parked, with the reason recorded
 below.
 
@@ -247,6 +253,24 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   crash — the open lead. (Also noted: the transpiler's regex passes take
   ~40 s on a 9.3 MB bundle — a performance target for later, likely a
   single-pass rewrite or phase B)
+- **claude-code renders its UI** — the dangle traced (marker-injection
+  into a copy of the bundle, then a `.catch` on the entry promise) to a
+  chain of missing Node surface, each a real correctness gap: EventEmitter
+  now THROWS on an unhandled `'error'` (node semantics — an unhandled
+  error used to dissolve, and any awaited event dangled); `process` grew
+  the full event API (`on`/`once`/`prependListener`/`removeAllListeners`/
+  `listeners`/`eventNames`/`emit` over a real registry, not just signals);
+  timers return Timeout OBJECTS (`.unref`/`.ref`/`.refresh`/`.close`,
+  primitive-coercible) instead of bare ids — watchdog `.unref()` was the
+  wall; and `fs` grew the sync fd API (`openSync`/`writeSync`/`readSync`/
+  `closeSync`/`fstatSync`, fd 1/2 → stdio). With those, cli.js runs its
+  whole init chain and paints an ink prompt — bordered box, 256-color
+  SGR, raw mode, stdin `'readable'` listeners — the actual Claude Code
+  UI, drawn by the real published bundle on our JSC engine. 35 fixtures
+  matching real node v22 (new: events-error-throw, timer-objects,
+  fs-fd-sync), 47 TTY assertions, e2e, sh corpus, Swift 6 build — all
+  green. What's left is live-driving that UI on the phase-T grid and the
+  transpile-speed pass
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

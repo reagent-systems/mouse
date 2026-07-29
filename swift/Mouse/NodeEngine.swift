@@ -790,6 +790,9 @@ final class NodeEngine: @unchecked Sendable {
                   var source = String(data: data, encoding: .utf8) else {
                 return throwInJS("Cannot read '\(id)'")
             }
+            if source.hasPrefix("#!") {   // strip before transpile — the prologue would bury it mid-source
+                source = source.drop(while: { $0 != "\n" }).isEmpty ? "" : String(source.drop(while: { $0 != "\n" }))
+            }
             let esm = isESModule(id: id, source: source)
             if esm { source = Self.transpileESM(source) }
             // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
@@ -1580,6 +1583,9 @@ final class NodeEngine: @unchecked Sendable {
       };
       // ---- stdio streams (real TTY semantics when the host attached one) ----
       const signalHandlers = { SIGINT: [], SIGTERM: [], SIGWINCH: [] };
+      // Non-signal process events ('warning', 'exit', 'beforeExit', …): registered and
+      // introspectable; the host emits what it can.
+      const processEvents = {};
       function makeOutputStream(sink) {
         const listeners = {};
         return {
@@ -1757,17 +1763,43 @@ final class NodeEngine: @unchecked Sendable {
         },
         memoryUsage: function(){ return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0 }; },
         on: function(event, handler){
-          if (signalHandlers[event]) signalHandlers[event].push(handler);
+          const bucket = signalHandlers[event] || (processEvents[event] = processEvents[event] || []);
+          bucket.push(handler);
+          return process;
+        },
+        addListener: function(event, handler){ return process.on(event, handler); },
+        prependListener: function(event, handler){
+          const bucket = signalHandlers[event] || (processEvents[event] = processEvents[event] || []);
+          bucket.unshift(handler);
           return process;
         },
         once: function(event, handler){ return process.on(event, handler); },
         off: function(event, handler){
-          const list = signalHandlers[event];
+          const list = signalHandlers[event] || processEvents[event];
           if (list) { const i = list.indexOf(handler); if (i >= 0) list.splice(i, 1); }
           return process;
         },
         removeListener: function(event, handler){ return process.off(event, handler); },
-        emit: function(){ return false; },
+        removeAllListeners: function(event){
+          if (event === undefined) { for (const k of Object.keys(processEvents)) delete processEvents[k]; }
+          else if (signalHandlers[event]) signalHandlers[event].length = 0;
+          else delete processEvents[event];
+          return process;
+        },
+        listeners: function(event){ return (signalHandlers[event] || processEvents[event] || []).slice(); },
+        rawListeners: function(event){ return process.listeners(event); },
+        listenerCount: function(event){ return (signalHandlers[event] || processEvents[event] || []).length; },
+        eventNames: function(){
+          return Object.keys(processEvents).concat(Object.keys(signalHandlers).filter(k => signalHandlers[k].length));
+        },
+        setMaxListeners: function(){ return process; },
+        getMaxListeners: function(){ return Infinity; },
+        emit: function(event){
+          const args = Array.prototype.slice.call(arguments, 1);
+          const list = (signalHandlers[event] || processEvents[event] || []).slice();
+          for (const handler of list) handler.apply(process, args);
+          return list.length > 0;
+        },
         stdout: makeOutputStream(bridge.stdout),
         stderr: makeOutputStream(bridge.stderr),
         stdin: makeInputStream(),
@@ -1776,17 +1808,33 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.hrtimeBase = Date.now();
 
       // ---- timers ----
+      // Node returns Timeout OBJECTS (unref/ref chainable), not bare ids — CLIs call
+      // .unref() on watchdogs. Primitive coercion keeps old-style numeric use working.
+      function makeTimeout(id) {
+        return {
+          _id: id,
+          unref: function(){ return this; },
+          ref: function(){ return this; },
+          hasRef: function(){ return true; },
+          refresh: function(){ return this; },
+          close: function(){ bridge.clearTimer(id); return this; },
+          [Symbol.toPrimitive]: function(){ return id; },
+        };
+      }
       globalThis.setTimeout = function(fn, delay){
-        return bridge.setTimer(fn, delay || 0, false, Array.prototype.slice.call(arguments, 2));
+        return makeTimeout(bridge.setTimer(fn, delay || 0, false, Array.prototype.slice.call(arguments, 2)));
       };
       globalThis.setInterval = function(fn, delay){
-        return bridge.setTimer(fn, delay || 0, true, Array.prototype.slice.call(arguments, 2));
+        return makeTimeout(bridge.setTimer(fn, delay || 0, true, Array.prototype.slice.call(arguments, 2)));
       };
-      globalThis.clearTimeout = function(id){ bridge.clearTimer(id | 0); };
+      globalThis.clearTimeout = function(handle){
+        if (handle === undefined || handle === null) return;
+        bridge.clearTimer(typeof handle === 'object' ? handle._id : handle | 0);
+      };
       globalThis.clearInterval = globalThis.clearTimeout;
       globalThis.setImmediate = function(fn){
         bridge.setImmediate(fn, Array.prototype.slice.call(arguments, 1));
-        return 0;
+        return { unref: function(){ return this; }, ref: function(){ return this; }, hasRef: function(){ return true; } };
       };
       globalThis.clearImmediate = function(){};
       globalThis.queueMicrotask = globalThis.queueMicrotask || function(fn){ Promise.resolve().then(fn); };
@@ -1888,6 +1936,11 @@ final class NodeEngine: @unchecked Sendable {
           removeAllListeners(name) { if (name) delete this._events[name]; else this._events = {}; return this; }
           emit(name, ...args) {
             const list = (this._events[name] || []).slice();
+            // Node semantics: an 'error' with no listener THROWS — otherwise failures
+            // dissolve into silence (and awaited events dangle forever).
+            if (name === 'error' && list.length === 0) {
+              throw args[0] instanceof Error ? args[0] : new Error('Unhandled error: ' + args[0]);
+            }
             for (const handler of list) handler.apply(this, args);
             return list.length > 0;
           }
@@ -2013,8 +2066,11 @@ final class NodeEngine: @unchecked Sendable {
             mtime: new Date(raw.mtimeMs),
           };
         }
+        // The fd-based calls come later in this factory; forward references resolve at
+        // call time. A NUMBER as the file argument means an open fd (node semantics).
         const fs = {
           readFileSync: function(file, options) {
+            if (typeof file === 'number') file = fdPath(file);
             const base64 = bridge.readFile(resolvePath(file));
             if (base64 === null || base64 === undefined) {
               const error = new Error("ENOENT: no such file or directory, open '" + file + "'");
@@ -2026,12 +2082,14 @@ final class NodeEngine: @unchecked Sendable {
             return encoding ? buffer.toString(encoding) : buffer;
           },
           writeFileSync: function(file, data, options) {
+            if (typeof file === 'number') file = fdPath(file);
             const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
             if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), false)) {
               throw new Error("EACCES: cannot write '" + file + "'");
             }
           },
           appendFileSync: function(file, data) {
+            if (typeof file === 'number') file = fdPath(file);
             const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
             if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), true)) {
               throw new Error("EACCES: cannot append '" + file + "'");
@@ -2094,6 +2152,48 @@ final class NodeEngine: @unchecked Sendable {
           };
         }
         fs.exists = function(file, callback) { setImmediate(() => callback(fs.existsSync(file))); };
+        // The fd-based sync subset (log files, position reads). fd 1/2 write to the stdio.
+        const fileDescriptors = {};
+        let nextFd = 3;
+        function descriptor(fd) {
+          const entry = fileDescriptors[fd];
+          if (!entry) { const e = new Error('EBADF: bad file descriptor'); e.code = 'EBADF'; throw e; }
+          return entry;
+        }
+        fs.openSync = function(file, flags, mode) {
+          flags = String(flags === undefined ? 'r' : flags);
+          const path = resolvePath(file);
+          if (flags.includes('w')) fs.writeFileSync(path, '');
+          else if (flags.includes('a')) { if (!fs.existsSync(path)) fs.writeFileSync(path, ''); }
+          else if (!fs.existsSync(path)) {
+            const e = new Error("ENOENT: no such file or directory, open '" + file + "'");
+            e.code = 'ENOENT';
+            throw e;
+          }
+          const fd = nextFd++;
+          fileDescriptors[fd] = { path: path, flags: flags, position: 0 };
+          return fd;
+        };
+        fs.writeSync = function(fd, data) {
+          const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+          if (fd === 1) { bridge.stdout(buffer.toString()); return buffer.length; }
+          if (fd === 2) { bridge.stderr(buffer.toString()); return buffer.length; }
+          fs.appendFileSync(descriptor(fd).path, buffer);
+          return buffer.length;
+        };
+        fs.readSync = function(fd, buffer, offset, length, position) {
+          const entry = descriptor(fd);
+          const content = fs.readFileSync(entry.path);
+          const pos = position === null || position === undefined ? entry.position : position;
+          const count = Math.max(0, Math.min(length, content.length - pos));
+          for (let i = 0; i < count; i++) buffer[offset + i] = content[pos + i];
+          if (position === null || position === undefined) entry.position += count;
+          return count;
+        };
+        fs.closeSync = function(fd) { delete fileDescriptors[fd]; };
+        fs.fsyncSync = function() {};
+        fs.fstatSync = function(fd) { return fs.statSync(descriptor(fd).path); };
+        fs.close = function(fd, callback) { fs.closeSync(fd); if (callback) setImmediate(callback); };
         // File streams ride the real stream module: a read stream pushes 64 KiB chunks
         // through the event loop; a write stream appends per chunk after an open truncate.
         fs.createReadStream = function(file, options) {
