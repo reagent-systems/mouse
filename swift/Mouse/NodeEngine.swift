@@ -479,8 +479,8 @@ final class NodeEngine: @unchecked Sendable {
     static let coreModules: Set<String> = [
         "fs", "path", "os", "util", "events", "buffer", "tty", "assert", "url",
         "child_process", "http", "https", "net", "crypto", "stream", "zlib",
-        "readline", "string_decoder", "constants", "querystring", "fs/promises",
-        "stream/promises", "process",
+        "readline", "readline/promises", "string_decoder", "constants", "querystring",
+        "fs/promises", "stream/promises", "process",
     ]
 
     private func resolveModule(_ rawRequest: String, fromDir: String) -> Resolution {
@@ -1960,7 +1960,121 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories.http = function() { return makeHttpModule('http:'); };
       coreFactories.https = function() { return makeHttpModule('https:'); };
 
-      for (const missing of ['net', 'crypto', 'zlib', 'readline']) {
+      // Real readline: line assembly over any Readable. On a TTY it takes raw mode and does
+      // its own editing (echo, backspace, ^C→SIGINT) — the cooked-mode discipline a real
+      // terminal driver would provide; non-TTY input just splits lines as they flow.
+      coreFactories.readline = function() {
+        const EventEmitter = coreRequire('events');
+        class Interface extends EventEmitter {
+          constructor(options) {
+            super();
+            this.input = options.input || process.stdin;
+            this.output = options.output !== undefined ? options.output : process.stdout;
+            this.terminal = options.terminal !== undefined ? !!options.terminal : !!(this.input && this.input.isTTY);
+            this._prompt = options.prompt !== undefined ? options.prompt : '> ';
+            this._line = '';
+            this._questionCb = null;
+            this._lastWasCR = false;
+            this.closed = false;
+            this._onData = (chunk) => this._feed(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+            this._onEnd = () => {
+              if (this._line.length) { const line = this._line; this._line = ''; this._deliver(line); }
+              this.close();
+            };
+            this.input.on('data', this._onData);
+            if (this.input.once) this.input.once('end', this._onEnd);
+            if (this.terminal && this.input.setRawMode) this.input.setRawMode(true);
+            if (this.input.resume) this.input.resume();
+          }
+          _echo(text) { if (this.terminal && this.output) this.output.write(text); }
+          _deliver(line) {
+            if (this._questionCb) { const cb = this._questionCb; this._questionCb = null; cb(line); }
+            else this.emit('line', line);
+          }
+          _feed(text) {
+            for (const ch of text) {
+              if (ch === '\n' && this._lastWasCR) { this._lastWasCR = false; continue; }
+              this._lastWasCR = ch === '\r';
+              if (ch === '\r' || ch === '\n') {
+                this._echo('\r\n');
+                const line = this._line;
+                this._line = '';
+                this._deliver(line);
+              } else if (ch === '\u0003' && this.terminal) {
+                if (this.listenerCount('SIGINT')) this.emit('SIGINT');
+                else { this.close(); process.exit(130); }
+              } else if ((ch === '\u007f' || ch === '\b') && this.terminal) {
+                if (this._line.length) { this._line = this._line.slice(0, -1); this._echo('\b \b'); }
+              } else {
+                this._line += ch;
+                this._echo(ch);
+              }
+            }
+          }
+          question(query, options, callback) {
+            if (typeof options === 'function') callback = options;
+            if (this.output) this.output.write(query);
+            this._questionCb = callback;
+          }
+          prompt() { if (this.output) this.output.write(this._prompt); }
+          setPrompt(prompt) { this._prompt = prompt; return this; }
+          getPrompt() { return this._prompt; }
+          write(data) { if (data) this._feed(String(data)); }
+          pause() { if (this.input.pause) this.input.pause(); return this; }
+          resume() { if (this.input.resume) this.input.resume(); return this; }
+          close() {
+            if (this.closed) return;
+            this.closed = true;
+            if (this.input.off) { this.input.off('data', this._onData); this.input.off('end', this._onEnd); }
+            if (this.terminal && this.input.setRawMode) this.input.setRawMode(false);
+            this.emit('close');
+          }
+        }
+        function toStream(stream) { return stream || process.stdout; }
+        const readline = {
+          Interface: Interface,
+          createInterface: function(options) { return new Interface(options || {}); },
+          emitKeypressEvents: function() {},
+          cursorTo: function(stream, x, y, callback) {
+            toStream(stream).write(y === undefined || y === null ? '\u001b[' + (x + 1) + 'G' : '\u001b[' + (y + 1) + ';' + (x + 1) + 'H');
+            if (callback) callback();
+            return true;
+          },
+          moveCursor: function(stream, dx, dy, callback) {
+            let out = '';
+            if (dx < 0) out += '\u001b[' + (-dx) + 'D'; else if (dx > 0) out += '\u001b[' + dx + 'C';
+            if (dy < 0) out += '\u001b[' + (-dy) + 'A'; else if (dy > 0) out += '\u001b[' + dy + 'B';
+            toStream(stream).write(out);
+            if (callback) callback();
+            return true;
+          },
+          clearLine: function(stream, dir, callback) {
+            toStream(stream).write(dir < 0 ? '\u001b[1K' : dir > 0 ? '\u001b[0K' : '\u001b[2K');
+            if (callback) callback();
+            return true;
+          },
+          clearScreenDown: function(stream, callback) {
+            toStream(stream).write('\u001b[0J');
+            if (callback) callback();
+            return true;
+          },
+        };
+        return readline;
+      };
+      coreFactories['readline/promises'] = function() {
+        const readline = coreRequire('readline');
+        class PromisesInterface extends readline.Interface {
+          question(query) {
+            return new Promise((resolve) => readline.Interface.prototype.question.call(this, query, resolve));
+          }
+        }
+        return Object.assign({}, readline, {
+          Interface: PromisesInterface,
+          createInterface: function(options) { return new PromisesInterface(options || {}); },
+        });
+      };
+
+      for (const missing of ['net', 'crypto', 'zlib']) {
         coreFactories[missing] = (function(name){
           return function() {
             const stub = {};

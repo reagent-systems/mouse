@@ -27,9 +27,11 @@ next**: `node`/`npx`/installed bins run as terminal *programs* —
 program the phase-T grid (the ink model), cooked-mode ^C is SIGINT,
 rotation is a `resize` event. **Streams are real now too** (Readable/
 Writable/Duplex/Transform, pipe/pipeline/finished, async iteration, fs
-streams — 8 new fixtures, 27 total matching real node). **Next:**
-`readline`, unhandled-rejection exit codes, API breadth for real agent
-CLIs, then phase B (WebView JIT) for speed.
+streams — 8 new fixtures, 27 total matching real node). **`readline` is
+real** (28 fixtures): TTY line editing over raw mode — echo, backspace,
+^C→SIGINT — plus `question` in callback and promise forms, and line
+splitting from any Readable. **Next:** unhandled-rejection exit codes,
+API breadth for real agent CLIs, then phase B (WebView JIT) for speed.
 
 ### Shipped and verified this cycle
 
@@ -113,6 +115,18 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   pipeline clean and error paths, promises form, for-await iteration, and
   an fs write-then-read-stream round trip — 27 fixtures total, all
   matching; TTY harness and sh corpus stay green
+- **readline** — the stub became the module question-style CLIs need:
+  `createInterface` over any Readable (non-TTY input splits lines as they
+  flow — fixture vs real node reading a file stream, byte-identical, 28
+  total), and on a TTY it takes raw mode and provides the cooked-mode
+  discipline itself: echo, backspace editing, CRLF handling, ^C emits
+  `SIGINT` on the interface (no listener → exit 130), `question` in
+  callback and promise (`readline/promises`) forms, `prompt`/`setPrompt`/
+  `write`/`close`, and the cursor helpers (`cursorTo`, `moveCursor`,
+  `clearLine`, `clearScreenDown`) writing real CSI. Verified interactively
+  through the TTY harness: a `question` flow with echoed keystrokes and a
+  backspace correction lands the edited answer on the grid, the promises
+  form resolves, and ^C without a listener ends the program
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming
@@ -488,7 +502,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, real streams; gaps: readline, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, real streams + readline; gaps: WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
