@@ -47,9 +47,15 @@ React 19 + react-reconciler + yoga-wasm render real frames, keystrokes
 re-render through React onto the phase-T grid, `useApp().exit()` ends
 the program — the ink-style TUI milestone, the shape of Claude Code's
 UI, real on our engine. 32 fixtures matching real node (v22), 47
-TTY-harness assertions. **Next:** `npx @anthropic-ai/claude-code`
-itself, API breadth as its startup reveals gaps, then phase B (WebView
-JIT).
+TTY-harness assertions. **The claude-code chase produced two findings
+and a breadth boundary.** Finding 1: claude-code 2.x is NATIVE (a
+Bun-compiled per-platform binary; the npm package is an installer) — no
+JS engine anywhere can run it, so the roadmap target is claude-code
+1.0.128, the last JS build. Finding 2: that 9.3 MB minified bundle now
+FULLY PARSES AND LOADS through our engine — the chase filled the API
+tail (below) — and startup currently stops at one dangling top-level
+await (exit 13, the honest signal), the next thing to hunt. **Next:**
+find the dangle, then phase B (WebView JIT).
 Unhandled-rejection exit codes are parked, with the reason recorded
 below.
 
@@ -216,6 +222,31 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   through React onto the grid, `q` exits via `useApp().exit()`. One
   step from an agent CLI's UI: `npx @anthropic-ai/claude-code` is now an
   API-breadth question, not an architecture question
+- **The claude-code breadth boundary** — running the real 9.3 MB
+  claude-code 1.0.128 bundle head-on. Transpiler: minified-bundle forms
+  (`import{x as y}from"m"` with zero spaces, `$` in identifiers,
+  statements mid-line after `;`/`}` via lookbehind anchors, the bare
+  export clause at EOF). New core modules: `net` (real isIP helpers;
+  sockets/servers carry the sandbox's truth), `tls`, `dns`, `http2`
+  (real constants), `timers` + `timers/promises`, `path/posix` +
+  `path/win32`, `worker_threads`, `async_hooks` (a real synchronous
+  AsyncLocalStorage), `v8`, `vm`, `perf_hooks`, `inspector`, `dgram`,
+  `cluster`, `diagnostics_channel` (real pub/sub), `domain`, `console`
+  (as a module), `util/types`. util grew `debuglog`/`callbackify`/
+  `stripVTControlCharacters`; os grew `constants.signals`; buffer grew
+  `SlowBuffer`/`kMaxLength`; http grew the extendable class surface
+  (Agent, IncomingMessage, ClientRequest…, STATUS_CODES); process grew
+  execArgv/execPath/getuid/umask and friends. Web globals: Event,
+  EventTarget, CustomEvent, MessageChannel, AbortController/AbortSignal
+  (timeout/any), DOMException, structuredClone, URLSearchParams, URL
+  gained searchParams/canParse, and queue-backed WHATWG
+  ReadableStream/WritableStream/TransformStream (tee, pipeThrough,
+  async iteration). All 32 fixtures + 47 TTY assertions + e2e + sh
+  corpus stay green; Swift 6 build passes. Startup now runs the entire
+  module graph and stops at ONE dangling top-level await — exit 13, no
+  crash — the open lead. (Also noted: the transpiler's regex passes take
+  ~40 s on a 9.3 MB bundle — a performance target for later, likely a
+  single-pass rewrite or phase B)
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

@@ -610,7 +610,10 @@ final class NodeEngine: @unchecked Sendable {
         "fs", "path", "os", "util", "events", "buffer", "tty", "assert", "url",
         "child_process", "http", "https", "net", "crypto", "stream", "zlib",
         "readline", "readline/promises", "string_decoder", "constants", "querystring",
-        "fs/promises", "stream/promises", "process", "module",
+        "fs/promises", "stream/promises", "process", "module", "timers", "timers/promises",
+        "path/posix", "path/win32", "http2", "tls", "dns", "worker_threads", "async_hooks",
+        "v8", "vm", "perf_hooks", "inspector", "dgram", "cluster", "diagnostics_channel",
+        "console", "util/types", "domain",
     ]
 
     private func resolveModule(_ rawRequest: String, fromDir: String) -> Resolution {
@@ -931,8 +934,9 @@ final class NodeEngine: @unchecked Sendable {
         func requireSettled(_ temp: String, _ module: String) -> String {
             "let \(temp) = require('\(module)'); if (\(temp) instanceof Promise) \(temp) = await \(temp);"
         }
-        // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns
-        replace(#"^\s*import\s+(?:(\w+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+(\w+)|(\w+))\s+from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+        // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns —
+        // minified bundles drop every optional space (`import{x as y}from"m"`).
+        replace(#"(?:^|(?<=[;}]))\s*import\s*(?:([\w$]+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+([\w$]+)|([\w$]+))\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             var lines = [requireSettled(temp, group(match, 5, ns)!)]
@@ -948,13 +952,13 @@ final class NodeEngine: @unchecked Sendable {
             return lines.joined(separator: " ")
         }
         // import 'mod'
-        replace(#"^\s*import\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))\s*import\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             return requireSettled("__esm\(counter)", group(match, 1, ns)!)
         }
         // export * as name from 'mod'   (ansi-escapes@7 re-exports its base this way —
         // must run before the bare `export * from` rule, whose pattern is a prefix of this)
-        replace(#"^\s*export\s*\*\s*as\s+(\w+)\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))\s*export\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             return requireSettled(temp, group(match, 2, ns)!) + " module.exports.\(group(match, 1, ns)!) = \(temp);"
@@ -962,12 +966,12 @@ final class NodeEngine: @unchecked Sendable {
         // export * from 'mod'  /  export { a, b as c } from 'mod'
         // Star re-export excludes `default` and `__esModule` (spec semantics — yoga-layout's
         // `export * from './YGEnums.js'` must not clobber its own default export).
-        replace(#"^\s*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))\s*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             return requireSettled(temp, group(match, 1, ns)!) + " __reexportStar(module.exports, \(temp));"
         }
-        replace(#"^\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             var lines = [requireSettled(temp, group(match, 2, ns)!)]
@@ -978,13 +982,13 @@ final class NodeEngine: @unchecked Sendable {
         }
         // export { a, b as c };   — a trailing line comment must not defeat the match
         // (commander@15 ends one with "; // Deprecated").
-        replace(#"^\s*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))\s*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
             bindings(group(match, 1, ns)!)
                 .map { "module.exports.\($0.alias) = \($0.source);" }
                 .joined(separator: " ")
         }
         // export default function name() / class Name — keep the declaration, alias at EOF.
-        replace(#"^\s*export\s+default\s+(function\s+(\w+)|class\s+(\w+))"#) { match, ns in
+        replace(#"^\s*export\s+default\s+(function\s+([\w$]+)|class\s+([\w$]+))"#) { match, ns in
             let name = group(match, 2, ns) ?? group(match, 3, ns)!
             epilogue.append("module.exports.default = \(name);")
             return group(match, 1, ns)!
@@ -992,7 +996,7 @@ final class NodeEngine: @unchecked Sendable {
         // export default <expression>
         replace(#"^\s*export\s+default\s+"#) { _, _ in "module.exports.default = " }
         // export const/let/var/function/class NAME — strip keyword, assign at EOF.
-        replace(#"^\s*export\s+(const|let|var|function|class|async\s+function)\s+(\w+)"#) { match, ns in
+        replace(#"^\s*export\s+(const|let|var|function|class|async\s+function)\s+([\w$]+)"#) { match, ns in
             let name = group(match, 2, ns)!
             epilogue.append("module.exports.\(name) = \(name);")
             return "\(group(match, 1, ns)!) \(name)"
@@ -1154,6 +1158,131 @@ final class NodeEngine: @unchecked Sendable {
         now: function(){ return Date.now() - globalThis.performance.timeOrigin; },
         mark: function(){}, measure: function(){},
       };
+      // WHATWG streams — the subset vendored fetch/undici code touches. Queue-backed,
+      // single-reader, promise-correct; no backpressure sizing.
+      globalThis.ReadableStream = class ReadableStream {
+        constructor(source) {
+          this._queue = [];
+          this._closed = false;
+          this._error = null;
+          this._waiters = [];
+          this.locked = false;
+          const stream = this;
+          this._controller = {
+            enqueue: function(chunk) { stream._queue.push(chunk); stream._wake(); },
+            close: function() { stream._closed = true; stream._wake(); },
+            error: function(e) { stream._error = e || new Error('stream errored'); stream._wake(); },
+            get desiredSize() { return 1; },
+          };
+          this._source = source || {};
+          if (this._source.start) this._source.start(this._controller);
+        }
+        _wake() { const waiters = this._waiters; this._waiters = []; for (const w of waiters) w(); }
+        _next() {
+          const stream = this;
+          if (stream._error) return Promise.reject(stream._error);
+          if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
+          if (stream._closed) return Promise.resolve({ value: undefined, done: true });
+          const pulled = stream._source.pull ? Promise.resolve(stream._source.pull(stream._controller)) : Promise.resolve();
+          return pulled.then(function() {
+            if (stream._queue.length || stream._closed || stream._error) return stream._next();
+            return new Promise(function(resolve){ stream._waiters.push(resolve); }).then(function(){ return stream._next(); });
+          });
+        }
+        getReader() {
+          const stream = this;
+          stream.locked = true;
+          return {
+            read: function() { return stream._next(); },
+            releaseLock: function() { stream.locked = false; },
+            cancel: function(reason) { stream.locked = false; return stream.cancel(reason); },
+            get closed() { return new Promise(function(resolve){ (function check(){ if (stream._closed) resolve(); else stream._waiters.push(check); })(); }); },
+          };
+        }
+        cancel(reason) {
+          this._closed = true;
+          if (this._source.cancel) try { this._source.cancel(reason); } catch (e) {}
+          this._wake();
+          return Promise.resolve();
+        }
+        pipeTo(destination) {
+          const reader = this.getReader();
+          const writer = destination.getWriter();
+          function step() {
+            return reader.read().then(function(result) {
+              if (result.done) return writer.close();
+              return Promise.resolve(writer.write(result.value)).then(step);
+            });
+          }
+          return step();
+        }
+        pipeThrough(transform) { this.pipeTo(transform.writable); return transform.readable; }
+        tee() {
+          const chunks1 = [], chunks2 = [];
+          const stream = this;
+          function branch(buffer, other) {
+            return new ReadableStream({ pull: function(controller) {
+              if (buffer.length) { controller.enqueue(buffer.shift()); return; }
+              return stream._next().then(function(result) {
+                if (result.done) { controller.close(); return; }
+                other.push(result.value);
+                controller.enqueue(result.value);
+              });
+            } });
+          }
+          return [branch(chunks1, chunks2), branch(chunks2, chunks1)];
+        }
+        [Symbol.asyncIterator]() {
+          const reader = this.getReader();
+          return { next: function() { return reader.read(); }, [Symbol.asyncIterator]() { return this; } };
+        }
+        static from(iterable) {
+          return new ReadableStream({ start: async function(controller) {
+            for await (const item of iterable) controller.enqueue(item);
+            controller.close();
+          } });
+        }
+      };
+      globalThis.WritableStream = class WritableStream {
+        constructor(sink) { this._sink = sink || {}; this.locked = false; if (this._sink.start) this._sink.start(); }
+        getWriter() {
+          const stream = this;
+          stream.locked = true;
+          return {
+            write: function(chunk) { return Promise.resolve(stream._sink.write ? stream._sink.write(chunk) : undefined); },
+            close: function() { stream.locked = false; return Promise.resolve(stream._sink.close ? stream._sink.close() : undefined); },
+            abort: function(reason) { stream.locked = false; return Promise.resolve(stream._sink.abort ? stream._sink.abort(reason) : undefined); },
+            releaseLock: function() { stream.locked = false; },
+            ready: Promise.resolve(),
+          };
+        }
+        abort(reason) { return Promise.resolve(this._sink.abort ? this._sink.abort(reason) : undefined); }
+      };
+      globalThis.TransformStream = class TransformStream {
+        constructor(transformer) {
+          transformer = transformer || {};
+          let readableController;
+          this.readable = new ReadableStream({ start: function(controller) { readableController = controller; } });
+          const wrapped = {
+            enqueue: function(chunk) { readableController.enqueue(chunk); },
+            close: function() { readableController.close(); },
+            error: function(e) { readableController.error(e); },
+          };
+          if (transformer.start) transformer.start(wrapped);
+          this.writable = new WritableStream({
+            write: function(chunk) {
+              if (transformer.transform) return transformer.transform(chunk, wrapped);
+              wrapped.enqueue(chunk);
+            },
+            close: function() {
+              const flushed = transformer.flush ? transformer.flush(wrapped) : undefined;
+              return Promise.resolve(flushed).then(function(){ readableController.close(); });
+            },
+          });
+        }
+      };
+      globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 1; } };
+      globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 16384; } };
       globalThis.atob = function(base64) { return Buffer.from(String(base64), 'base64').toString('binary'); };
       globalThis.btoa = function(binary) { return Buffer.from(String(binary), 'binary').toString('base64'); };
       // JSC's ASYNC wasm APIs never settle on a bare JSContext (their completion needs a
@@ -1178,6 +1307,143 @@ final class NodeEngine: @unchecked Sendable {
           });
         };
       }
+      globalThis.Event = class Event {
+        constructor(type, options) {
+          this.type = String(type);
+          this.bubbles = !!(options && options.bubbles);
+          this.cancelable = !!(options && options.cancelable);
+          this.defaultPrevented = false;
+          this.target = null;
+        }
+        preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
+        stopPropagation() {}
+        stopImmediatePropagation() {}
+      };
+      globalThis.CustomEvent = class CustomEvent extends Event {
+        constructor(type, options) { super(type, options); this.detail = options && options.detail; }
+      };
+      globalThis.EventTarget = class EventTarget {
+        constructor() { this._listeners = {}; }
+        addEventListener(type, listener, options) {
+          const list = this._listeners[type] = this._listeners[type] || [];
+          list.push({ listener: listener, once: !!(options && options.once) });
+        }
+        removeEventListener(type, listener) {
+          const list = this._listeners[type] || [];
+          const index = list.findIndex(function(entry){ return entry.listener === listener; });
+          if (index >= 0) list.splice(index, 1);
+        }
+        dispatchEvent(event) {
+          event.target = this;
+          for (const entry of (this._listeners[event.type] || []).slice()) {
+            if (entry.once) this.removeEventListener(event.type, entry.listener);
+            (entry.listener.handleEvent || entry.listener).call(entry.listener, event);
+          }
+          return !event.defaultPrevented;
+        }
+      };
+      globalThis.MessageChannel = class MessageChannel {
+        constructor() {
+          const makePort = function() {
+            const port = new EventTarget();
+            port.onmessage = null;
+            port.postMessage = function(data) {
+              const twin = port._twin;
+              setImmediate(function() {
+                const event = new Event('message');
+                event.data = data;
+                if (twin.onmessage) twin.onmessage(event);
+                twin.dispatchEvent(event);
+              });
+            };
+            port.start = function(){};
+            port.close = function(){};
+            port.unref = function(){ return port; };
+            port.ref = function(){ return port; };
+            return port;
+          };
+          this.port1 = makePort();
+          this.port2 = makePort();
+          this.port1._twin = this.port2;
+          this.port2._twin = this.port1;
+        }
+      };
+      globalThis.AbortSignal = class AbortSignal {
+        constructor() { this.aborted = false; this.reason = undefined; this._listeners = []; this.onabort = null; }
+        addEventListener(type, listener) { if (type === 'abort') this._listeners.push(listener); }
+        removeEventListener(type, listener) {
+          if (type !== 'abort') return;
+          const index = this._listeners.indexOf(listener);
+          if (index >= 0) this._listeners.splice(index, 1);
+        }
+        dispatchEvent() {}
+        throwIfAborted() { if (this.aborted) throw this.reason; }
+        _abort(reason) {
+          if (this.aborted) return;
+          this.aborted = true;
+          this.reason = reason !== undefined ? reason : Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+          const event = { type: 'abort', target: this };
+          if (this.onabort) this.onabort(event);
+          for (const listener of this._listeners.slice()) (listener.handleEvent || listener).call(listener, event);
+        }
+        static abort(reason) { const signal = new AbortSignal(); signal._abort(reason); return signal; }
+        static timeout(ms) {
+          const signal = new AbortSignal();
+          setTimeout(function(){ signal._abort(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })); }, ms);
+          return signal;
+        }
+        static any(signals) {
+          const combined = new AbortSignal();
+          for (const signal of signals) {
+            if (signal.aborted) { combined._abort(signal.reason); break; }
+            signal.addEventListener('abort', function(){ combined._abort(signal.reason); });
+          }
+          return combined;
+        }
+      };
+      globalThis.AbortController = class AbortController {
+        constructor() { this.signal = new AbortSignal(); }
+        abort(reason) { this.signal._abort(reason); }
+      };
+      globalThis.DOMException = class DOMException extends Error {
+        constructor(message, name) { super(message); this.name = name || 'Error'; }
+      };
+      globalThis.structuredClone = function(value) { return JSON.parse(JSON.stringify(value)); };
+      globalThis.queueMicrotask = globalThis.queueMicrotask || function(fn) { Promise.resolve().then(fn); };
+      globalThis.URLSearchParams = class URLSearchParams {
+        constructor(init) {
+          this._pairs = [];
+          if (typeof init === 'string') {
+            for (const piece of init.replace(/^\?/, '').split('&')) {
+              if (!piece) continue;
+              const eq = piece.indexOf('=');
+              const name = decodeURIComponent(eq < 0 ? piece : piece.slice(0, eq)).replace(/\+/g, ' ');
+              const value = eq < 0 ? '' : decodeURIComponent(piece.slice(eq + 1).replace(/\+/g, ' '));
+              this._pairs.push([name, value]);
+            }
+          } else if (init && typeof init[Symbol.iterator] === 'function') {
+            for (const [name, value] of init) this._pairs.push([String(name), String(value)]);
+          } else if (init && typeof init === 'object') {
+            for (const name of Object.keys(init)) this._pairs.push([name, String(init[name])]);
+          }
+        }
+        append(name, value) { this._pairs.push([String(name), String(value)]); }
+        set(name, value) { this.delete(name); this.append(name, value); }
+        get(name) { const found = this._pairs.find(p => p[0] === name); return found ? found[1] : null; }
+        getAll(name) { return this._pairs.filter(p => p[0] === name).map(p => p[1]); }
+        has(name) { return this._pairs.some(p => p[0] === name); }
+        delete(name) { this._pairs = this._pairs.filter(p => p[0] !== name); }
+        forEach(fn, thisArg) { for (const [name, value] of this._pairs.slice()) fn.call(thisArg, value, name, this); }
+        keys() { return this._pairs.map(p => p[0])[Symbol.iterator](); }
+        values() { return this._pairs.map(p => p[1])[Symbol.iterator](); }
+        entries() { return this._pairs.map(p => [p[0], p[1]])[Symbol.iterator](); }
+        [Symbol.iterator]() { return this.entries(); }
+        get size() { return this._pairs.length; }
+        toString() {
+          return this._pairs.map(p => encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1])).join('&');
+        }
+        sort() { this._pairs.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0); }
+      };
       if (typeof globalThis.URL === 'undefined') {
         // The slice Emscripten and fetch-y libraries touch: parse, href, protocol, pathname.
         globalThis.URL = class URL {
@@ -1197,8 +1463,13 @@ final class NodeEngine: @unchecked Sendable {
             this.search = match[5] || '';
             this.hash = match[6] || '';
             this.origin = this.protocol + (this.hostname ? '//' + this.host : '');
+            this.searchParams = new URLSearchParams(this.search);
+            this.username = '';
+            this.password = '';
           }
           toString() { return this.href; }
+          toJSON() { return this.href; }
+          static canParse(input, base) { try { new URL(input, base); return true; } catch (e) { return false; } }
         };
       }
 
@@ -1445,6 +1716,28 @@ final class NodeEngine: @unchecked Sendable {
         version: 'v20.19.0',
         versions: { node: '20.19.0', mouse: '1.0.0' },
         pid: 1,
+        ppid: 0,
+        execArgv: [],
+        execPath: '/usr/local/bin/node',
+        title: 'node',
+        connected: false,
+        allowedNodeEnvironmentFlags: new Set(),
+        getuid: function(){ return 501; },
+        getgid: function(){ return 20; },
+        geteuid: function(){ return 501; },
+        getegid: function(){ return 20; },
+        umask: function(){ return 0o022; },
+        cpuUsage: function(){ return { user: 0, system: 0 }; },
+        resourceUsage: function(){ return { userCPUTime: 0, systemCPUTime: 0, maxRSS: 0 }; },
+        availableParallelism: function(){ return 1; },
+        hasUncaughtExceptionCaptureCallback: function(){ return false; },
+        setUncaughtExceptionCaptureCallback: function(){},
+        report: { getReport: function(){ return {}; } },
+        release: { name: 'node' },
+        features: { inspector: false, tls: true },
+        channel: undefined,
+        send: undefined,
+        disconnect: undefined,
         title: 'node',
         cwd: function(){ return __cwd; },
         chdir: function(){ throw new Error('process.chdir is not supported'); },
@@ -1569,6 +1862,9 @@ final class NodeEngine: @unchecked Sendable {
           },
         };
         path.posix = path;
+        // win32 delegates to the posix logic — this device has no Windows paths; only the
+        // separators differ for display.
+        path.win32 = Object.assign({}, path, { sep: '\\', delimiter: ';' });
         return path;
       };
 
@@ -1631,12 +1927,37 @@ final class NodeEngine: @unchecked Sendable {
               });
             };
           },
-          types: { isDate: v => v instanceof Date, isRegExp: v => v instanceof RegExp },
+          types: {
+            isDate: v => v instanceof Date,
+            isRegExp: v => v instanceof RegExp,
+            isNativeError: v => v instanceof Error,
+            isPromise: v => v instanceof Promise,
+            isProxy: () => false,
+            isTypedArray: v => ArrayBuffer.isView(v) && !(v instanceof DataView),
+          },
           deprecate: function(fn) { return fn; },
+          debuglog: function(section) {
+            const enabled = !!(__env.NODE_DEBUG && new RegExp('\\b' + section + '\\b', 'i').test(__env.NODE_DEBUG));
+            const logger = enabled
+              ? function(){ bridge.stderr(section.toUpperCase() + ': ' + format.apply(null, arguments) + '\n'); }
+              : function(){};
+            logger.enabled = enabled;
+            return logger;
+          },
+          callbackify: function(fn) {
+            return function(...args) {
+              const callback = args.pop();
+              fn.apply(this, args).then(value => callback(null, value), error => callback(error));
+            };
+          },
+          stripVTControlCharacters: function(text) {
+            return String(text).replace(/\u001b\[[0-9;?]*[0-9A-Za-z]|\u001b\][^\u0007]*(\u0007|\u001b\\)|\u001b[^[\]]/g, '');
+          },
           isArray: Array.isArray,
           isFunction: v => typeof v === 'function',
           isString: v => typeof v === 'string',
           isObject: v => v !== null && typeof v === 'object',
+          isDeepStrictEqual: function(a, b) { return JSON.stringify(a) === JSON.stringify(b); },
         };
       };
 
@@ -1655,6 +1976,17 @@ final class NodeEngine: @unchecked Sendable {
           EOL: '\n',
           userInfo: function(){ return { username: 'mouse', homedir: '/', shell: '/bin/msh' }; },
           endianness: function(){ return 'LE'; },
+          uptime: function(){ return Math.floor(Date.now() / 1000) % 86400; },
+          loadavg: function(){ return [0, 0, 0]; },
+          networkInterfaces: function(){ return {}; },
+          constants: {
+            signals: { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6,
+                       SIGFPE: 8, SIGKILL: 9, SIGBUS: 10, SIGSEGV: 11, SIGSYS: 12, SIGPIPE: 13,
+                       SIGALRM: 14, SIGTERM: 15, SIGURG: 16, SIGSTOP: 17, SIGTSTP: 18, SIGCONT: 19,
+                       SIGCHLD: 20, SIGTTIN: 21, SIGTTOU: 22, SIGIO: 23, SIGXCPU: 24, SIGXFSZ: 25,
+                       SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28, SIGINFO: 29, SIGUSR1: 30, SIGUSR2: 31 },
+            errno: { EACCES: 13, EEXIST: 17, ENOENT: 2, ENOTDIR: 20, EPERM: 1, EPIPE: 32 },
+          },
         };
       };
 
@@ -1820,6 +2152,8 @@ final class NodeEngine: @unchecked Sendable {
         return fs;
       };
       coreFactories['fs/promises'] = function() { return coreRequire('fs').promises; };
+      coreFactories['path/posix'] = function() { return coreRequire('path').posix; };
+      coreFactories['path/win32'] = function() { return coreRequire('path').win32; };
 
       coreFactories.tty = function() {
         return {
@@ -2175,6 +2509,22 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.process = function() { return process; };
+      coreFactories.timers = function() {
+        return { setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval,
+                 clearInterval: clearInterval, setImmediate: setImmediate, clearImmediate: clearImmediate };
+      };
+      coreFactories['timers/promises'] = function() {
+        return {
+          setTimeout: function(delay, value) { return new Promise(function(resolve){ setTimeout(function(){ resolve(value); }, delay); }); },
+          setImmediate: function(value) { return new Promise(function(resolve){ setImmediate(function(){ resolve(value); }); }); },
+          setInterval: function(delay, value) {
+            return { [Symbol.asyncIterator]() {
+              return { next() { return new Promise(function(resolve){ setTimeout(function(){ resolve({ value: value, done: false }); }, delay); }); } };
+            } };
+          },
+          scheduler: { wait: function(delay) { return new Promise(function(resolve){ setTimeout(resolve, delay); }); } },
+        };
+      };
       coreFactories.module = function() {
         const builtins = ['fs', 'path', 'os', 'util', 'events', 'buffer', 'tty', 'assert', 'url',
                           'child_process', 'http', 'https', 'stream', 'zlib', 'readline', 'crypto',
@@ -2187,7 +2537,17 @@ final class NodeEngine: @unchecked Sendable {
         moduleExports.Module = moduleExports;
         return moduleExports;
       };
-      coreFactories.buffer = function() { return { Buffer: Buffer }; };
+      coreFactories.buffer = function() {
+        return {
+          Buffer: Buffer,
+          SlowBuffer: Buffer,
+          kMaxLength: 0x7fffffff,
+          INSPECT_MAX_BYTES: 50,
+          constants: { MAX_LENGTH: 0x7fffffff, MAX_STRING_LENGTH: 0x1fffffe8 },
+          atob: globalThis.atob,
+          btoa: globalThis.btoa,
+        };
+      };
 
       // ---- child_process → msh (the bridge no other Node-on-iOS has) ----
       coreFactories.child_process = function() {
@@ -2323,6 +2683,18 @@ final class NodeEngine: @unchecked Sendable {
           clientRequest.on = EventEmitter.prototype.on.bind(clientRequest);
           return clientRequest;
         }
+        const EventEmitter = coreRequire('events');
+        const { Readable, Writable } = coreRequire('stream');
+        // The extendable class surface: HTTP client libraries subclass Agent and touch the
+        // message classes for instanceof checks.
+        class Agent extends EventEmitter {
+          constructor(options) { super(); this.options = options || {}; this.sockets = {}; this.requests = {}; }
+          destroy() {}
+        }
+        class IncomingMessage extends Readable {}
+        class OutgoingMessage extends Writable {}
+        class ClientRequest extends OutgoingMessage {}
+        class ServerResponse extends OutgoingMessage {}
         return {
           request: request,
           get: function(url, options, callback) {
@@ -2330,10 +2702,181 @@ final class NodeEngine: @unchecked Sendable {
             clientRequest.end();
             return clientRequest;
           },
+          Agent: Agent,
+          globalAgent: new Agent(),
+          IncomingMessage: IncomingMessage,
+          OutgoingMessage: OutgoingMessage,
+          ClientRequest: ClientRequest,
+          ServerResponse: ServerResponse,
+          createServer: function() { throw new Error('http servers are not available yet (the dev-server engine is on the roadmap)'); },
+          STATUS_CODES: { 200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found',
+                          304: 'Not Modified', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden',
+                          404: 'Not Found', 409: 'Conflict', 429: 'Too Many Requests',
+                          500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable' },
+          METHODS: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
         };
       }
       coreFactories.http = function() { return makeHttpModule('http:'); };
       coreFactories.https = function() { return makeHttpModule('https:'); };
+      // http2: libraries import it for the constants and gate actual use behind feature
+      // checks — the constants are real, sessions say what's missing.
+      coreFactories.http2 = function() {
+        return {
+          constants: {
+            HTTP2_HEADER_METHOD: ':method', HTTP2_HEADER_PATH: ':path',
+            HTTP2_HEADER_STATUS: ':status', HTTP2_HEADER_AUTHORITY: ':authority',
+            HTTP2_HEADER_SCHEME: ':scheme', HTTP2_HEADER_CONTENT_TYPE: 'content-type',
+            HTTP2_HEADER_CONTENT_LENGTH: 'content-length',
+            NGHTTP2_CANCEL: 8, NGHTTP2_NO_ERROR: 0,
+          },
+          connect: function() { throw new Error('http2 sessions are not available (fetch/https cover HTTP on this device)'); },
+          createServer: function() { throw new Error('http2 servers are not available (the dev-server engine is on the roadmap)'); },
+        };
+      };
+      // The feature-detect tail: bundled CLIs import these and gate real use behind checks.
+      // Each surface is import-safe and says the truth when actually exercised.
+      coreFactories.dns = function() {
+        function notFound(host) { return Object.assign(new Error('getaddrinfo ENOTFOUND ' + host), { code: 'ENOTFOUND', hostname: host }); }
+        const dns = {
+          lookup: function(host, options, callback) {
+            if (typeof options === 'function') callback = options;
+            // URLSession resolves names internally — standalone lookups have no resolver here.
+            setImmediate(function(){ callback(notFound(host)); });
+          },
+          resolve: function(host, type, callback) {
+            if (typeof type === 'function') callback = type;
+            setImmediate(function(){ callback(notFound(host)); });
+          },
+          promises: {
+            lookup: function(host) { return Promise.reject(notFound(host)); },
+            resolve: function(host) { return Promise.reject(notFound(host)); },
+          },
+        };
+        return dns;
+      };
+      coreFactories.worker_threads = function() {
+        return {
+          isMainThread: true,
+          threadId: 0,
+          parentPort: null,
+          workerData: null,
+          Worker: function() { throw new Error('worker_threads are not available (single JS thread on this device)'); },
+        };
+      };
+      coreFactories.async_hooks = function() {
+        // Synchronous continuation-local storage: real for sync flows, does not survive
+        // suspension across awaits — the honest subset a single-threaded loop can give.
+        class AsyncLocalStorage {
+          constructor() { this._store = undefined; }
+          run(store, fn, ...args) {
+            const previous = this._store;
+            this._store = store;
+            try { return fn(...args); } finally { this._store = previous; }
+          }
+          getStore() { return this._store; }
+          enterWith(store) { this._store = store; }
+          disable() { this._store = undefined; }
+          exit(fn, ...args) { return this.run(undefined, fn, ...args); }
+        }
+        return {
+          AsyncLocalStorage: AsyncLocalStorage,
+          AsyncResource: class AsyncResource {
+            constructor() {}
+            runInAsyncScope(fn, thisArg, ...args) { return fn.apply(thisArg, args); }
+            emitDestroy() { return this; }
+            static bind(fn) { return fn; }
+          },
+          createHook: function() { return { enable: function(){ return this; }, disable: function(){ return this; } }; },
+          executionAsyncId: function() { return 1; },
+          triggerAsyncId: function() { return 0; },
+        };
+      };
+      coreFactories.v8 = function() {
+        return {
+          getHeapStatistics: function() { return { total_heap_size: 0, used_heap_size: 0, heap_size_limit: 0 }; },
+          serialize: function(value) { return Buffer.from(JSON.stringify(value)); },
+          deserialize: function(buffer) { return JSON.parse(buffer.toString()); },
+        };
+      };
+      coreFactories.vm = function() {
+        return {
+          runInThisContext: function(code) { return (0, eval)(code); },
+          createContext: function(sandbox) { return sandbox || {}; },
+          Script: class Script {
+            constructor(code) { this._code = code; }
+            runInThisContext() { return (0, eval)(this._code); }
+          },
+        };
+      };
+      coreFactories.perf_hooks = function() {
+        return {
+          performance: globalThis.performance,
+          monitorEventLoopDelay: function() { return { enable: function(){}, disable: function(){}, mean: 0, percentile: function(){ return 0; } }; },
+          PerformanceObserver: class PerformanceObserver { observe() {} disconnect() {} },
+        };
+      };
+      coreFactories.inspector = function() {
+        return { url: function() { return undefined; }, open: function() { throw new Error('inspector is not available'); }, Session: class Session { connect() { throw new Error('inspector is not available'); } } };
+      };
+      coreFactories.dgram = function() {
+        return { createSocket: function() { throw new Error('UDP sockets are not available yet'); } };
+      };
+      coreFactories.diagnostics_channel = function() {
+        const channels = {};
+        class Channel {
+          constructor(name) { this.name = name; this._subs = []; }
+          get hasSubscribers() { return this._subs.length > 0; }
+          subscribe(fn) { this._subs.push(fn); }
+          unsubscribe(fn) { const i = this._subs.indexOf(fn); if (i >= 0) this._subs.splice(i, 1); return i >= 0; }
+          publish(message) { for (const fn of this._subs.slice()) fn(message, this.name); }
+        }
+        function channel(name) { return channels[name] = channels[name] || new Channel(name); }
+        return {
+          channel: channel,
+          hasSubscribers: function(name) { return !!channels[name] && channels[name].hasSubscribers; },
+          subscribe: function(name, fn) { channel(name).subscribe(fn); },
+          unsubscribe: function(name, fn) { return !!channels[name] && channels[name].unsubscribe(fn); },
+          tracingChannel: function(name) {
+            return { start: channel(name + ':start'), end: channel(name + ':end'), error: channel(name + ':error'),
+                     asyncStart: channel(name + ':asyncStart'), asyncEnd: channel(name + ':asyncEnd'),
+                     subscribe: function(){}, unsubscribe: function(){},
+                     traceSync: function(fn, ctx, thisArg, ...args) { return fn.apply(thisArg, args); },
+                     tracePromise: function(fn, ctx, thisArg, ...args) { return fn.apply(thisArg, args); } };
+          },
+        };
+      };
+      coreFactories['util/types'] = function() { return coreRequire('util').types; };
+      coreFactories.console = function() {
+        const consoleModule = Object.assign({}, globalThis.console);
+        consoleModule.Console = globalThis.console.Console;
+        consoleModule.default = consoleModule;
+        return consoleModule;
+      };
+      coreFactories.domain = function() {
+        const EventEmitter = coreRequire('events');
+        class Domain extends EventEmitter {
+          run(fn, ...args) { return fn(...args); }
+          add() {} remove() {} bind(fn) { return fn; } intercept(fn) { return fn; }
+          enter() {} exit() {}
+        }
+        return { create: function() { return new Domain(); }, Domain: Domain };
+      };
+      coreFactories.cluster = function() {
+        return { isPrimary: true, isMaster: true, isWorker: false, fork: function() { throw new Error('cluster is not available (single process)'); }, workers: {} };
+      };
+      // tls: like net — imported for types/feature checks; URLSession owns real TLS here.
+      coreFactories.tls = function() {
+        const net = coreRequire('net');
+        class TLSSocket extends net.Socket {}
+        return {
+          TLSSocket: TLSSocket,
+          connect: function() { return new TLSSocket().connect(); },
+          createServer: function() { return new net.Server(); },
+          rootCertificates: [],
+          DEFAULT_MIN_VERSION: 'TLSv1.2',
+          DEFAULT_MAX_VERSION: 'TLSv1.3',
+        };
+      };
 
       // Real readline: line assembly over any Readable. On a TTY it takes raw mode and does
       // its own editing (echo, backspace, ^C→SIGINT) — the cooked-mode discipline a real
@@ -2604,20 +3147,65 @@ final class NodeEngine: @unchecked Sendable {
         return zlib;
       };
 
-      for (const missing of ['net']) {
-        coreFactories[missing] = (function(name){
-          return function() {
-            const stub = {};
-            const explain = function(){
-              throw new Error("The '" + name + "' module is not available yet (system.md phase G scope)");
-            };
-            return new Proxy(stub, { get: function(target, property) {
-              if (property === 'then' || typeof property === 'symbol') return undefined;
-              return explain;
-            }});
-          };
-        })(missing);
-      }
+      // net: the address helpers are real; sockets carry the sandbox's truth — nothing
+      // listens in-process and there is no server engine yet, so connects refuse and
+      // listens error (the dev-server phase makes these real).
+      coreFactories.net = function() {
+        const EventEmitter = coreRequire('events');
+        const { Duplex } = coreRequire('stream');
+        function fail(target, code, syscall) {
+          setImmediate(function(){
+            target.emit('error', Object.assign(new Error(syscall + ' ' + code), { code: code, syscall: syscall }));
+          });
+        }
+        class Socket extends Duplex {
+          constructor() { super(); this.connecting = false; this.destroyed = false; }
+          connect() {
+            this.connecting = true;
+            fail(this, 'ECONNREFUSED', 'connect');
+            return this;
+          }
+          setNoDelay() { return this; }
+          setKeepAlive() { return this; }
+          setTimeout() { return this; }
+          ref() { return this; }
+          unref() { return this; }
+          address() { return {}; }
+        }
+        class Server extends EventEmitter {
+          listen() {
+            const callback = typeof arguments[arguments.length - 1] === 'function' ? arguments[arguments.length - 1] : null;
+            if (callback) this.once('listening', callback);
+            fail(this, 'EPERM', 'listen');
+            return this;
+          }
+          close(callback) { if (callback) setImmediate(callback); return this; }
+          address() { return null; }
+          ref() { return this; }
+          unref() { return this; }
+        }
+        function isIPv4(text) {
+          const parts = String(text).split('.');
+          return parts.length === 4 && parts.every(function(p){ return /^\d{1,3}$/.test(p) && Number(p) <= 255; });
+        }
+        function isIPv6(text) {
+          return /^[0-9a-fA-F:]+$/.test(String(text)) && String(text).includes(':');
+        }
+        return {
+          Socket: Socket,
+          Server: Server,
+          createServer: function(handler) {
+            const server = new Server();
+            if (typeof handler === 'function') server.on('connection', handler);
+            return server;
+          },
+          createConnection: function() { return new Socket().connect(); },
+          connect: function() { return new Socket().connect(); },
+          isIPv4: isIPv4,
+          isIPv6: isIPv6,
+          isIP: function(text) { return isIPv4(text) ? 4 : isIPv6(text) ? 6 : 0; },
+        };
+      };
 
       function coreRequire(name) {
         if (coreCache[name]) return coreCache[name];
