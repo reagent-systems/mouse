@@ -32,9 +32,22 @@ real** (28 fixtures): TTY line editing over raw mode — echo, backspace,
 ^C→SIGINT — plus `question` in callback and promise forms, and line
 splitting from any Readable. **`crypto` and `zlib` are real** (CryptoKit
 digests/HMAC + the system CSPRNG; libz gzip/deflate/raw — 30 fixtures
-matching real node). **Next:** API breadth for real agent CLIs, then
-phase B (WebView JIT) for speed. Unhandled-rejection exit codes are
-parked, with the reason recorded below.
+matching real node). **Real npm packages now run** — commander@15
+(pure-ESM CLI framework) and the interactive `prompts` library, end to
+end, keystrokes to answer — and chasing ink exposed and fixed a layer of
+engine gaps: **top-level await** (ESM evaluates under async wrappers;
+imports await only genuinely-pending dependencies, real ESM's
+infection), import attributes (`with {type:'json'}`), `export * as`,
+require-error eviction (a failing module can't linger as partial
+exports), `module.createRequire`, `require.resolve`, web globals
+(TextDecoder/TextEncoder/atob/btoa/URL), and a sync-backed
+`WebAssembly.instantiate` (JSC's async wasm never settles on a bare
+JSContext) — the yoga-layout wasm engine compiles and runs. 32 fixtures
+matching real node (v22), 42 TTY-harness assertions. **Next:** the last
+ink seam (yoga's exports arrive through one import path without
+Node/Config — under investigation), then phase B (WebView JIT).
+Unhandled-rejection exit codes are parked, with the reason recorded
+below.
 
 ### Shipped and verified this cycle
 
@@ -149,6 +162,37 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   exactly; compression verifies by round trip, gzip magic bytes, and a
   gzip→gunzip pipe chain — 30 fixtures total, all matching. NodeEngine
   now imports CryptoKit + zlib, so headless harness builds add `-lz`
+- **Real-package proof** — the honest discovery method: install genuine
+  npm packages through our own PackageManager and run them, fixing what
+  breaks. commander@15 (pure ESM, `"type": "module"`) parses and runs a
+  CLI byte-identical to real node v22 through `require()`. The
+  interactive `prompts` library runs END TO END in the TTY harness:
+  installed on the spot, takes raw mode, its real keypress consumer gets
+  parsed `(str, key)` events (readline.emitKeypressEvents is now a real
+  byte→keypress parser: printables, ctrl-letters, the CSI key set), and
+  the typed answer — with a backspace-free "bob" — lands on the grid.
+  Engine gaps found and fixed by the chase toward ink: THREE transpiler
+  holes (trailing-comment `export {…}; //`, `export * as name from`,
+  import attributes `with {type:'json'}`); require-error semantics (a
+  module throwing mid-evaluation is now evicted and rethrown in the
+  requiring frame via a JS-side trampoline — it used to linger as partial
+  exports with the error dissolving at the native boundary); TOP-LEVEL
+  AWAIT (every ESM module now evaluates under an async wrapper whose
+  imports await only genuinely-pending dependencies — sync modules run
+  sync, `module.__esmDone` inspected the moment the call returns, so CJS
+  `require(esm)` still gets exports synchronously; a TLA module suspends
+  its importers exactly like real ESM; the entry's promise keeps the
+  event loop alive, exit 13 if it can never settle, node's code);
+  `module.createRequire` + `require.resolve` + `import.meta.resolve`;
+  fs accepting `file://` URLs; web globals (TextDecoder/TextEncoder/
+  atob/btoa/minimal URL, Buffer latin1/binary); and WebAssembly.
+  instantiate/compile re-backed by the SYNC wasm constructors (JSC's
+  async wasm promises never settle on a bare JSContext — no runloop).
+  The yoga-layout Emscripten wasm binary now instantiates and returns
+  its 35-export API through our engine. Verified: 32 fixtures matching
+  real node v22 (new: esm-tla — TLA entry + infected import + dynamic
+  import + attributes; commander-cli end-to-end from our installed
+  tree), 42 TTY assertions, e2e-through-msh, sh corpus, Swift 6 build
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

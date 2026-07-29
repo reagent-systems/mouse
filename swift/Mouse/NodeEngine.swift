@@ -82,6 +82,8 @@ final class NodeEngine: @unchecked Sendable {
     /// stdin has listeners on an attached TTY — the program is waiting on the keyboard,
     /// which keeps the event loop alive exactly like node's ref'd stdin.
     private var stdinActive = false
+    /// The ESM entry's top-level await hasn't settled yet — the loop keeps driving.
+    private var entryPending = false
 
     init(root: URL, env: [String: String], shell: ShellBridge? = nil, tty: TTY? = nil) {
         self.root = root
@@ -172,14 +174,38 @@ final class NodeEngine: @unchecked Sendable {
         context.evaluateScript(Self.bootstrap)
 
         let dir = virtualDirname(path)
-        if isESModule(id: normalize(path), source: source) {
-            source = Self.transpileESM(source)
-        }
-        let wrapped = wrapModule(source)
-        if let function = wrapped {
+        let entryIsESM = isESModule(id: normalize(path), source: source)
+        if entryIsESM { source = Self.transpileESM(source) }
+        if let function = wrapModule(source, async: entryIsESM) {
             let module = context.evaluateScript("({exports: {}})")!
             let require = makeRequire(fromDir: dir)
-            function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir])
+            if entryIsESM {
+                // The entry may hold a real top-level await (directly or through an import).
+                // The event loop drives it; settle/reject arrives as a microtask.
+                let entrySettled: @convention(block) (JSValue?) -> Void = { [weak self] error in
+                    guard let self else { return }
+                    self.entryPending = false
+                    if let error, !error.isUndefined, !error.isNull, self.exitCode == nil {
+                        let text = error.toString() ?? "unknown error"
+                        let stack = error.forProperty("stack")?.toString() ?? text
+                        self.err += (stack.contains(text) ? stack : text + "\n" + stack) + "\n"
+                        self.exitCode = 1
+                    }
+                }
+                let launcher = context.evaluateScript("""
+                    (function(fn, exports, require, module, filename, dirname, settled){
+                        fn(exports, require, module, filename, dirname)
+                            .then(function(){ settled(undefined); },
+                                  function(e){ settled(e === undefined || e === null ? new Error('undefined thrown') : e); });
+                        return module.__esmDone === true || module.__esmError !== undefined;
+                    })
+                    """)!
+                let finished = launcher.call(withArguments: [function, module.forProperty("exports")!, require, module, path, dir,
+                                                             JSValue(object: entrySettled, in: context)!])
+                entryPending = finished?.toBool() != true
+            } else {
+                function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir])
+            }
         }
         if let fatal, exitCode == nil {
             err += fatal.hasSuffix("\n") ? fatal : fatal + "\n"
@@ -191,16 +217,18 @@ final class NodeEngine: @unchecked Sendable {
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
 
-    private func wrapModule(_ source: String) -> JSValue? {
+    private func wrapModule(_ source: String, async: Bool = false) -> JSValue? {
         var body = source
         if body.hasPrefix("#!") {
             body = String(body.drop(while: { $0 != "\n" }))
         }
-        let wrapped = "(function(exports, require, module, __filename, __dirname){\n" + body + "\n})"
+        let keyword = async ? "async function" : "function"
+        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname){\n" + body + "\n})"
         let function = context.evaluateScript(wrapped)
         guard let function, function.isObject else { return nil }
         return function
     }
+
 
     // MARK: - Event loop
 
@@ -232,7 +260,12 @@ final class NodeEngine: @unchecked Sendable {
             }
 
             let next = timers.min(by: { $0.due < $1.due })
-            if next == nil, outstanding == 0, !stdinActive { break }
+            if next == nil, outstanding == 0, !stdinActive {
+                // Quiescent with the entry's top-level await still pending: nothing can
+                // ever settle it. Real node exits 13 here.
+                if entryPending { exitCode = 13 }
+                break
+            }
             if let next {
                 let wait = next.due.timeIntervalSinceNow
                 if wait > 0 {
@@ -487,6 +520,13 @@ final class NodeEngine: @unchecked Sendable {
             return Self.zlibCode(input, deflating: deflating, windowBits: windowBits)?.base64EncodedString()
         }
         expose("zlibTransform", zlibTransform)
+        let createRequireBlock: @convention(block) (String) -> Any = { [weak self] fromPath in
+            guard let self else { return NSNull() }
+            var from = fromPath
+            if from.hasPrefix("file://") { from = String(from.dropFirst(7)) }
+            return self.makeRequire(fromDir: self.virtualDirname(self.normalize(from)))
+        }
+        expose("createRequire", createRequireBlock)
 
         context.setObject(bridge, forKeyedSubscript: "__mouse" as NSString)
         context.setObject(argv, forKeyedSubscript: "__argv" as NSString)
@@ -570,7 +610,7 @@ final class NodeEngine: @unchecked Sendable {
         "fs", "path", "os", "util", "events", "buffer", "tty", "assert", "url",
         "child_process", "http", "https", "net", "crypto", "stream", "zlib",
         "readline", "readline/promises", "string_decoder", "constants", "querystring",
-        "fs/promises", "stream/promises", "process",
+        "fs/promises", "stream/promises", "process", "module",
     ]
 
     private func resolveModule(_ rawRequest: String, fromDir: String) -> Resolution {
@@ -685,20 +725,42 @@ final class NodeEngine: @unchecked Sendable {
             guard let self else { return NSNull() }
             return self.requireModule(request, fromDir: fromDir)
         }
+        let resolveBlock: @convention(block) (String) -> Any = { [weak self] request in
+            guard let self else { return NSNull() }
+            switch self.resolveModule(request, fromDir: fromDir) {
+            case .core(let name): return "node:" + name
+            case .file(let id), .json(let id): return id
+            case .notFound(let message): return ["__mouseRequireError": message]
+            }
+        }
         // Errors must throw IN the requiring frame — a native block can't, so a JS wrapper
         // inspects the marker and throws there.
         let factory = context.evaluateScript("""
-            (function(native){ return function require(specifier){
-                const result = native(String(specifier));
-                if (result && result.__mouseRequireError) {
-                    const error = new Error(result.__mouseRequireError);
-                    error.code = 'MODULE_NOT_FOUND';
-                    throw error;
+            (function(native, nativeResolve){
+                function require(specifier){
+                    const result = native(String(specifier));
+                    if (result && result.__mouseRequireError) {
+                        const error = new Error(result.__mouseRequireError);
+                        error.code = 'MODULE_NOT_FOUND';
+                        throw error;
+                    }
+                    if (result && result.__mouseRequireThrow) throw result.__mouseRequireThrow;
+                    return result;
                 }
-                return result;
-            }; })
+                require.resolve = function(specifier){
+                    const result = nativeResolve(String(specifier));
+                    if (result && result.__mouseRequireError) {
+                        const error = new Error(result.__mouseRequireError);
+                        error.code = 'MODULE_NOT_FOUND';
+                        throw error;
+                    }
+                    return result;
+                };
+                return require;
+            })
             """)!
-        return factory.call(withArguments: [JSValue(object: requireBlock, in: context)!])!
+        return factory.call(withArguments: [JSValue(object: requireBlock, in: context)!,
+                                            JSValue(object: resolveBlock, in: context)!])!
     }
 
     private func requireModule(_ request: String, fromDir: String) -> Any {
@@ -725,16 +787,58 @@ final class NodeEngine: @unchecked Sendable {
                   var source = String(data: data, encoding: .utf8) else {
                 return throwInJS("Cannot read '\(id)'")
             }
-            if isESModule(id: id, source: source) {
-                source = Self.transpileESM(source)
-            }
-            guard let function = wrapModule(source) else {
+            let esm = isESModule(id: id, source: source)
+            if esm { source = Self.transpileESM(source) }
+            // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
+            // dependency); CJS stays a plain sync function.
+            guard let function = wrapModule(source, async: esm) else {
                 return throwInJS("Cannot parse '\(id)'")
             }
             let module = context.evaluateScript("({exports: {}})")!
             moduleCache[id] = module.forProperty("exports")
             let require = makeRequire(fromDir: virtualDirname(id))
-            function.call(withArguments: [module.forProperty("exports")!, require, module, id, virtualDirname(id)])
+            if esm {
+                // Three sync-inspectable outcomes: done (body never suspended — exports are
+                // ready now, the common case), thrown (evict, rethrow in the requiring
+                // frame), or pending (real top-level await — requirers receive a promise of
+                // the exports; transpiled importers await it, real ESM's infection).
+                let trampoline = context.evaluateScript("""
+                    (function(fn, exports, require, module, filename, dirname){
+                        const promise = fn(exports, require, module, filename, dirname);
+                        if (module.__esmError !== undefined) {
+                            promise.catch(function(){});
+                            const e = module.__esmError;
+                            return { thrown: { __mouseRequireThrow: e === null ? new Error('null thrown') : e } };
+                        }
+                        if (module.__esmDone) { promise.catch(function(){}); return { done: true }; }
+                        return { pending: promise.then(function(){ return module.exports; }) };
+                    })
+                    """)!
+                let outcome = trampoline.call(withArguments: [function, module.forProperty("exports")!, require, module, id, virtualDirname(id)])!
+                if let thrown = outcome.forProperty("thrown"), !thrown.isUndefined {
+                    moduleCache.removeValue(forKey: id)
+                    return thrown
+                }
+                if let pending = outcome.forProperty("pending"), !pending.isUndefined {
+                    moduleCache[id] = pending
+                    return pending
+                }
+            } else {
+                // A module that throws mid-evaluation must not linger as partial exports:
+                // catch JS-side (so the exception never dissolves at the native boundary),
+                // evict, and rethrow the ORIGINAL error in the requiring frame.
+                let trampoline = context.evaluateScript("""
+                    (function(fn, exports, require, module, filename, dirname){
+                        try { fn(exports, require, module, filename, dirname); return null; }
+                        catch (e) { return { __mouseRequireThrow: e === undefined ? new Error('undefined thrown') : e }; }
+                    })
+                    """)!
+                let outcome = trampoline.call(withArguments: [function, module.forProperty("exports")!, require, module, id, virtualDirname(id)])
+                if let outcome, outcome.isObject, outcome.forProperty("__mouseRequireThrow")?.isUndefined == false {
+                    moduleCache.removeValue(forKey: id)
+                    return outcome
+                }
+            }
             let exports = module.forProperty("exports")!
             moduleCache[id] = exports
             return exports
@@ -820,12 +924,18 @@ final class NodeEngine: @unchecked Sendable {
                 .joined(separator: ", ")
         }
 
+        // Every import site awaits ONLY a genuinely-pending (top-level-await) dependency:
+        // `if (x instanceof Promise) x = await x`. A fully-sync dependency evaluates without
+        // suspension, so sync modules stay sync under the async wrapper; a TLA dependency
+        // suspends its importers — the same infection real ESM has.
+        func requireSettled(_ temp: String, _ module: String) -> String {
+            "let \(temp) = require('\(module)'); if (\(temp) instanceof Promise) \(temp) = await \(temp);"
+        }
         // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns
-        replace(#"^\s*import\s+(?:(\w+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+(\w+)|(\w+))\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+        replace(#"^\s*import\s+(?:(\w+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+(\w+)|(\w+))\s+from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
-            let module = group(match, 5, ns)!
-            var lines = ["const \(temp) = require('\(module)');"]
+            var lines = [requireSettled(temp, group(match, 5, ns)!)]
             if let defaultName = group(match, 1, ns) ?? group(match, 4, ns) {
                 lines.append("const \(defaultName) = __esmDefault(\(temp));")
             }
@@ -838,25 +948,35 @@ final class NodeEngine: @unchecked Sendable {
             return lines.joined(separator: " ")
         }
         // import 'mod'
-        replace(#"^\s*import\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
-            "require('\(group(match, 1, ns)!)');"
+        replace(#"^\s*import\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+            counter += 1
+            return requireSettled("__esm\(counter)", group(match, 1, ns)!)
+        }
+        // export * as name from 'mod'   (ansi-escapes@7 re-exports its base this way —
+        // must run before the bare `export * from` rule, whose pattern is a prefix of this)
+        replace(#"^\s*export\s*\*\s*as\s+(\w+)\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+            counter += 1
+            let temp = "__esm\(counter)"
+            return requireSettled(temp, group(match, 2, ns)!) + " module.exports.\(group(match, 1, ns)!) = \(temp);"
         }
         // export * from 'mod'  /  export { a, b as c } from 'mod'
         replace(#"^\s*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
-            "Object.assign(module.exports, require('\(group(match, 1, ns)!)'));"
-        }
-        replace(#"^\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
-            let module = group(match, 2, ns)!
-            var lines = ["const \(temp) = require('\(module)');"]
+            return requireSettled(temp, group(match, 1, ns)!) + " Object.assign(module.exports, \(temp));"
+        }
+        replace(#"^\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+            counter += 1
+            let temp = "__esm\(counter)"
+            var lines = [requireSettled(temp, group(match, 2, ns)!)]
             for binding in bindings(group(match, 1, ns)!) {
                 lines.append("module.exports.\(binding.alias) = \(temp).\(binding.source);")
             }
             return lines.joined(separator: " ")
         }
-        // export { a, b as c };
-        replace(#"^\s*export\s*\{([^}]*)\}\s*;?\s*$"#) { match, ns in
+        // export { a, b as c };   — a trailing line comment must not defeat the match
+        // (commander@15 ends one with "; // Deprecated").
+        replace(#"^\s*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
             bindings(group(match, 1, ns)!)
                 .map { "module.exports.\($0.alias) = \($0.source);" }
                 .joined(separator: " ")
@@ -875,7 +995,8 @@ final class NodeEngine: @unchecked Sendable {
             epilogue.append("module.exports.\(name) = \(name);")
             return "\(group(match, 1, ns)!) \(name)"
         }
-        // dynamic import() and import.meta.url
+        // dynamic import() and import.meta.*
+        text = text.replacingOccurrences(of: "import.meta.resolve", with: "require.resolve")
         text = text.replacingOccurrences(of: "import.meta.url", with: "('file://' + __filename)")
         if let regex = try? NSRegularExpression(pattern: #"\bimport\s*\("#) {
             let ns = text as NSString
@@ -883,7 +1004,13 @@ final class NodeEngine: @unchecked Sendable {
                                                   withTemplate: "__dynamicImport(require, ")
         }
 
-        return "module.exports.__esModule = true;\n" + text + "\n;" + epilogue.joined(separator: "\n")
+        // The body runs under an ASYNC wrapper (imports may await). The try/catch makes the
+        // sync outcome inspectable the moment the wrapper call returns: __esmDone means the
+        // whole body ran without suspending (the common case — requirers get exports
+        // synchronously, as before); __esmError preserves throw-in-requiring-frame
+        // semantics; neither means genuine top-level await in flight.
+        return "module.exports.__esModule = true;\ntry {\n" + text + "\n;" + epilogue.joined(separator: "\n")
+            + "\n;module.__esmDone = true;\n} catch (__esmThrown) { module.__esmError = __esmThrown; throw __esmThrown; }"
     }
 
     private func throwInJS(_ message: String) -> Any {
@@ -965,6 +1092,11 @@ final class NodeEngine: @unchecked Sendable {
               for (let i = 0; i < value.length; i += 2) bytes.push(parseInt(value.substr(i, 2), 16));
               return new Buffer(bytes);
             }
+            if (encoding === 'latin1' || encoding === 'binary') {
+              const bytes = new Uint8Array(value.length);
+              for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff;
+              return new Buffer(bytes);
+            }
             return new Buffer(utf8Encode(value));
           }
           if (value instanceof ArrayBuffer) return new Buffer(new Uint8Array(value));
@@ -989,6 +1121,11 @@ final class NodeEngine: @unchecked Sendable {
           const bytes = Array.from(this);
           if (encoding === 'base64') return b64Encode(bytes);
           if (encoding === 'hex') return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+          if (encoding === 'latin1' || encoding === 'binary') {
+            let out = '';
+            for (let i = 0; i < bytes.length; i += 8192) out += String.fromCharCode.apply(null, bytes.slice(i, i + 8192));
+            return out;
+          }
           return utf8Decode(bytes);
         }
         slice(start, end) { return new Buffer(super.slice(start, end)); }
@@ -997,11 +1134,72 @@ final class NodeEngine: @unchecked Sendable {
       }
       globalThis.Buffer = Buffer;
 
+      // ---- Web globals JSC doesn't ship (wasm/Emscripten glue expects them) ----
+      globalThis.TextEncoder = class TextEncoder {
+        get encoding() { return 'utf-8'; }
+        encode(text) { return new Uint8Array(Buffer.from(String(text), 'utf8')); }
+      };
+      globalThis.TextDecoder = class TextDecoder {
+        constructor(encoding) { this.encoding = (encoding || 'utf-8').toLowerCase(); }
+        decode(view) {
+          if (view === undefined) return '';
+          const buffer = Buffer.from(view.buffer ? new Uint8Array(view.buffer, view.byteOffset, view.byteLength) : view);
+          return buffer.toString(this.encoding === 'utf-16le' ? 'utf16le' : 'utf8');
+        }
+      };
+      globalThis.atob = function(base64) { return Buffer.from(String(base64), 'base64').toString('binary'); };
+      globalThis.btoa = function(binary) { return Buffer.from(String(binary), 'binary').toString('base64'); };
+      // JSC's ASYNC wasm APIs never settle on a bare JSContext (their completion needs a
+      // runloop the dispatch-queue thread doesn't run) — the sync constructors work, so the
+      // async surface resolves through them on the microtask queue.
+      if (typeof WebAssembly === 'object') {
+        WebAssembly.instantiate = function(source, imports) {
+          return new Promise(function(resolve, reject) {
+            try {
+              if (source instanceof WebAssembly.Module) {
+                resolve(new WebAssembly.Instance(source, imports));
+              } else {
+                const module = new WebAssembly.Module(source);
+                resolve({ module: module, instance: new WebAssembly.Instance(module, imports) });
+              }
+            } catch (e) { reject(e); }
+          });
+        };
+        WebAssembly.compile = function(source) {
+          return new Promise(function(resolve, reject) {
+            try { resolve(new WebAssembly.Module(source)); } catch (e) { reject(e); }
+          });
+        };
+      }
+      if (typeof globalThis.URL === 'undefined') {
+        // The slice Emscripten and fetch-y libraries touch: parse, href, protocol, pathname.
+        globalThis.URL = class URL {
+          constructor(input, base) {
+            let text = String(input);
+            if (base && !/^[a-zA-Z][\w+.-]*:/.test(text)) {
+              const baseText = String(base && base.href ? base.href : base);
+              text = baseText.replace(/[^/]*$/, '') + text;
+            }
+            this.href = text;
+            const match = text.match(/^([a-zA-Z][\w+.-]*:)(?:\/\/([^/?#:]*)(?::(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/) || [];
+            this.protocol = match[1] || '';
+            this.hostname = match[2] || '';
+            this.port = match[3] || '';
+            this.host = this.hostname + (this.port ? ':' + this.port : '');
+            this.pathname = match[4] || '';
+            this.search = match[5] || '';
+            this.hash = match[6] || '';
+            this.origin = this.protocol + (this.hostname ? '//' + this.host : '');
+          }
+          toString() { return this.href; }
+        };
+      }
+
       // ---- ESM interop (the transpiler emits these) ----
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
       globalThis.__dynamicImport = function(require, specifier) {
-        return Promise.resolve().then(function() {
-          const m = require(specifier);
+        // Promise flattening settles a pending (top-level-await) module before wrapping.
+        return Promise.resolve().then(function() { return require(specifier); }).then(function(m) {
           return m && m.__esModule ? m : Object.assign({ default: m }, m);
         });
       };
@@ -1392,7 +1590,12 @@ final class NodeEngine: @unchecked Sendable {
 
       coreFactories.fs = function() {
         const path = coreRequire('path');
-        function resolvePath(p) { return path.resolve(String(p)); }
+        function resolvePath(p) {
+          // fs accepts file:// URLs (strings or URL objects) like real node.
+          let text = String(p && p.href ? p.href : p);
+          if (text.startsWith('file://')) text = text.slice(7);
+          return path.resolve(text);
+        }
         function toEncoding(options) {
           if (typeof options === 'string') return options;
           return options && options.encoding ? options.encoding : null;
@@ -1902,6 +2105,18 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.process = function() { return process; };
+      coreFactories.module = function() {
+        const builtins = ['fs', 'path', 'os', 'util', 'events', 'buffer', 'tty', 'assert', 'url',
+                          'child_process', 'http', 'https', 'stream', 'zlib', 'readline', 'crypto',
+                          'string_decoder', 'constants', 'querystring', 'module'];
+        const moduleExports = {
+          createRequire: function(from) { return bridge.createRequire(String(from && from.href ? from.href : from)); },
+          builtinModules: builtins,
+          isBuiltin: function(name) { return builtins.includes(String(name).replace(/^node:/, '')); },
+        };
+        moduleExports.Module = moduleExports;
+        return moduleExports;
+      };
       coreFactories.buffer = function() { return { Buffer: Buffer }; };
 
       // ---- child_process → msh (the bridge no other Node-on-iOS has) ----
@@ -2121,10 +2336,56 @@ final class NodeEngine: @unchecked Sendable {
           }
         }
         function toStream(stream) { return stream || process.stdout; }
+        // Byte stream → (str, key) pairs, the contract prompt libraries (prompts, inquirer,
+        // ink) actually consume. Covers printables, ctrl-letters, and the CSI key set.
+        function wireKeypress(stream) {
+          if (stream.__keypressWired) return;
+          stream.__keypressWired = true;
+          const csiNames = { A: 'up', B: 'down', C: 'right', D: 'left', H: 'home', F: 'end' };
+          const tildeNames = { 1: 'home', 3: 'delete', 4: 'end', 5: 'pageup', 6: 'pagedown' };
+          stream.on('data', function(chunk) {
+            const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
+            let i = 0;
+            while (i < text.length) {
+              let sequence, str, name, ctrl = false, meta = false, shift = false;
+              const ch = text[i];
+              if (ch === '\u001b' && (text[i + 1] === '[' || text[i + 1] === 'O')) {
+                let j = i + 2;
+                while (j < text.length && !/[A-Za-z~]/.test(text[j])) j += 1;
+                sequence = text.slice(i, j + 1);
+                const body = text.slice(i + 2, j).split(';');
+                const final = text[j];
+                if (csiNames[final]) name = csiNames[final];
+                else if (final === '~') name = tildeNames[body[0]];
+                const modifier = parseInt(body[1] || '1', 10) - 1;
+                shift = !!(modifier & 1); meta = !!(modifier & 2); ctrl = !!(modifier & 4);
+                i = j + 1;
+              } else if (ch === '\u001b' && i + 1 < text.length) {
+                sequence = text.slice(i, i + 2);
+                meta = true;
+                name = text[i + 1].toLowerCase();
+                i += 2;
+              } else {
+                sequence = ch;
+                i += 1;
+                const code = ch.charCodeAt(0);
+                if (ch === '\r') name = 'return';
+                else if (ch === '\n') name = 'enter';
+                else if (ch === '\t') name = 'tab';
+                else if (ch === '\u007f' || ch === '\b') name = 'backspace';
+                else if (ch === '\u001b') name = 'escape';
+                else if (ch === ' ') { name = 'space'; str = ch; }
+                else if (code < 27) { name = String.fromCharCode(code + 96); ctrl = true; }
+                else { str = ch; name = ch.toLowerCase(); shift = ch !== name && ch.toUpperCase() === ch; }
+              }
+              stream.emit('keypress', str, { sequence: sequence, name: name, ctrl: ctrl, meta: meta, shift: shift });
+            }
+          });
+        }
         const readline = {
           Interface: Interface,
           createInterface: function(options) { return new Interface(options || {}); },
-          emitKeypressEvents: function() {},
+          emitKeypressEvents: function(stream) { if (stream) wireKeypress(stream); },
           cursorTo: function(stream, x, y, callback) {
             toStream(stream).write(y === undefined || y === null ? '\u001b[' + (x + 1) + 'G' : '\u001b[' + (y + 1) + ';' + (x + 1) + 'H');
             if (callback) callback();
