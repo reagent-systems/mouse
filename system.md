@@ -68,7 +68,10 @@ speed. Unhandled-rejection exit codes are parked, with the reason
 recorded below. **A real claude-code ink frame now renders aligned on the
 phase-T screen** — the config-recovery dialog, a clean bordered box —
 after adding ONLCR (NL→CR-NL) at the NodeProgram PTY boundary; without it
-ink's bare-`\n` frames sheared diagonally.
+ink's bare-`\n` frames sheared diagonally. **The terminal now ANSWERS
+queries too** (DSR/DA/DECRQM via `AnsiParser.respond` → the program's
+stdin), so a TUI that probes cursor position or feature support gets its
+reply instead of hanging.
 
 ### Shipped and verified this cycle
 
@@ -331,6 +334,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   verified end-to-end headlessly (load → first frame → width/height
   repaints), all against the pyte reference; what remains is live-driving
   on device and phase B
+- **Terminal query→response protocol — the reply half of the TTY.** A TUI
+  doesn't just write; it ASKS: DSR (`ESC[6n`, "where's the cursor?"), DA
+  (`ESC[c`, "what are you?"), DECRQM (`ESC[?2026$p`, "is synchronized
+  output on?") — and BLOCKS reading stdin for the answer. Our parser
+  consumed these silently and answered nothing, so a program gating on a
+  reply would hang (claude-code's bundle emits DSR). Added
+  `AnsiParser.respond`, wired by `TerminalSession.launch` to the program's
+  `input` (cleared on exit): `ESC[6n` → `ESC[<row>;<col>R`, `ESC[5n` →
+  `ESC[0n`, primary DA → `ESC[?6c` (VT102), secondary DA → `ESC[>0;10;0c`,
+  DECRQM → `ESC[?<n>;<state>$y` (2=recognized-but-reset for 2026/2004;
+  live state for cursor-visibility and alt-screen). Verified end-to-end:
+  a program parks its cursor, emits all three queries, and receives
+  exactly `ESC[1;6R` + `ESC[?6c` + `ESC[?2026;2$y` on stdin, then exits —
+  no hang. `respond` is nil for the pyte cross-check and static renders,
+  so queries stay screen-invisible there and BOTH the ~60-assertion xterm
+  corpus and the pyte cross-check still pass. 55 TTY assertions, 35 node
+  fixtures, e2e, sh corpus, Swift 6 build — green
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming

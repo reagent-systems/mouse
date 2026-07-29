@@ -50,6 +50,15 @@ translation belongs at the PTY substitute (`NodeProgram.onlcr`), never in
 cross-check. Regression: a captured real ink frame (claude-code's
 config-recovery box) must render byte-for-byte against pyte with ONLCR
 applied, and shear without it.
+**Terminal query replies go out through `AnsiParser.respond`.** DSR
+(`ESC[6n`), DA (`ESC[c`/`ESC[>c`), and DECRQM (`ESC[?<n>$p`) are questions
+a TUI asks and BLOCKS on; the answer travels back on the program's stdin.
+`TerminalSession.launch` wires `parser.respond` to `program.input` (and
+clears it on exit). When `respond` is nil (the pyte cross-check, static
+renders) queries are consumed silently and the screen is untouched, so
+the cross-check is unaffected — verify both: a program that emits the
+three queries must receive the exact replies on stdin and not hang, and
+the pyte cross-check must still pass.
 The msh LANGUAGE (`ShellLanguage.swift` + the evaluator in `Shell.swift`)
 verifies against **real `/bin/sh`**: the same script corpus runs through
 `shell.runProgram("sh script.sh", …)` and through `/bin/sh script.sh` in

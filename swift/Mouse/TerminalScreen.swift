@@ -397,6 +397,12 @@ final class AnsiParser {
     private var intermediates = ""
     private var oscBuffer = ""
 
+    /// The reply path for terminal queries (DSR, DA, DECRQM): a real terminal answers on the
+    /// program's stdin, so a TUI that probes cursor position or feature support gets its
+    /// answer and proceeds instead of blocking. nil when no one is driving stdin (the pyte
+    /// cross-check, static renders) — queries are then consumed silently, as before.
+    var respond: ((String) -> Void)?
+
     init(screen: TerminalScreen) {
         self.screen = screen
     }
@@ -541,8 +547,50 @@ final class AnsiParser {
         case "m": applySGR()
         case "h" where isPrivate: setMode(numericParameters, enabled: true)
         case "l" where isPrivate: setMode(numericParameters, enabled: false)
+        case "n": deviceStatusReport(isPrivate: isPrivate)
+        case "c": deviceAttributes(isPrivate: isPrivate)
+        case "p" where intermediates.contains("$"): reportMode()
         default: break   // unimplemented sequences are consumed, never printed as garbage
         }
+    }
+
+    /// DSR — the program asks the terminal's status. `ESC[5n` → OK, `ESC[6n` → the cursor's
+    /// 1-based position. The reply travels back on stdin, like a real tty.
+    private func deviceStatusReport(isPrivate: Bool) {
+        guard let respond else { return }
+        switch numericParameters.first ?? 0 {
+        case 5: respond("\u{1b}[0n")
+        case 6: respond("\u{1b}[\(screen.cursorRow + 1);\(screen.cursorColumn + 1)R")
+        default: break
+        }
+    }
+
+    /// DA — "what are you?" Primary (`ESC[c`) answers a VT102 with no options; secondary
+    /// (`ESC[>c`) answers a terminal-type/version triple. Enough for the feature checks
+    /// modern CLIs run before enabling colour or the alt screen.
+    private func deviceAttributes(isPrivate: Bool) {
+        guard let respond else { return }
+        if parameters.hasPrefix(">") {
+            respond("\u{1b}[>0;10;0c")   // "VT220-ish", version 10 — matches xterm's shape
+        } else {
+            respond("\u{1b}[?6c")        // VT102
+        }
+    }
+
+    /// DECRQM — "is mode N set?" `ESC[?<n>$p` → `ESC[?<n>;<state>$y`, where state 1=set,
+    /// 2=reset. TUIs query synchronized output (2026) and bracketed paste (2004) this way to
+    /// decide whether to use them; answering "reset but recognized" (2) is the honest reply.
+    private func reportMode() {
+        guard let respond else { return }
+        guard let mode = numericParameters.first else { return }
+        let state: Int
+        switch mode {
+        case 25: state = screen.cursorVisible ? 1 : 2
+        case 1049, 47, 1047: state = screen.isAlternate ? 1 : 2
+        case 2026, 2004: state = 2   // recognized, not currently set
+        default: state = 0           // not recognized
+        }
+        respond("\u{1b}[?\(mode);\(state)$y")
     }
 
     private func setMode(_ modes: [Int], enabled: Bool) {

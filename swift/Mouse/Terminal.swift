@@ -116,6 +116,10 @@ final class TerminalSession {
         screen.resize(rows: gridRows, columns: gridColumns)
         self.program = program
         screenGeneration += 1
+        // Terminal query replies (DSR/DA/DECRQM) travel back to the program as keystrokes —
+        // the same path a real tty answers on. A program probing cursor position or feature
+        // support gets its answer and proceeds instead of blocking on stdin.
+        parser.respond = { [weak program] reply in program?.input(reply) }
         program.start(io: TerminalProgramIO(
             rows: gridRows,
             columns: gridColumns,
@@ -151,6 +155,7 @@ final class TerminalSession {
     private func programExited() {
         guard program != nil else { return }
         program = nil
+        parser.respond = nil
         // A crashed-out program must not strand the terminal on the alt screen.
         if screen.isAlternate { parser.feed("\u{1b}[?25h\u{1b}[?1049l") }
         screenGeneration += 1
