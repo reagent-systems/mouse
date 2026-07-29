@@ -521,13 +521,18 @@ final class MouseShell {
             return try await callFunction(body: body, args: args, stdin: stdin, state: state)
         }
 
+        let clean = !redirectedOut && state.sink.captureBuffer == nil
+        let interactive = clean && state.interactiveAllowed
+            && (pipelinePosition == .solo || pipelinePosition == .last)
+
         // ./script.sh, path/to/script.sh: a file in the workspace runs as a script.
         if name.contains("/") || name.hasSuffix(".sh") {
             if let resolved = resolve(name, context: state.context),
                FileManager.default.fileExists(atPath: resolved.url.path),
                let source = try? String(contentsOf: resolved.url, encoding: .utf8) {
                 if name.hasSuffix(".js") || source.hasPrefix("#!") && source.prefix(while: { $0 != "\n" }).contains("node") {
-                    return await runNode(source: source, path: "/" + resolved.rel, args: args, stdin: stdin, context: state.context)
+                    return await runNode(source: source, path: "/" + resolved.rel, args: args, stdin: stdin,
+                                         context: state.context, title: name, interactive: interactive)
                 }
                 return try await runScript(source: source, name: name, args: args, stdin: stdin, state: state)
             }
@@ -536,12 +541,10 @@ final class MouseShell {
         // Installed package bins are commands: run them on the Node layer.
         if let manifest = PackageManager.readManifest(root: state.context.root),
            let binPath = manifest.bins[name] {
-            return await runInstalledBin(binPath, args: args, stdin: stdin, context: state.context)
+            return await runInstalledBin(binPath, args: args, stdin: stdin, context: state.context,
+                                         title: name, interactive: interactive)
         }
 
-        let clean = !redirectedOut && state.sink.captureBuffer == nil
-        let interactive = clean && state.interactiveAllowed
-            && (pipelinePosition == .solo || pipelinePosition == .last)
         return await dispatch(argv, stdin: stdin, context: state.context,
                               streaming: clean && pipelinePosition == .solo,
                               interactive: interactive)
@@ -1228,8 +1231,8 @@ final class MouseShell {
         case "apt", "apt-get", "dpkg", "brew":
             return IO(err: "\(name): no system packages on iOS; npm installs JavaScript packages", status: 1)
         case "npm", "pnpm", "yarn": return await npmCmd(tool: name, args, context: context)
-        case "npx": return await npxCmd(args, stdin: stdin, context: context)
-        case "node": return await nodeCmd(args, stdin: stdin, context: context)
+        case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
+        case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1244,7 +1247,8 @@ final class MouseShell {
             return IO(err: "\(name): not built yet", status: 127)
         default:
             if let manifest = PackageManager.readManifest(root: context.root), let binPath = manifest.bins[name] {
-                return await runInstalledBin(binPath, args: args, stdin: stdin, context: context)
+                return await runInstalledBin(binPath, args: args, stdin: stdin, context: context,
+                                             title: name, interactive: interactive)
             }
             return IO(err: "msh: command not found: \(name) (type help)", status: 127)
         }
@@ -1252,12 +1256,12 @@ final class MouseShell {
 
     // MARK: - node (the phase-G engine behind `node`, bins, and npx)
 
-    private func nodeCmd(_ args: [String], stdin: String, context: Context) async -> IO {
+    private func nodeCmd(_ args: [String], stdin: String, context: Context, interactive: Bool) async -> IO {
         if args.first == "-v" || args.first == "--version" { return IO(out: "v20.19.0\n") }
         if args.first == "-e" || args.first == "--eval" {
             guard args.count >= 2 else { return IO(err: "node: -e needs code\n", status: 2) }
             return await runNode(source: args[1], path: "/[eval].js", args: Array(args.dropFirst(2)),
-                                 stdin: stdin, context: context)
+                                 stdin: stdin, context: context, title: "node -e", interactive: interactive)
         }
         guard let file = args.first else { return IO(err: "node: usage: node <file> | -e <code>\n", status: 2) }
         guard let resolved = resolve(file, context: context),
@@ -1265,25 +1269,26 @@ final class MouseShell {
             return IO(err: "node: can't read \(file)\n", status: 1)
         }
         return await runNode(source: source, path: "/" + resolved.rel, args: Array(args.dropFirst()),
-                             stdin: stdin, context: context)
+                             stdin: stdin, context: context, title: "node \(file)", interactive: interactive)
     }
 
-    private func runInstalledBin(_ binPath: String, args: [String], stdin: String, context: Context) async -> IO {
+    private func runInstalledBin(_ binPath: String, args: [String], stdin: String, context: Context,
+                                 title: String, interactive: Bool = false) async -> IO {
         let url = context.root.appendingPathComponent(binPath)
         guard let source = try? String(contentsOf: url, encoding: .utf8) else {
             return IO(err: "msh: missing bin file: \(binPath)\n", status: 127)
         }
-        return await runNode(source: source, path: "/" + binPath, args: args, stdin: stdin, context: context)
+        return await runNode(source: source, path: "/" + binPath, args: args, stdin: stdin,
+                             context: context, title: title, interactive: interactive)
     }
 
     /// node → sh → node … recursion (a JS tool exec-ing itself) stops here, not in a stack
     /// overflow.
     private var nodeDepth = 0
 
-    private func runNode(source: String, path: String, args: [String], stdin: String, context: Context) async -> IO {
+    private func runNode(source: String, path: String, args: [String], stdin: String, context: Context,
+                         title: String = "node", interactive: Bool = false) async -> IO {
         guard nodeDepth < 8 else { return IO(err: "node: recursion too deep\n", status: 1) }
-        nodeDepth += 1
-        defer { nodeDepth -= 1 }
         let bridge = NodeEngine.ShellBridge { @MainActor [weak self] command in
             guard let self else { return ("", "msh: shell gone\n", 1) }
             let outputs = await self.runProgram(command, context: context, interactive: false)
@@ -1293,6 +1298,20 @@ final class MouseShell {
             if !err.isEmpty { err += "\n" }
             return (out, err, self.lastStatus)
         }
+        // A terminal to stand on: the program owns stdin, decides transcript vs screen, and
+        // the command returns now — like every full-screen launch (less, top).
+        if interactive, stdin.isEmpty, let launch = context.launchProgram {
+            let engine = NodeEngine(root: context.root, env: env, shell: bridge)
+            let program = NodeProgram(
+                title: title, source: source, path: path, argv: ["node", path] + args,
+                cwd: "/" + cwd, engine: engine,
+                transcript: { line, isError in context.emit(Output(text: line, isError: isError)) },
+                onExit: { context.reloadTree() })
+            launch(program)
+            return IO()
+        }
+        nodeDepth += 1
+        defer { nodeDepth -= 1 }
         let engine = NodeEngine(root: context.root, env: env, shell: bridge)
         let result = await engine.run(source: source, path: path, argv: ["node", path] + args,
                                       cwd: "/" + cwd, stdin: stdin)
@@ -1367,7 +1386,7 @@ final class MouseShell {
         }
     }
 
-    private func npxCmd(_ args: [String], stdin: String, context: Context) async -> IO {
+    private func npxCmd(_ args: [String], stdin: String, context: Context, interactive: Bool = false) async -> IO {
         guard let spec = args.first(where: { !$0.hasPrefix("-") }) else {
             return IO(err: "npx: usage: npx <package>", status: 2)
         }
@@ -1388,7 +1407,8 @@ final class MouseShell {
                 ?? manifest.flatMap({ $0.bins.count == 1 ? $0.bins.first?.value : nil }) else {
             return IO(err: "npx: \(name) installs no executables", status: 1)
         }
-        return await runInstalledBin(binPath, args: extraArgs, stdin: stdin, context: context)
+        return await runInstalledBin(binPath, args: extraArgs, stdin: stdin, context: context,
+                                     title: short, interactive: interactive)
     }
 
     static let builtinNames: Set<String> = [

@@ -33,9 +33,24 @@ final class NodeEngine: @unchecked Sendable {
         let execute: @MainActor (String) async -> (out: String, err: String, status: Int32)
     }
 
+    /// Where a running program's output goes when it owns a terminal: live, not accumulated.
+    /// nil = collect into `Result` (pipelines, scripts, the headless harness).
+    struct TTY: @unchecked Sendable {
+        let write: (String) -> Void
+        /// stderr's live sink — same screen on a real TTY, but the host keeps the error
+        /// coloring while the program is still in transcript mode.
+        let writeError: (String) -> Void
+        var rows: Int
+        var columns: Int
+        /// The program asked for raw keystrokes (`stdin.setRawMode(true)`) — the host uses
+        /// this to decide the screen is now the program's.
+        let rawModeChanged: (Bool) -> Void
+    }
+
     private let root: URL
     private let env: [String: String]
     private let shell: ShellBridge?
+    private var tty: TTY?
     private let queue = DispatchQueue(label: "mouse.node", qos: .userInitiated)
     private var context: JSContext!
     private var out = ""
@@ -62,11 +77,54 @@ final class NodeEngine: @unchecked Sendable {
     private var jobs: [() -> Void] = []
     private var outstanding = 0
     private var cancelled = false
+    /// stdin has listeners on an attached TTY — the program is waiting on the keyboard,
+    /// which keeps the event loop alive exactly like node's ref'd stdin.
+    private var stdinActive = false
 
-    init(root: URL, env: [String: String], shell: ShellBridge? = nil) {
+    init(root: URL, env: [String: String], shell: ShellBridge? = nil, tty: TTY? = nil) {
         self.root = root
         self.env = env
         self.shell = shell
+        self.tty = tty
+    }
+
+    /// Attach the terminal after init — the host program can't hand closures over itself
+    /// to its own initializer. Must happen before `run`.
+    func attachTTY(_ tty: TTY) {
+        self.tty = tty
+    }
+
+    // MARK: - Live input (a program owning the keyboard)
+
+    /// A keystroke from the host. Delivered to `process.stdin` handlers on the JS thread.
+    func deliverInput(_ text: String) {
+        enqueueJob { [weak self] in
+            guard let self, let context = self.context else { return }
+            let function = context.objectForKeyedSubscript("__mouseDeliverInput")
+            function?.call(withArguments: [text])
+        }
+    }
+
+    /// The terminal changed size: update `process.stdout.columns/rows` and emit `resize`.
+    func resizeTTY(rows: Int, columns: Int) {
+        enqueueJob { [weak self] in
+            guard let self, let context = self.context else { return }
+            self.tty?.rows = rows
+            self.tty?.columns = columns
+            context.objectForKeyedSubscript("__mouseResize")?.call(withArguments: [rows, columns])
+        }
+    }
+
+    /// SIGINT (^C in cooked mode, or the container closing). Runs the program's handlers;
+    /// a program with none ends here. In raw mode the host sends the ^C byte through
+    /// `deliverInput` instead — that is the terminal discipline real ttys follow.
+    func interrupt() {
+        enqueueJob { [weak self] in
+            guard let self, let context = self.context else { return }
+            if context.objectForKeyedSubscript("__mouseSigint")?.call(withArguments: [])?.toBool() != true {
+                self.exitCode = 130
+            }
+        }
     }
 
     private func enqueueJob(_ job: @escaping () -> Void) {
@@ -172,7 +230,7 @@ final class NodeEngine: @unchecked Sendable {
             }
 
             let next = timers.min(by: { $0.due < $1.due })
-            if next == nil, outstanding == 0 { break }
+            if next == nil, outstanding == 0, !stdinActive { break }
             if let next {
                 let wait = next.due.timeIntervalSinceNow
                 if wait > 0 {
@@ -208,8 +266,23 @@ final class NodeEngine: @unchecked Sendable {
             bridge.setObject(block, forKeyedSubscript: name as NSString)
         }
 
-        let stdoutWrite: @convention(block) (String) -> Void = { [weak self] text in self?.out += text }
-        let stderrWrite: @convention(block) (String) -> Void = { [weak self] text in self?.err += text }
+        let stdoutWrite: @convention(block) (String) -> Void = { [weak self] text in
+            guard let self else { return }
+            if let tty = self.tty { tty.write(text) } else { self.out += text }
+        }
+        let stderrWrite: @convention(block) (String) -> Void = { [weak self] text in
+            guard let self else { return }
+            // A program owning the screen draws stderr there too — that is what a TTY does.
+            if let tty = self.tty { tty.writeError(text) } else { self.err += text }
+        }
+        let setRawMode: @convention(block) (Bool) -> Void = { [weak self] raw in
+            self?.tty?.rawModeChanged(raw)
+        }
+        expose("setRawMode", setRawMode)
+        let stdinActiveBlock: @convention(block) (Bool) -> Void = { [weak self] active in
+            self?.stdinActive = active   // JS thread — same thread as the event loop
+        }
+        expose("stdinActive", stdinActiveBlock)
         let exitBlock: @convention(block) (Int32) -> Void = { [weak self] code in
             if self?.exitCode == nil { self?.exitCode = code }
         }
@@ -364,6 +437,9 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(env, forKeyedSubscript: "__env" as NSString)
         context.setObject(cwd, forKeyedSubscript: "__cwd" as NSString)
         context.setObject(stdin, forKeyedSubscript: "__stdin" as NSString)
+        context.setObject(tty != nil, forKeyedSubscript: "__isTTY" as NSString)
+        context.setObject(tty?.rows ?? 24, forKeyedSubscript: "__ttyRows" as NSString)
+        context.setObject(tty?.columns ?? 80, forKeyedSubscript: "__ttyColumns" as NSString)
     }
 
     // MARK: - Paths (workspace-virtual ↔ real)
@@ -910,6 +986,111 @@ final class NodeEngine: @unchecked Sendable {
           fn.apply(null, args);
         }
       };
+      // ---- stdio streams (real TTY semantics when the host attached one) ----
+      const signalHandlers = { SIGINT: [], SIGTERM: [], SIGWINCH: [] };
+      function makeOutputStream(sink) {
+        const listeners = {};
+        return {
+          isTTY: __isTTY,
+          columns: __ttyColumns,
+          rows: __ttyRows,
+          write: function(chunk, encoding, callback) {
+            sink(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+            if (typeof encoding === 'function') encoding();
+            else if (typeof callback === 'function') callback();
+            return true;
+          },
+          on: function(event, handler){ (listeners[event] = listeners[event] || []).push(handler); return this; },
+          once: function(event, handler){ return this.on(event, handler); },
+          off: function(){ return this; },
+          removeListener: function(){ return this; },
+          emit: function(event){
+            const args = Array.prototype.slice.call(arguments, 1);
+            for (const handler of listeners[event] || []) handler.apply(null, args);
+            return true;
+          },
+          end: function(){}, cork: function(){}, uncork: function(){},
+          getColorDepth: function(){ return __isTTY ? 8 : 1; },
+          hasColors: function(){ return __isTTY; },
+        };
+      }
+      function makeInputStream() {
+        const listeners = {};
+        let paused = false;
+        let buffered = __stdin;
+        // A TTY with someone listening keeps the process alive, like node's ref'd stdin —
+        // without this the event loop would see quiescence and end a program mid-wait.
+        function updateLiveness() {
+          if (!__isTTY || !bridge.stdinActive) return;
+          const listening = ['data', 'readable', 'keypress'].some(function(e){ return (listeners[e] || []).length; });
+          bridge.stdinActive(listening && !paused);
+        }
+        const stream = {
+          isTTY: __isTTY,
+          isRaw: false,
+          _encoding: null,
+          setEncoding: function(value){ stream._encoding = value; return this; },
+          setRawMode: function(raw){
+            stream.isRaw = !!raw;
+            if (bridge.setRawMode) bridge.setRawMode(!!raw);
+            return this;
+          },
+          on: function(event, handler){
+            (listeners[event] = listeners[event] || []).push(handler);
+            // Piped stdin arrives once, like a closed pipe; a TTY streams as keys are typed.
+            if (!__isTTY && event === 'data' && buffered.length) {
+              const payload = buffered;
+              buffered = '';
+              setImmediate(function(){ stream.emit('data', stream._encoding ? payload : Buffer.from(payload)); });
+              setImmediate(function(){ stream.emit('end'); });
+            }
+            updateLiveness();
+            return this;
+          },
+          once: function(event, handler){ return this.on(event, handler); },
+          off: function(event, handler){
+            const list = listeners[event] || [];
+            const index = list.indexOf(handler);
+            if (index >= 0) list.splice(index, 1);
+            updateLiveness();
+            return this;
+          },
+          removeListener: function(event, handler){ return this.off(event, handler); },
+          removeAllListeners: function(event){ if (event) delete listeners[event]; else for (const k of Object.keys(listeners)) delete listeners[k]; updateLiveness(); return this; },
+          listenerCount: function(event){ return (listeners[event] || []).length; },
+          emit: function(event){
+            const args = Array.prototype.slice.call(arguments, 1);
+            for (const handler of (listeners[event] || []).slice()) handler.apply(null, args);
+            return true;
+          },
+          resume: function(){ paused = false; updateLiveness(); return this; },
+          pause: function(){ paused = true; updateLiveness(); return this; },
+          read: function(){ const value = buffered; buffered = ''; return value.length ? value : null; },
+          pipe: function(destination){ stream.on('data', c => destination.write(c)); return destination; },
+          unref: function(){ return this; }, ref: function(){ return this; },
+        };
+        return stream;
+      }
+
+      // Host → JS: one keystroke, delivered as data — never a signal. The host owns the
+      // terminal discipline: cooked-mode ^C arrives via __mouseSigint instead.
+      globalThis.__mouseDeliverInput = function(text) {
+        const stdin = process.stdin;
+        stdin.emit('data', stdin._encoding ? text : Buffer.from(text));
+      };
+      globalThis.__mouseResize = function(rows, columns) {
+        process.stdout.rows = rows; process.stdout.columns = columns;
+        process.stderr.rows = rows; process.stderr.columns = columns;
+        process.stdout.emit('resize');
+        for (const handler of signalHandlers.SIGWINCH.slice()) handler('SIGWINCH');
+      };
+      /// Returns true when the program handles SIGINT itself (the host then leaves it running).
+      globalThis.__mouseSigint = function() {
+        if (!signalHandlers.SIGINT.length) return false;
+        for (const handler of signalHandlers.SIGINT.slice()) handler('SIGINT');
+        return true;
+      };
+
       const process = {
         argv: __argv.slice(),
         env: Object.assign({}, __env),
@@ -936,35 +1117,21 @@ final class NodeEngine: @unchecked Sendable {
           return [seconds, nanos];
         },
         memoryUsage: function(){ return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0 }; },
-        on: function(){ return process; },
-        once: function(){ return process; },
-        off: function(){ return process; },
-        removeListener: function(){ return process; },
+        on: function(event, handler){
+          if (signalHandlers[event]) signalHandlers[event].push(handler);
+          return process;
+        },
+        once: function(event, handler){ return process.on(event, handler); },
+        off: function(event, handler){
+          const list = signalHandlers[event];
+          if (list) { const i = list.indexOf(handler); if (i >= 0) list.splice(i, 1); }
+          return process;
+        },
+        removeListener: function(event, handler){ return process.off(event, handler); },
         emit: function(){ return false; },
-        stdout: {
-          isTTY: false,
-          write: function(chunk){ bridge.stdout(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString()); return true; },
-          columns: 80, rows: 24,
-          on: function(){ return this; }, once: function(){ return this; }, end: function(){},
-        },
-        stderr: {
-          isTTY: false,
-          write: function(chunk){ bridge.stderr(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString()); return true; },
-          columns: 80, rows: 24,
-          on: function(){ return this; }, once: function(){ return this; }, end: function(){},
-        },
-        stdin: {
-          isTTY: false,
-          setEncoding: function(){ return this; },
-          on: function(event, handler){
-            if (event === 'data' && __stdin.length) setImmediate(() => handler(Buffer.from(__stdin)));
-            if (event === 'end') setImmediate(() => handler());
-            return this;
-          },
-          once: function(event, handler){ return this.on(event, handler); },
-          resume: function(){ return this; }, pause: function(){ return this; },
-          read: function(){ return __stdin.length ? __stdin : null; },
-        },
+        stdout: makeOutputStream(bridge.stdout),
+        stderr: makeOutputStream(bridge.stderr),
+        stdin: makeInputStream(),
       };
       globalThis.process = process;
       globalThis.hrtimeBase = Date.now();
@@ -1245,7 +1412,11 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories['fs/promises'] = function() { return coreRequire('fs').promises; };
 
       coreFactories.tty = function() {
-        return { isatty: function(){ return false; } };
+        return {
+          isatty: function(fd){ return __isTTY && (fd === 0 || fd === 1 || fd === 2); },
+          ReadStream: function(){ return process.stdin; },
+          WriteStream: function(){ return process.stdout; },
+        };
       };
 
       coreFactories.assert = function() {

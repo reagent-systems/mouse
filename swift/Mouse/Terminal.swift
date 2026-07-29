@@ -93,6 +93,12 @@ final class TerminalSession {
     /// immediately; the command's own cancellation cleanup (ping's statistics line) follows
     /// as it winds down.
     func interrupt() {
+        if let program {
+            // ^C is a keystroke to a program — it decides what to do (and the host stops it
+            // when it has no SIGINT handler of its own).
+            program.input("\u{3}")
+            return
+        }
         guard isRunning else { return }
         append("^C", .command)
         runningTask?.cancel()
@@ -218,7 +224,7 @@ struct TerminalContainerView: View {
                     // the size it will draw into.
                     GeometryReader { geo in
                         Group {
-                            if terminal.program != nil {
+                            if terminal.program?.rendersScreen == true {
                                 TerminalScreenGrid(terminal: terminal)
                             } else {
                                 // Bottom-anchored like a chat: content sticks to the bottom

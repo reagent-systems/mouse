@@ -18,6 +18,10 @@ import Foundation
 protocol TerminalProgram: AnyObject {
     /// Shown where the prompt lives while the program runs ("less README.md", "top").
     var title: String { get }
+    /// True when this program draws on the SCREEN (alt screen / raw keys); false while it
+    /// merely streams lines, which belong in the scrollback. `less` and `top` are always
+    /// true; a Node program decides at runtime — `node build.js` prints, `node tui.js` draws.
+    var rendersScreen: Bool { get }
     /// Called once. Enter the alt screen first (`ESC[?1049h`) — the terminal renders the grid
     /// while a program is running — then paint.
     func start(io: TerminalProgramIO)
@@ -43,6 +47,7 @@ struct TerminalProgramIO {
 @MainActor
 final class PagerProgram: TerminalProgram {
     let title: String
+    let rendersScreen = true
     private let lines: [String]
     private var wrapped: [String] = []
     /// First visible wrapped row.
@@ -145,6 +150,7 @@ final class PagerProgram: TerminalProgram {
 @MainActor
 final class TopProgram: TerminalProgram {
     let title = "top"
+    let rendersScreen = true
     private let snapshot: @MainActor () -> [String]
     private var io: TerminalProgramIO?
     private var rows = 24
@@ -197,5 +203,168 @@ final class TopProgram: TerminalProgram {
         ticker?.cancel()
         io?.write("\u{1b}[?25h\u{1b}[?1049l")
         io?.exit()
+    }
+}
+
+/// A Node program holding the terminal: the join between phase T (the screen) and phase G
+/// (the runtime). JavaScript writes go through the host's ANSI parser, keystrokes reach
+/// `process.stdin`, and rotation is a real `resize` event — so a CLI written for a TTY
+/// behaves as it would on one.
+///
+/// Mode is decided by the program, not by us: output stays in the SCROLLBACK until the
+/// script asks for raw keys (`stdin.setRawMode(true)`) or switches to the alt screen, at
+/// which point the grid takes over. `node build.js` prints lines like any command;
+/// `node tui.js` draws. That is exactly the two-mode rule real terminals follow.
+@MainActor
+final class NodeProgram: TerminalProgram {
+    let title: String
+    private(set) var rendersScreen = false
+
+    /// Called per complete output line while the program is in TRANSCRIPT mode (screen-mode
+    /// writes feed the grid through `io.write` instead). Escapes are stripped: the
+    /// scrollback renders plain text.
+    private let transcript: (String, _ isError: Bool) -> Void
+    private let onExit: () -> Void
+    private let engine: NodeEngine
+    private let source: String
+    private let path: String
+    private let argv: [String]
+    private let cwd: String
+    private var io: TerminalProgramIO?
+    private var task: Task<Void, Never>?
+    /// Raw mode = keystrokes are bytes, ^C included; cooked mode = ^C is SIGINT.
+    private var rawMode = false
+    /// Transcript text still waiting for its newline.
+    private var pendingLine = ""
+    private var pendingLineIsError = false
+
+    /// The caller builds the engine (it owns root/env/shell); the program attaches the TTY.
+    init(title: String, source: String, path: String, argv: [String], cwd: String,
+         engine: NodeEngine,
+         transcript: @escaping (String, _ isError: Bool) -> Void,
+         onExit: @escaping () -> Void) {
+        self.title = title
+        self.source = source
+        self.path = path
+        self.argv = argv
+        self.cwd = cwd
+        self.engine = engine
+        self.transcript = transcript
+        self.onExit = onExit
+    }
+
+    func start(io: TerminalProgramIO) {
+        self.io = io
+        // Attached here, not in init: the program is born knowing the grid it draws into —
+        // a TUI measures process.stdout.columns in its first breath.
+        // The closures hop to the main actor: the engine calls them from its JS thread.
+        engine.attachTTY(NodeEngine.TTY(
+            write: { [weak self] text in Task { @MainActor in self?.receive(text, isError: false) } },
+            writeError: { [weak self] text in Task { @MainActor in self?.receive(text, isError: true) } },
+            rows: io.rows,
+            columns: io.columns,
+            rawModeChanged: { [weak self] raw in Task { @MainActor in self?.rawModeChanged(raw) } }
+        ))
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await self.engine.run(source: self.source, path: self.path,
+                                               argv: self.argv, cwd: self.cwd, stdin: "")
+            // TTY writes streamed live; what's left in the result is the crash report
+            // (a fatal exception's stack lands there, not in the stream).
+            if !result.err.isEmpty { self.receive(result.err, isError: true) }
+            self.flushPendingLine()
+            if self.rendersScreen {
+                // Leave the screen the way a well-behaved program would.
+                self.io?.write("\u{1b}[?25h\u{1b}[?1049l")
+            }
+            self.onExit()
+            self.io?.exit()
+        }
+    }
+
+    func input(_ text: String) {
+        // The terminal discipline: cooked-mode ^C is a signal (handlers or death), raw-mode
+        // ^C is just a byte the program reads.
+        if text == "\u{3}", !rawMode {
+            engine.interrupt()
+        } else {
+            engine.deliverInput(text)
+        }
+    }
+
+    func resize(rows: Int, columns: Int) {
+        engine.resizeTTY(rows: rows, columns: columns)
+    }
+
+    private func rawModeChanged(_ raw: Bool) {
+        rawMode = raw
+        // Raw keys mean the program is drawing its own UI (ink repaints in place, no alt
+        // screen) — the grid takes over from here.
+        if raw { enterScreenMode() }
+    }
+
+    /// Output from the engine (already hopped to the main actor).
+    private func receive(_ text: String, isError: Bool) {
+        if !rendersScreen, text.contains("\u{1b}[?1049h") || text.contains("\u{1b}[?1047h") || text.contains("\u{1b}[?47h") {
+            enterScreenMode()
+        }
+        if rendersScreen {
+            io?.write(text)
+            return
+        }
+        // Transcript mode: line-buffer, and emit complete lines with escapes stripped.
+        // Scalar-level splitting: to Swift, "\r\n" is ONE Character, invisible to a
+        // Character-level search for "\n".
+        if pendingLineIsError != isError { flushPendingLine() }
+        pendingLineIsError = isError
+        pendingLine += text
+        while let newline = pendingLine.unicodeScalars.firstIndex(of: "\n") {
+            let scalars = pendingLine.unicodeScalars
+            let line = String(String.UnicodeScalarView(scalars[..<newline]))
+            pendingLine = String(String.UnicodeScalarView(scalars[scalars.index(after: newline)...]))
+            transcript(Self.strippingEscapes(line), isError)
+        }
+    }
+
+    private func flushPendingLine() {
+        guard !pendingLine.isEmpty else { return }
+        transcript(Self.strippingEscapes(pendingLine), pendingLineIsError)
+        pendingLine = ""
+    }
+
+    /// The program took the screen: the scrollback keeps what it already said (like a shell
+    /// keeps its history when vim opens), and the grid gets everything from here on.
+    private func enterScreenMode() {
+        guard !rendersScreen else { return }
+        flushPendingLine()
+        rendersScreen = true
+    }
+
+    /// Drop ANSI escape sequences (CSI, OSC, and two-byte ESC forms) and carriage returns —
+    /// the scrollback is plain text. Scalar-level for the same CRLF reason as above.
+    static func strippingEscapes(_ text: String) -> String {
+        var result = String.UnicodeScalarView()
+        var iterator = text.unicodeScalars.makeIterator()
+        while let scalar = iterator.next() {
+            if scalar == "\r" { continue }
+            guard scalar == "\u{1b}" else { result.append(scalar); continue }
+            guard let kind = iterator.next() else { break }
+            if kind == "[" {
+                // CSI: parameters and intermediates end at a final byte @–~.
+                while let byte = iterator.next() {
+                    if (0x40...0x7e).contains(byte.value) { break }
+                }
+            } else if kind == "]" {
+                // OSC: runs to BEL or ESC \.
+                var previous = kind
+                while let byte = iterator.next() {
+                    if byte.value == 0x7 { break }
+                    if previous == "\u{1b}", byte == "\\" { break }
+                    previous = byte
+                }
+            }
+            // Two-byte forms (ESC =, ESC >, …): the kind byte itself is consumed.
+        }
+        return String(result)
     }
 }

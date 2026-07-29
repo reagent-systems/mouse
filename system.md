@@ -21,9 +21,12 @@ verified** — one commit per phase, verification recorded below. The
 install rule holds end-to-end for pure-JS CJS tools: `npm install <pkg>`
 then `<bin>` executes on device. **Phase G part 2 landed too**: ES modules
 (transpile-to-CJS), the `child_process`→msh bridge (JS calls Mouse's
-native git), and `fetch`/`https` over URLSession. **Next:** stdin/TTY
-through `TerminalProgram` (so ink-style CLIs draw on the phase-T screen),
-stream depth, then phase B (WebView JIT) for speed.
+native git), and `fetch`/`https` over URLSession. **The T↔G join landed
+next**: `node`/`npx`/installed bins run as terminal *programs* —
+`process.stdin` gets real keystrokes, raw mode or the alt screen hands the
+program the phase-T grid (the ink model), cooked-mode ^C is SIGINT,
+rotation is a `resize` event. **Next:** stream depth and API breadth for
+real agent CLIs, then phase B (WebView JIT) for speed.
 
 ### Shipped and verified this cycle
 
@@ -37,6 +40,7 @@ stream depth, then phase B (WebView JIT) for speed.
 | **Terminal** | `uname df free uptime ps top ip/ifconfig chmod ls -l/-la lsb_release`, muscle-memory aliases (`less`→cat, `nano`→viewer, `sudo`→passthrough), and honest refusals for `apt`/`kill`/`ss`/`systemctl`/`chown`/`passwd` |
 | **Android** | Pixel-only ring travel moved to the **negative space between containers** (`systemGestureExclusion` is capped at 200 dp, so edge strips lose to the back gesture on Pixels) |
 | **Phase T — the terminal screen** | `TerminalScreen.swift`: VT100/xterm grid (cursor, scroll regions, IL/DL/ICH/DCH/ECH, SGR incl. 256/truecolor, alt screen) + byte-at-a-time `AnsiParser`. `TerminalPrograms.swift`: the `TerminalProgram` contract — a full-screen program owns screen + keyboard, the fork/exec-less stand-in for a foreground process on a PTY — plus the first two real programs: `less`/`more` (true pager) and live `top`. `Terminal.swift` hosts programs (grid renderer, key routing, resize-as-SIGWINCH). **Android parity deferred** — the Kotlin terminal is transcript-only until this is mirrored |
+| **The T↔G join — Node on a TTY** | `NodeProgram` (`TerminalPrograms.swift`): `node`/`npx`/installed bins launched interactively become terminal programs. `process.stdin.isTTY` is true, keystrokes arrive as `data` events, stdin listeners keep the event loop alive (node's ref'd-stdin rule). The program picks its mode like on a real terminal: plain printing stays in the scrollback (lines land ANSI-stripped, stderr keeps its color); `setRawMode(true)` or the alt screen hands it the grid — the ink model. Terminal discipline is real: cooked-mode ^C is SIGINT (handlers run, or the program dies 130), raw-mode ^C is a byte the program reads; rotation emits `resize` with the live geometry, and a program is born knowing `stdout.columns` |
 
 ### Verification performed
 
@@ -89,10 +93,25 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   `#imports` — proven by chalk@5, an ESM-only package, matching real node
   byte-for-byte), and **`fetch` + `http`/`https`.get/request** over
   URLSession (verified against a live local HTTP server, both engines).
-  19 fixtures total, all matching. Remaining gaps (honest): raw TTY/stdin
-  through TerminalProgram (ink-style TUIs), stream depth, unhandled
-  promise rejections don't exit(1), and the WebView JIT surface (phase B)
-  for speed
+  19 fixtures total, all matching. Remaining gaps (honest): stream depth,
+  unhandled promise rejections don't exit(1), `readline`/`net`/`crypto`/
+  `zlib`, and the WebView JIT surface (phase B) for speed
+- **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
+  TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
+  asserted after keystrokes): 26 assertions across transcript streaming
+  (isTTY/size real, stderr colored, escapes stripped, partial lines
+  flushed), stdin liveness (a waiting listener holds the loop open; exit
+  frees it), raw-mode grid painting with keystroke redraws, ^C discipline
+  both ways (cooked kills at 130 or runs the SIGINT handler; raw delivers
+  the byte), resize events, and alt-screen enter/restore. Plus 9
+  end-to-end through msh itself: `node tui.js` typed at the prompt hands
+  the terminal a `NodeProgram` titled like the command, raw paint lands on
+  the grid at the true geometry, and a mid-pipeline `node` stays headless
+  (data, not a program). En route this pass found a real Swift bug — CRLF
+  is ONE Character to Swift, so line-splitting/escape-stripping had to
+  drop to unicode scalars (same grapheme trap the pyte pass caught in the
+  parser). The 25-script sh corpus and all 19 node fixtures stayed green;
+  the app builds under Swift 6 strict concurrency
 
 Method to reproduce: `Shell.swift`, `GitCore.swift`, and `GitRemote.swift`
 are Foundation-only by design. Compile them with a scratch `main.swift` via
@@ -452,7 +471,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https; gaps: raw TTY, streams depth, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen; gaps: streams depth, readline, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

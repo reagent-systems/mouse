@@ -69,6 +69,17 @@ exactly; msh semantics proven separately end-to-end), and fetch/https
 against a live local HTTP server. The engine runs JS on a background
 queue — never block the main actor from JS; `execSync` blocks the JS
 thread on a semaphore while msh runs on main.
+The T↔G JOIN (`NodeProgram` + the engine's TTY surface) verifies like any
+terminal program — `TerminalProgramIO.write` → `AnsiParser`, grid asserted
+after keystrokes, pumping the main runloop between steps — covering both
+^C disciplines (cooked = SIGINT, raw = byte), stdin liveness (a waiting
+listener holds the event loop open), resize events, alt-screen
+enter/restore, and transcript stripping; PLUS end-to-end through
+`MouseShell.runProgram` with a `launchProgram` context: an interactive
+`node tui.js` must hand over a `NodeProgram`, a mid-pipeline `node` must
+stay headless. Line-splitting and escape-stripping are unicode-scalar
+level on purpose: CRLF is one Character to Swift (the same grapheme trap
+the pyte pass caught in the parser).
 
 Android (`kotlin/`): `cd kotlin && ANDROID_HOME=~/Library/Android/sdk
 ./gradlew assembleDebug`. Standard Gradle project — Android Studio opens
