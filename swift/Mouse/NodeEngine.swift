@@ -196,7 +196,7 @@ final class NodeEngine: @unchecked Sendable {
                 }
                 let launcher = context.evaluateScript("""
                     (function(fn, exports, require, module, filename, dirname, settled){
-                        fn(exports, require, module, filename, dirname)
+                        fn(exports, require, module, filename, dirname, require)
                             .then(function(){ settled(undefined); },
                                   function(e){ settled(e === undefined || e === null ? new Error('undefined thrown') : e); });
                         return module.__esmDone === true || module.__esmError !== undefined;
@@ -206,7 +206,7 @@ final class NodeEngine: @unchecked Sendable {
                                                              JSValue(object: entrySettled, in: context)!])
                 entryPending = finished?.toBool() != true
             } else {
-                function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir])
+                function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir, require])
             }
         }
         if let fatal, exitCode == nil {
@@ -233,8 +233,13 @@ final class NodeEngine: @unchecked Sendable {
         if body.hasPrefix("#!") {
             body = String(body.drop(while: { $0 != "\n" }))
         }
+        // `__mouseRequire` is a SEPARATE parameter (always the same value as `require`) that
+        // the transpiler routes its generated import-requires through. A module that does
+        // `const require = createRequire(...)` — legal ESM (yargs, many dual packages) —
+        // shadows the `require` PARAMETER scope-wide, which would put the transpiled imports
+        // above that line in TDZ; `__mouseRequire` is untouched by that shadow.
         let keyword = async ? "async function" : "function"
-        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname){\n" + body + "\n})"
+        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire){\n" + body + "\n})"
         let function = context.evaluateScript(wrapped)
         guard let function, function.isObject else { return nil }
         return function
@@ -821,7 +826,7 @@ final class NodeEngine: @unchecked Sendable {
                 // the exports; transpiled importers await it, real ESM's infection).
                 let trampoline = context.evaluateScript("""
                     (function(fn, exports, require, module, filename, dirname){
-                        const promise = fn(exports, require, module, filename, dirname);
+                        const promise = fn(exports, require, module, filename, dirname, require);
                         if (module.__esmError !== undefined) {
                             promise.catch(function(){});
                             const e = module.__esmError;
@@ -846,7 +851,7 @@ final class NodeEngine: @unchecked Sendable {
                 // evict, and rethrow the ORIGINAL error in the requiring frame.
                 let trampoline = context.evaluateScript("""
                     (function(fn, exports, require, module, filename, dirname){
-                        try { fn(exports, require, module, filename, dirname); return null; }
+                        try { fn(exports, require, module, filename, dirname, require); return null; }
                         catch (e) { return { __mouseRequireThrow: e === undefined ? new Error('undefined thrown') : e }; }
                     })
                     """)!
@@ -963,7 +968,7 @@ final class NodeEngine: @unchecked Sendable {
         // suspension, so sync modules stay sync under the async wrapper; a TLA dependency
         // suspends its importers — the same infection real ESM has.
         func requireSettled(_ temp: String, _ module: String) -> String {
-            "let \(temp) = require('\(module)'); if (\(temp) instanceof Promise) \(temp) = await \(temp);"
+            "let \(temp) = __mouseRequire('\(module)'); if (\(temp) instanceof Promise) \(temp) = await \(temp);"
         }
         // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns —
         // minified bundles drop every optional space (`import{x as y}from"m"`).
@@ -1011,6 +1016,17 @@ final class NodeEngine: @unchecked Sendable {
             }
             return lines.joined(separator: " ")
         }
+        // export { X as 'module.exports' } — the ES2022 string-named-export idiom that dual
+        // CJS/ESM packages (yargs, cliui, y18n) use to make `require()` return X directly.
+        // Must run BEFORE the general clause rule, whose `[^}]*` would swallow it and then
+        // drop the string alias. A general string-named export lands on module.exports[name].
+        replace(#"(?:^|(?<=[;}]))\s*export\s*\{\s*([\w$]+)\s+as\s+['"]module\.exports['"]\s*\}\s*;?"#) { match, ns in
+            "module.exports = \(group(match, 1, ns)!);"
+        }
+        replace(#"(?:^|(?<=[;}]))\s*export\s*\{\s*([\w$]+)\s+as\s+['"]([^'"]+)['"]\s*\}\s*;?"#) { match, ns in
+            let name = group(match, 2, ns)!.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            return "module.exports['\(name)'] = \(group(match, 1, ns)!);"
+        }
         // export { a, b as c };   — a trailing line comment must not defeat the match
         // (commander@15 ends one with "; // Deprecated").
         replace(#"(?:^|(?<=[;}]))\s*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
@@ -1019,26 +1035,28 @@ final class NodeEngine: @unchecked Sendable {
                 .joined(separator: " ")
         }
         // export default function name() / class Name — keep the declaration, alias at EOF.
-        replace(#"^\s*export\s+default\s+(function\s+([\w$]+)|class\s+([\w$]+))"#) { match, ns in
+        // Mid-line anchor: a preceding rule can leave `;export default` on one line when an
+        // unterminated import (no semicolon, cliui) had its trailing newline consumed.
+        replace(#"(?:^|(?<=[;}]))\s*export\s+default\s+(function\s+([\w$]+)|class\s+([\w$]+))"#) { match, ns in
             let name = group(match, 2, ns) ?? group(match, 3, ns)!
             epilogue.append("module.exports.default = \(name);")
             return group(match, 1, ns)!
         }
         // export default <expression>
-        replace(#"^\s*export\s+default\s+"#) { _, _ in "module.exports.default = " }
+        replace(#"(?:^|(?<=[;}]))\s*export\s+default\s+"#) { _, _ in "module.exports.default = " }
         // export const/let/var/function/class NAME — strip keyword, assign at EOF.
-        replace(#"^\s*export\s+(const|let|var|function|class|async\s+function)\s+([\w$]+)"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))\s*export\s+(const|let|var|function|class|async\s+function)\s+([\w$]+)"#) { match, ns in
             let name = group(match, 2, ns)!
             epilogue.append("module.exports.\(name) = \(name);")
             return "\(group(match, 1, ns)!) \(name)"
         }
         // dynamic import() and import.meta.*
-        text = text.replacingOccurrences(of: "import.meta.resolve", with: "require.resolve")
+        text = text.replacingOccurrences(of: "import.meta.resolve", with: "__mouseRequire.resolve")
         text = text.replacingOccurrences(of: "import.meta.url", with: "('file://' + __filename)")
         if let regex = try? NSRegularExpression(pattern: #"\bimport\s*\("#) {
             let ns = text as NSString
             text = regex.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: ns.length),
-                                                  withTemplate: "__dynamicImport(require, ")
+                                                  withTemplate: "__dynamicImport(__mouseRequire, ")
         }
 
         // The body runs under an ASYNC wrapper (imports may await). The try/catch makes the
@@ -1646,6 +1664,31 @@ final class NodeEngine: @unchecked Sendable {
           end: function(){}, cork: function(){}, uncork: function(){},
           getColorDepth: function(){ return __isTTY ? 8 : 1; },
           hasColors: function(){ return __isTTY; },
+          // TTY WriteStream cursor helpers (readline uses these on stdout; spinners/progress
+          // bars — ora, cli-progress — call them directly). Each writes the CSI escape.
+          cursorTo: function(x, y, callback){
+            sink(y === undefined || y === null ? '\u001b[' + (x + 1) + 'G' : '\u001b[' + (y + 1) + ';' + (x + 1) + 'H');
+            if (typeof y === 'function') y(); else if (typeof callback === 'function') callback();
+            return true;
+          },
+          moveCursor: function(dx, dy, callback){
+            let out = '';
+            if (dx < 0) out += '\u001b[' + (-dx) + 'D'; else if (dx > 0) out += '\u001b[' + dx + 'C';
+            if (dy < 0) out += '\u001b[' + (-dy) + 'A'; else if (dy > 0) out += '\u001b[' + dy + 'B';
+            sink(out);
+            if (typeof callback === 'function') callback();
+            return true;
+          },
+          clearLine: function(dir, callback){
+            sink(dir < 0 ? '\u001b[1K' : dir > 0 ? '\u001b[0K' : '\u001b[2K');
+            if (typeof callback === 'function') callback();
+            return true;
+          },
+          clearScreenDown: function(callback){
+            sink('\u001b[0J');
+            if (typeof callback === 'function') callback();
+            return true;
+          },
         };
       }
       function makeInputStream() {
@@ -1682,6 +1725,11 @@ final class NodeEngine: @unchecked Sendable {
             return this;
           },
           addListener: function(event, handler){ return this.on(event, handler); },
+          prependListener: function(event, handler){
+            (listeners[event] = listeners[event] || []).unshift(handler);
+            updateLiveness();
+            return this;
+          },
           once: function(event, handler){ return this.on(event, handler); },
           off: function(event, handler){
             const list = listeners[event] || [];
@@ -1701,6 +1749,11 @@ final class NodeEngine: @unchecked Sendable {
           },
           resume: function(){ paused = false; updateLiveness(); return this; },
           pause: function(){ paused = true; updateLiveness(); return this; },
+          isPaused: function(){ return paused; },
+          destroy: function(){ paused = true; stream.emit('close'); return this; },
+          unpipe: function(){ return this; },
+          get readableFlowing(){ return !paused; },
+          get readable(){ return true; },
           read: function(){
             const value = buffered;
             buffered = '';
@@ -2307,14 +2360,28 @@ final class NodeEngine: @unchecked Sendable {
         assert.equal = function(a, b, message) { if (a != b) throw new Error(message || (a + ' != ' + b)); };
         assert.strictEqual = function(a, b, message) { if (a !== b) throw new Error(message || (a + ' !== ' + b)); };
         assert.notEqual = function(a, b, message) { if (a == b) throw new Error(message || (a + ' == ' + b)); };
+        assert.notStrictEqual = function(a, b, message) { if (a === b) throw new Error(message || (a + ' === ' + b)); };
         assert.deepStrictEqual = function(a, b, message) {
           if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(message || 'not deeply equal');
         };
         assert.deepEqual = assert.deepStrictEqual;
+        assert.notDeepStrictEqual = function(a, b, message) {
+          if (JSON.stringify(a) === JSON.stringify(b)) throw new Error(message || 'unexpectedly deeply equal');
+        };
+        assert.notDeepEqual = assert.notDeepStrictEqual;
+        assert.fail = function(message) { throw new Error(message instanceof Error ? message.message : (message || 'Failed')); };
+        assert.ifError = function(value) { if (value) throw (value instanceof Error ? value : new Error('ifError got ' + value)); };
         assert.throws = function(fn, message) {
           try { fn(); } catch (e) { return; }
           throw new Error(message || 'Missing expected exception');
         };
+        assert.doesNotThrow = function(fn, message) {
+          try { fn(); } catch (e) { throw new Error(message || 'Got unwanted exception'); }
+        };
+        assert.match = function(value, regexp, message) {
+          if (!regexp.test(value)) throw new Error(message || (value + ' does not match ' + regexp));
+        };
+        assert.strict = assert;
         return assert;
       };
 

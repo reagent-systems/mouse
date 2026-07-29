@@ -321,6 +321,29 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   (code after the throw never runs), handler calls `process.exit(42)` →
   exit 42, and the no-handler throw still exits 1. 37 node fixtures total,
   56 TTY assertions, e2e, sh corpus, Swift 6 app build — all green
+- **More real packages — ora, yargs, enquirer — surfaced 7 engine bugs.**
+  The real-package method again: install popular CLIs and run them, fix
+  what breaks. ora (spinner) renders; yargs (arg parser) parses correctly;
+  enquirer loads. Seven genuine gaps that would break real tools: (1)
+  `stdin.isPaused` and (2) `stdin.prependListener` missing from the stdin
+  shim; (3) a transpiler **`require` TDZ** — a module doing `const require
+  = createRequire(...)` (legal ESM, the dual-package idiom) shadows the
+  wrapper's `require` PARAMETER scope-wide, putting the transpiled imports
+  above it in TDZ; fixed by routing generated import-requires through a
+  separate `__mouseRequire` parameter the shadow can't reach; (4) the
+  ES2022 **`export {x as 'module.exports'}`** string-named-export idiom
+  (yargs/cliui) → now emits `module.exports = x`; (5) the `export default`/
+  `export const` rules lacked the mid-line `(?:^|(?<=[;}]))` anchor, so an
+  unterminated import (cliui, no semicolons) whose trailing newline got
+  consumed left `;export default` mid-line and unmatched; (6) TTY
+  WriteStream cursor helpers `cursorTo`/`moveCursor`/`clearLine`/
+  `clearScreenDown` missing from stdout/stderr (ora/cli-progress use them);
+  (7) `assert.notStrictEqual` + `notDeepStrictEqual`/`doesNotThrow`/`match`/
+  `ifError`/`fail` missing. Regression fixtures `assert-more` and
+  `yargs-cli` (the latter exercises the createRequire-shadow AND the
+  string-export idiom end to end) — both byte-identical to real node v22.
+  39 node fixtures, screen corpus, pyte cross-check, 56 TTY assertions,
+  e2e, sh corpus, Swift 6 build — all green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
