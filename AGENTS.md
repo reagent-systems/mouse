@@ -54,7 +54,8 @@ corpus against spec truths; `resolveTree` against real `pnpm install
 `install()` by running **real `node`** in the installed root and
 requiring the package — the layout is correct only if Node's own
 resolver agrees. Integrity (sha512/sha1) is checked before unpacking.
-The NODE LAYER (`NodeEngine.swift`) verifies against **real `node`**: the
+The NODE LAYER (`NodeEngine.swift`, needs `-lz` — its zlib module rides
+libz, and CryptoKit backs crypto) verifies against **real `node`**: the
 same fixture scripts run through both engines in twin directory trees,
 stdout and exit status compared (console formatting, path, fs round-trips,
 CommonJS + JSON + node_modules requires, EventEmitter, Buffer encodings,

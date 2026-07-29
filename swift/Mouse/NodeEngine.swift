@@ -1,5 +1,7 @@
+import CryptoKit
 import Foundation
 import JavaScriptCore
+import zlib
 
 /// The Node layer (system.md phase G): Mouse does not run Node — it IS Node. JavaScript
 /// executes on JavaScriptCore (interpreter-only in-process; the WebView JIT surface comes
@@ -432,6 +434,60 @@ final class NodeEngine: @unchecked Sendable {
         }
         expose("httpRequest", httpRequest)
 
+        // -- crypto: CryptoKit digests/HMAC, the system CSPRNG -----------------------------
+        let cryptoHash: @convention(block) (String, String) -> String? = { algorithm, base64 in
+            guard let data = Data(base64Encoded: base64) else { return nil }
+            switch algorithm {
+            case "md5": return Data(Insecure.MD5.hash(data: data)).base64EncodedString()
+            case "sha1": return Data(Insecure.SHA1.hash(data: data)).base64EncodedString()
+            case "sha256": return Data(SHA256.hash(data: data)).base64EncodedString()
+            case "sha384": return Data(SHA384.hash(data: data)).base64EncodedString()
+            case "sha512": return Data(SHA512.hash(data: data)).base64EncodedString()
+            default: return nil
+            }
+        }
+        expose("cryptoHash", cryptoHash)
+        let cryptoHmac: @convention(block) (String, String, String) -> String? = { algorithm, keyBase64, base64 in
+            guard let keyData = Data(base64Encoded: keyBase64), let data = Data(base64Encoded: base64) else { return nil }
+            let key = SymmetricKey(data: keyData)
+            switch algorithm {
+            case "md5": return Data(HMAC<Insecure.MD5>.authenticationCode(for: data, using: key)).base64EncodedString()
+            case "sha1": return Data(HMAC<Insecure.SHA1>.authenticationCode(for: data, using: key)).base64EncodedString()
+            case "sha256": return Data(HMAC<SHA256>.authenticationCode(for: data, using: key)).base64EncodedString()
+            case "sha384": return Data(HMAC<SHA384>.authenticationCode(for: data, using: key)).base64EncodedString()
+            case "sha512": return Data(HMAC<SHA512>.authenticationCode(for: data, using: key)).base64EncodedString()
+            default: return nil
+            }
+        }
+        expose("cryptoHmac", cryptoHmac)
+        let randomBytes: @convention(block) (Int) -> String = { count in
+            // SystemRandomNumberGenerator is the platform CSPRNG.
+            var generator = SystemRandomNumberGenerator()
+            let bytes = (0..<max(0, count)).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
+            return Data(bytes).base64EncodedString()
+        }
+        expose("randomBytes", randomBytes)
+        let randomUUID: @convention(block) () -> String = { UUID().uuidString.lowercased() }
+        expose("randomUUID", randomUUID)
+
+        // -- zlib: real deflate/inflate over libz (windowBits picks gzip/zlib/raw) ---------
+        let zlibTransform: @convention(block) (String, String) -> String? = { mode, base64 in
+            guard let input = Data(base64Encoded: base64) else { return nil }
+            let deflating: Bool
+            let windowBits: Int32
+            switch mode {
+            case "gzip": deflating = true; windowBits = 15 + 16
+            case "deflate": deflating = true; windowBits = 15
+            case "deflateRaw": deflating = true; windowBits = -15
+            case "inflateRaw": deflating = false; windowBits = -15
+            // 15+32 auto-detects gzip vs zlib headers — covers gunzip/inflate/unzip.
+            case "gunzip", "inflate", "unzip": deflating = false; windowBits = 15 + 32
+            default: return nil
+            }
+            return Self.zlibCode(input, deflating: deflating, windowBits: windowBits)?.base64EncodedString()
+        }
+        expose("zlibTransform", zlibTransform)
+
         context.setObject(bridge, forKeyedSubscript: "__mouse" as NSString)
         context.setObject(argv, forKeyedSubscript: "__argv" as NSString)
         context.setObject(env, forKeyedSubscript: "__env" as NSString)
@@ -440,6 +496,40 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(tty != nil, forKeyedSubscript: "__isTTY" as NSString)
         context.setObject(tty?.rows ?? 24, forKeyedSubscript: "__ttyRows" as NSString)
         context.setObject(tty?.columns ?? 80, forKeyedSubscript: "__ttyColumns" as NSString)
+    }
+
+    /// One-shot deflate or inflate with explicit windowBits (15=zlib, 15+16=gzip, -15=raw,
+    /// 15+32=auto-detect on inflate). libz, not Compression — same reason as GitCore.
+    private static func zlibCode(_ input: Data, deflating: Bool, windowBits: Int32) -> Data? {
+        var stream = z_stream()
+        let streamSize = Int32(MemoryLayout<z_stream>.size)
+        let initStatus = deflating
+            ? deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, zlibVersion(), streamSize)
+            : inflateInit2_(&stream, windowBits, zlibVersion(), streamSize)
+        guard initStatus == Z_OK else { return nil }
+        defer { if deflating { deflateEnd(&stream) } else { inflateEnd(&stream) } }
+        var output = Data()
+        var buffer = [UInt8](repeating: 0, count: 1 << 16)
+        var source = [UInt8](input)
+        let finished: Bool = source.withUnsafeMutableBufferPointer { sourcePointer in
+            stream.next_in = sourcePointer.baseAddress
+            stream.avail_in = uInt(sourcePointer.count)
+            while true {
+                var status: Int32 = Z_OK
+                let produced = buffer.withUnsafeMutableBufferPointer { bufferPointer -> Int in
+                    stream.next_out = bufferPointer.baseAddress
+                    stream.avail_out = uInt(bufferPointer.count)
+                    status = deflating ? deflate(&stream, Z_FINISH) : inflate(&stream, Z_FINISH)
+                    return bufferPointer.count - Int(stream.avail_out)
+                }
+                if produced > 0 { output.append(contentsOf: buffer[0..<produced]) }
+                if status == Z_STREAM_END { return true }
+                guard status == Z_OK || status == Z_BUF_ERROR else { return false }
+                // Z_BUF_ERROR with output space left means the input was truncated/corrupt.
+                if status == Z_BUF_ERROR && produced == 0 { return false }
+            }
+        }
+        return finished ? output : nil
     }
 
     // MARK: - Paths (workspace-virtual ↔ real)
@@ -2074,7 +2164,116 @@ final class NodeEngine: @unchecked Sendable {
         });
       };
 
-      for (const missing of ['net', 'crypto', 'zlib']) {
+      coreFactories.crypto = function() {
+        function toBuf(data, encoding) {
+          if (Buffer.isBuffer(data)) return data;
+          if (data instanceof Uint8Array) return Buffer.from(data);
+          return Buffer.from(String(data), encoding || 'utf8');
+        }
+        function finishDigest(base64, encoding) {
+          if (base64 === null || base64 === undefined) throw new Error('Digest method not supported');
+          const buffer = Buffer.from(base64, 'base64');
+          return encoding ? buffer.toString(encoding) : buffer;
+        }
+        class Hash {
+          constructor(algorithm) { this._algorithm = String(algorithm).toLowerCase().replace('-', ''); this._chunks = []; }
+          update(data, encoding) { this._chunks.push(toBuf(data, encoding)); return this; }
+          copy() { const twin = new Hash(this._algorithm); twin._chunks = this._chunks.slice(); return twin; }
+          digest(encoding) {
+            return finishDigest(bridge.cryptoHash(this._algorithm, Buffer.concat(this._chunks).toString('base64')), encoding);
+          }
+        }
+        class Hmac {
+          constructor(algorithm, key) {
+            this._algorithm = String(algorithm).toLowerCase().replace('-', '');
+            this._key = toBuf(key);
+            this._chunks = [];
+          }
+          update(data, encoding) { this._chunks.push(toBuf(data, encoding)); return this; }
+          digest(encoding) {
+            return finishDigest(bridge.cryptoHmac(this._algorithm, this._key.toString('base64'),
+                                                  Buffer.concat(this._chunks).toString('base64')), encoding);
+          }
+        }
+        const crypto = {
+          createHash: function(algorithm) { return new Hash(algorithm); },
+          createHmac: function(algorithm, key) { return new Hmac(algorithm, key); },
+          randomBytes: function(size, callback) {
+            const buffer = Buffer.from(bridge.randomBytes(size), 'base64');
+            if (typeof callback === 'function') { setImmediate(function(){ callback(null, buffer); }); return; }
+            return buffer;
+          },
+          randomFillSync: function(target) {
+            const bytes = Buffer.from(bridge.randomBytes(target.length), 'base64');
+            for (let i = 0; i < target.length; i++) target[i] = bytes[i];
+            return target;
+          },
+          randomUUID: function() { return bridge.randomUUID(); },
+          randomInt: function(min, max, callback) {
+            if (typeof max === 'function') { callback = max; max = undefined; }
+            if (max === undefined) { max = min; min = 0; }
+            const range = max - min;
+            const bytes = Buffer.from(bridge.randomBytes(6), 'base64');
+            let value = 0;
+            for (let i = 0; i < 6; i++) value = value * 256 + bytes[i];
+            const result = min + (value % range);
+            if (typeof callback === 'function') { setImmediate(function(){ callback(null, result); }); return; }
+            return result;
+          },
+          timingSafeEqual: function(a, b) {
+            if (a.length !== b.length) throw new RangeError('Input buffers must have the same byte length');
+            let diff = 0;
+            for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+            return diff === 0;
+          },
+          getHashes: function() { return ['md5', 'sha1', 'sha256', 'sha384', 'sha512']; },
+        };
+        crypto.webcrypto = { randomUUID: crypto.randomUUID, getRandomValues: function(target) { return crypto.randomFillSync(target); } };
+        return crypto;
+      };
+
+      coreFactories.zlib = function() {
+        const { Transform } = coreRequire('stream');
+        function run(mode, data) {
+          const input = Buffer.isBuffer(data) ? data
+            : data instanceof Uint8Array ? Buffer.from(data)
+            : Buffer.from(String(data));
+          const result = bridge.zlibTransform(mode, input.toString('base64'));
+          if (result === null || result === undefined) {
+            const error = new Error('zlib: ' + mode + ': invalid input');
+            error.code = 'Z_DATA_ERROR';
+            throw error;
+          }
+          return Buffer.from(result, 'base64');
+        }
+        const zlib = { constants: { Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1 } };
+        for (const mode of ['gzip', 'gunzip', 'deflate', 'inflate', 'deflateRaw', 'inflateRaw', 'unzip']) {
+          zlib[mode + 'Sync'] = function(data) { return run(mode, data); };
+          zlib[mode] = function(data, options, callback) {
+            if (typeof options === 'function') callback = options;
+            setImmediate(function(){
+              try { callback(null, run(mode, data)); } catch (error) { callback(error); }
+            });
+          };
+          // Stream forms buffer to the flush — honest one-shot coding behind the stream API.
+          const createName = 'create' + mode[0].toUpperCase() + mode.slice(1);
+          zlib[createName] = function() {
+            const chunks = [];
+            return new Transform({
+              transform(chunk, encoding, callback) {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+                callback();
+              },
+              flush(callback) {
+                try { callback(null, run(mode, Buffer.concat(chunks))); } catch (error) { callback(error); }
+              },
+            });
+          };
+        }
+        return zlib;
+      };
+
+      for (const missing of ['net']) {
         coreFactories[missing] = (function(name){
           return function() {
             const stub = {};

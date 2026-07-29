@@ -30,8 +30,11 @@ Writable/Duplex/Transform, pipe/pipeline/finished, async iteration, fs
 streams — 8 new fixtures, 27 total matching real node). **`readline` is
 real** (28 fixtures): TTY line editing over raw mode — echo, backspace,
 ^C→SIGINT — plus `question` in callback and promise forms, and line
-splitting from any Readable. **Next:** unhandled-rejection exit codes,
-API breadth for real agent CLIs, then phase B (WebView JIT) for speed.
+splitting from any Readable. **`crypto` and `zlib` are real** (CryptoKit
+digests/HMAC + the system CSPRNG; libz gzip/deflate/raw — 30 fixtures
+matching real node). **Next:** API breadth for real agent CLIs, then
+phase B (WebView JIT) for speed. Unhandled-rejection exit codes are
+parked, with the reason recorded below.
 
 ### Shipped and verified this cycle
 
@@ -98,9 +101,16 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   `#imports` — proven by chalk@5, an ESM-only package, matching real node
   byte-for-byte), and **`fetch` + `http`/`https`.get/request** over
   URLSession (verified against a live local HTTP server, both engines).
-  19 fixtures total, all matching. Remaining gaps (honest): unhandled
-  promise rejections don't exit(1), `readline`/`net`/`crypto`/`zlib`, and
-  the WebView JIT surface (phase B) for speed
+  19 fixtures total, all matching. Remaining gaps (honest): `net`, the
+  WebView JIT surface (phase B) for speed, and unhandled promise
+  rejections don't exit(1) — that one is PARKED, not pending: JSC's
+  rejection tracker (`JSGlobalContextSetUnhandledRejectionCallback`) is
+  private API, and the public-surface workaround — patching
+  `Promise.prototype.then` — cannot see `await`'s internal
+  PerformPromiseThen, so every awaited rejection would look unhandled and
+  exit healthy programs. A wrong exit code is worse than a missing one;
+  revisit only if the API goes public or phase B's WebView engine offers
+  a hook
 - **Stream depth** — the `stream` sketch became the real thing: Readable
   with paused-vs-flowing modes, an internal buffer, `_read` pull,
   `'readable'`, async iteration, and `Readable.from`; Writable with
@@ -127,6 +137,18 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   through the TTY harness: a `question` flow with echoed keystrokes and a
   backspace correction lands the edited answer on the grid, the promises
   form resolves, and ^C without a listener ends the program
+- **crypto + zlib** — the last two everyday stubs became real. `crypto`
+  rides CryptoKit: `createHash` (md5/sha1/sha256/sha384/sha512) and
+  `createHmac` with incremental `update` and hex/base64 digests,
+  `randomBytes` (+callback form) and `randomFillSync` on the system
+  CSPRNG, `randomUUID`, `randomInt`, `timingSafeEqual`. `zlib` rides libz
+  (already linked for GitCore's packfile inflate): gzip/deflate/raw
+  deflate-inflate in sync, callback, and Transform-stream forms, with
+  auto-detecting inflate (windowBits 15+32) behind gunzip/inflate/unzip.
+  Digest fixtures are byte-comparable across engines and match real node
+  exactly; compression verifies by round trip, gzip magic bytes, and a
+  gzip→gunzip pipe chain — 30 fixtures total, all matching. NodeEngine
+  now imports CryptoKit + zlib, so headless harness builds add `-lz`
 - **The T↔G join (raw TTY/stdin)** — headless per the AGENTS.md
   TerminalPrograms rule (`TerminalProgramIO.write` → `AnsiParser`, grid
   asserted after keystrokes): 26 assertions across transcript streaming
@@ -502,7 +524,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, real streams + readline; gaps: WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib; gaps: net, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
