@@ -3591,32 +3591,136 @@ final class NodeEngine: @unchecked Sendable {
       }
 
       // console.Console: a console over any pair of writable streams (ink's patchConsole
-      // builds one to intercept logs while it owns the screen).
+      // builds one to intercept logs while it owns the screen). ONE implementation backs both
+      // this and the global console — they had drifted apart, and the class's group/count/time
+      // were silent no-ops, which is the shape this repo refuses everywhere else.
+      //
+      // An audit found sixteen methods missing from the global console and `debug` routed to
+      // STDERR, where node sends it to stdout. Routing is not cosmetic: a tool piping stdout
+      // either loses output or gets noise mixed into its data.
+      function makeConsole(writeOut, writeErr) {
+        const state = { indent: '', counts: Object.create(null), timers: Object.create(null) };
+        // Group indentation applies to every line of every message, including multi-line ones.
+        const emit = function(write, text) {
+          const prefixed = state.indent
+            ? text.split('\n').map(function(line){ return line.length ? state.indent + line : line; }).join('\n')
+            : text;
+          write(prefixed + '\n');
+        };
+        const api = {
+          log: function(){ emit(writeOut, format.apply(null, arguments)); },
+          info: function(){ emit(writeOut, format.apply(null, arguments)); },
+          // node's debug is an alias for log, on STDOUT.
+          debug: function(){ emit(writeOut, format.apply(null, arguments)); },
+          warn: function(){ emit(writeErr, format.apply(null, arguments)); },
+          error: function(){ emit(writeErr, format.apply(null, arguments)); },
+          trace: function(){ emit(writeErr, 'Trace: ' + format.apply(null, arguments)); },
+          dir: function(value, options){ emit(writeOut, inspect(value, options && options.depth !== undefined ? (options.depth === null ? Infinity : options.depth) : 2)); },
+          dirxml: function(){ emit(writeOut, format.apply(null, arguments)); },
+          group: function() {
+            if (arguments.length) emit(writeOut, format.apply(null, arguments));
+            state.indent += '  ';
+          },
+          groupCollapsed: function(){ api.group.apply(null, arguments); },
+          groupEnd: function(){ state.indent = state.indent.slice(0, -2); },
+          count: function(label) {
+            const key = label === undefined ? 'default' : String(label);
+            state.counts[key] = (state.counts[key] || 0) + 1;
+            emit(writeOut, key + ': ' + state.counts[key]);
+          },
+          countReset: function(label) {
+            const key = label === undefined ? 'default' : String(label);
+            delete state.counts[key];
+          },
+          time: function(label) {
+            state.timers[label === undefined ? 'default' : String(label)] = Date.now();
+          },
+          timeLog: function(label) {
+            const key = label === undefined ? 'default' : String(label);
+            if (state.timers[key] === undefined) return;
+            const rest = Array.prototype.slice.call(arguments, 1);
+            emit(writeOut, key + ': ' + (Date.now() - state.timers[key]) + 'ms' +
+                           (rest.length ? ' ' + rest.map(formatOne).join(' ') : ''));
+          },
+          timeEnd: function(label) {
+            const key = label === undefined ? 'default' : String(label);
+            if (state.timers[key] === undefined) return;
+            emit(writeOut, key + ': ' + (Date.now() - state.timers[key]) + 'ms');
+            delete state.timers[key];
+          },
+          assert: function(condition) {
+            if (condition) return;
+            const rest = Array.prototype.slice.call(arguments, 1);
+            emit(writeErr, 'Assertion failed' + (rest.length ? ': ' + format.apply(null, rest) : ''));
+          },
+          clear: function(){},
+          // node keeps these as no-ops without a profiler attached, and says so in its docs —
+          // this is the one place a no-op is the correct behaviour rather than a lie.
+          profile: function(){}, profileEnd: function(){}, timeStamp: function(){},
+          table: function(data, columns) {
+            if (data === null || typeof data !== 'object') { api.log(data); return; }
+            // node's table: an (index) column, then the union of the rows' keys in first-seen
+            // order — or a single "Values" column when the rows are primitives.
+            const isArray = Array.isArray(data);
+            const keys = isArray ? data.map(function(_, i){ return String(i); }) : Object.keys(data);
+            const headers = [];
+            let hasValues = false;
+            for (const key of keys) {
+              const row = data[key];
+              if (row !== null && typeof row === 'object' && !Array.isArray(row)) {
+                for (const column of Object.keys(row)) {
+                  if (headers.indexOf(column) < 0) headers.push(column);
+                }
+              } else {
+                hasValues = true;
+              }
+            }
+            const chosen = columns ? columns.slice() : headers;
+            const titles = ['(index)'].concat(chosen).concat(hasValues ? ['Values'] : []);
+            const rows = keys.map(function(key) {
+              const row = data[key];
+              const cells = [key];
+              for (const column of chosen) {
+                cells.push(row !== null && typeof row === 'object' && column in row
+                  ? inspect(row[column], 2) : '');
+              }
+              if (hasValues) {
+                cells.push(row !== null && typeof row === 'object' && !Array.isArray(row)
+                  ? '' : inspect(row, 2));
+              }
+              return cells;
+            });
+            const widths = titles.map(function(title, i) {
+              return rows.reduce(function(width, cells) {
+                return Math.max(width, cells[i] ? cells[i].length : 0);
+              }, title.length);
+            });
+            const line = function(left, middle, right) {
+              return left + widths.map(function(w){ return '─'.repeat(w + 2); }).join(middle) + right;
+            };
+            const rowText = function(cells) {
+              return '│' + cells.map(function(cell, i) {
+                return ' ' + (cell || '') + ' '.repeat(widths[i] - (cell ? cell.length : 0)) + ' ';
+              }).join('│') + '│';
+            };
+            const lines = [line('┌', '┬', '┐'), rowText(titles), line('├', '┼', '┤')];
+            for (const cells of rows) lines.push(rowText(cells));
+            lines.push(line('└', '┴', '┘'));
+            emit(writeOut, lines.join('\n'));
+          },
+        };
+        return api;
+      }
       function Console(stdout, stderr) {
         if (stdout && stdout.stdout) { stderr = stdout.stderr; stdout = stdout.stdout; }
         const errStream = stderr || stdout;
-        this.log = function(){ stdout.write(format.apply(null, arguments) + '\n'); };
-        this.info = this.log;
-        this.warn = function(){ errStream.write(format.apply(null, arguments) + '\n'); };
-        this.error = this.warn;
-        this.debug = this.warn;
-        this.trace = function(){ errStream.write('Trace: ' + format.apply(null, arguments) + '\n'); };
-        this.dir = this.log;
-        this.assert = function(condition){ if (!condition) errStream.write('Assertion failed\n'); };
-        this.table = this.log;
-        this.group = this.log; this.groupEnd = function(){}; this.groupCollapsed = this.log;
-        this.count = function(){}; this.countReset = function(){};
-        this.time = function(){}; this.timeEnd = function(){}; this.timeLog = function(){};
+        const api = makeConsole(function(text){ stdout.write(text); },
+                                function(text){ errStream.write(text); });
+        for (const name of Object.keys(api)) this[name] = api[name];
       }
-      globalThis.console = {
-        log: function(){ bridge.stdout(format.apply(null, arguments) + '\n'); },
-        info: function(){ bridge.stdout(format.apply(null, arguments) + '\n'); },
-        warn: function(){ bridge.stderr(format.apply(null, arguments) + '\n'); },
-        error: function(){ bridge.stderr(format.apply(null, arguments) + '\n'); },
-        debug: function(){ bridge.stderr(format.apply(null, arguments) + '\n'); },
-        trace: function(){ bridge.stderr('Trace: ' + format.apply(null, arguments) + '\n'); },
-        Console: Console,
-      };
+      globalThis.console = makeConsole(function(text){ bridge.stdout(text); },
+                                       function(text){ bridge.stderr(text); });
+      globalThis.console.Console = Console;
 
       // ---- process ----
       const tickQueue = [];

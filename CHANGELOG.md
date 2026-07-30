@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: the console is complete. Sixteen methods were missing from the global
+  console — `dir`, `table`, `group`, `count`, `time`, `assert` and more — so `console.dir(x)`
+  threw and killed the program; `console.debug` wrote to stderr instead of stdout; and the
+  `Console` class had silent no-op stubs. One implementation now backs both, with real
+  `table` box drawing and group indentation.
 - Node layer: `console.log`/`util.inspect` format the way node's do. `Map`, `Set`, `Date`,
   `RegExp` and `Promise` printed as `{}`; circular references expanded instead of being
   marked; long collections were never truncated; class names, `-0`, BigInt `n`, typed arrays,

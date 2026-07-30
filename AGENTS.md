@@ -465,6 +465,12 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **`2>&1 >/dev/null` does NOT capture stderr.** It points stderr at the old stdout and sends
+  stdout to the void. Use `> out.txt 2> err.txt`. The first console sweep compared against an
+  empty stderr file and reported every line as broken.
+- **Fixture indentation tricks eat content.** `replacingOccurrences(of: "    ", with: "")`
+  strips four-space runs INSIDE the expected text too — fatal for anything containing table
+  padding, indentation or aligned columns. Let Swift's multi-line literal do the stripping.
 - **Diff by LABEL, never by line index.** One multi-line divergence shifts every later line, so
   an index-keyed comparison reports a dozen identical rows as broken. That nearly sent a whole
   boundary chasing bugs that did not exist.

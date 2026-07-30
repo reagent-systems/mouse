@@ -1074,6 +1074,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The console audit — sixteen methods missing, and `debug` on the wrong stream.** In a
+  terminal IDE every console method is a visible feature. `dir`, `table`, `group`,
+  `groupEnd`, `count`, `time`, `assert`, `clear` and eight more were **absent from the global
+  console**, so `console.dir(x)` threw a TypeError and killed the program outright.
+  **`console.debug` wrote to STDERR** where node sends it to stdout. Routing is not cosmetic:
+  a tool piping stdout either loses that output or finds it mixed into its data.
+  The `Console` CLASS meanwhile had silent no-op stubs for `group`, `count` and `time` — the
+  exact shape this repo refuses everywhere else — while the global console lacked them
+  entirely. The two had drifted apart, so one implementation now backs both.
+  All of it verified against node on BOTH streams: `console.table`'s box drawing (column
+  widths, the `(index)` column, `Values` for primitive rows), nested group indentation applied
+  to every line, `count`/`countReset`, `time`/`timeEnd`, and `assert` writing to stderr.
+  `profile`/`profileEnd`/`timeStamp` stay no-ops — the one place that is CORRECT, since node
+  documents them as no-ops without a profiler.
+  **Two harness bugs caught before they could mislead**, both in capturing rather than in the
+  engine: `2>&1 >/dev/null` sends stderr to the OLD stdout, so the first stderr capture was
+  empty and every line looked wrong. And the suite's usual
+  `replacingOccurrences(of: "    ", with: "")` for stripping fixture indentation eats every
+  four-space run — which is exactly what table padding and nested indentation are MADE of, so
+  it silently corrupted the expected text. That fixture now relies on Swift's own multi-line
+  stripping instead, with a note saying why it differs from its neighbours.
 - **The formatting audit — `console.log` of a Map printed `{}`.** For a terminal IDE this is
   not cosmetic: console output IS what the user reads and what they paste into a bug report.
   Forty-one checks against node's `util.inspect` and `util.format`.
