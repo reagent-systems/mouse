@@ -696,6 +696,26 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   failing one; the streaming assertion is now non-trivial (6 events,
   asserted text) and independently reproduced standalone. 65 node fixtures,
   full battery green
+- **THE VERTICAL SLICE, VERIFIED END TO END.** Every layer had been proven
+  separately; this test runs them together the way the product actually
+  works. In one `NodeProgram`: the **Anthropic SDK** streams server-sent
+  events through our **`Response.body`** ReadableStream → an **ink/React**
+  component appends each text delta to state and repaints → the frames pass
+  through **ONLCR and the ANSI parser** → the assembled model text lands on
+  the **phase-T grid**, with ink in **raw mode** because the app takes input
+  the way a real agent CLI does. Asserted: ink takes the screen, the
+  streamed tokens ("HELLO FROM MOUSE") appear on the grid, the completion
+  state re-renders, and the program exits cleanly. Nothing is stubbed but
+  the network — `fetch` returns a fixed SSE body, so what is under test is
+  the whole engine path from HTTP response parsing to pixels of text. This
+  is the seam no other test covered: package install → module graph → fetch/
+  streams → React reconciliation → terminal emulation → screen. 61 TTY
+  assertions, 65 node fixtures, screen corpus, pyte cross-check, PHASE F,
+  e2e, Swift 6 build — all green. Also confirmed by a first-draft failure
+  worth keeping: an ink app with NO input hook never asks for raw mode, so
+  its frames correctly stay in the scrollback — the two-mode rule holding,
+  not a bug; the test now includes `useInput` because that is what a real
+  agent CLI does
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
