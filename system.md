@@ -551,6 +551,29 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   TTY, e2e, Swift 6 build — all green. The loop's "stream depth" item is
   now genuinely deep: real Readable/Writable/Transform semantics AND real
   streaming compression underneath them
+- **Batch 7: postcss, handlebars, esbuild-wasm load; archiver writes a
+  real ZIP. Two node-shape fixes.** postcss parses and re-emits CSS,
+  handlebars compiles and renders templates, and **esbuild-wasm loads**
+  (version 0.28.1, `transform` present — the wasm bundler for phase D
+  lands on the engine). archiver v8 (pure ESM, class exports) produces a
+  **valid ZIP through our incremental zlib**: 50 bytes, correct `PK`
+  magic. Two real fixes: (1) **node's EventEmitter is a constructor
+  FUNCTION, not a class** — readable-stream (under archiver and much of
+  npm) does `EventEmitter.call(this, opts)`, which throws "Cannot call a
+  class constructor without |new|"; ours is now an ES5 constructor with
+  prototype methods, which keeps `new`, `extends`, the express
+  `Object.assign(…, EventEmitter.prototype)` mixin AND the ES5 `.call`
+  pattern working (fixture `emitter-es5-call`). (2) **fs write-stream event
+  ORDER** — node opens the fd before writing, so `open`/`ready` precede
+  `finish`/`close`; ours announced from a timer, so a synchronous write beat
+  them and the order came out `finish,close,open,ready`. Now an
+  `ensureOpen()` runs at whichever comes first (fixture
+  `fs-stream-events`, which also checks `pipeline` into an fs stream).
+  Remaining lead, recorded: archiver's own completion events don't fire
+  through readable-stream's `pipe` (our streams emit `finish`/`close`
+  correctly on their own and under `stream.pipeline` — proven in the same
+  fixture), so the gap is in readable-stream's pipe interplay, not our
+  emitters. 59 node fixtures, full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

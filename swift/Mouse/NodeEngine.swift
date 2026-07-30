@@ -2271,59 +2271,55 @@ final class NodeEngine: @unchecked Sendable {
       };
 
       coreFactories.events = function() {
-        // `_events` initializes LAZILY in every method, not just the constructor: express
-        // mixes EventEmitter.prototype into a plain function without ever calling the
-        // constructor, and real node's emitter tolerates exactly that.
-        class EventEmitter {
-          constructor() { this._events = {}; }
-          _bucket() { return this._events || (this._events = {}); }
-          on(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).push(handler); return this; }
-          addListener(name, handler) { return this.on(name, handler); }
-          once(name, handler) {
-            const wrapper = (...args) => { this.off(name, wrapper); handler.apply(this, args); };
-            wrapper.listener = handler;
-            return this.on(name, wrapper);
+        // node's EventEmitter is an ES5 CONSTRUCTOR FUNCTION, not a class — readable-stream
+        // (under archiver and much of npm) does `EventEmitter.call(this, opts)`, which throws
+        // "Cannot call a class constructor without |new|" on a class. Prototype assignment
+        // also makes the methods enumerable, which express's
+        // `Object.assign(app, EventEmitter.prototype)` mixin needs.
+        // `_events` initializes LAZILY in every method: express mixes the prototype into a
+        // plain function without ever calling the constructor, and node tolerates that.
+        function EventEmitter() { this._events = {}; }
+        const P = EventEmitter.prototype;
+        P._bucket = function() { return this._events || (this._events = {}); };
+        P.on = function(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).push(handler); return this; };
+        P.addListener = function(name, handler) { return this.on(name, handler); };
+        P.once = function(name, handler) {
+          const self = this;
+          const wrapper = function(...args) { self.off(name, wrapper); handler.apply(self, args); };
+          wrapper.listener = handler;
+          return this.on(name, wrapper);
+        };
+        P.off = function(name, handler) {
+          const list = this._bucket()[name] || [];
+          const index = list.findIndex(h => h === handler || h.listener === handler);
+          if (index >= 0) list.splice(index, 1);
+          return this;
+        };
+        P.removeListener = function(name, handler) { return this.off(name, handler); };
+        P.removeAllListeners = function(name) { if (name) delete this._bucket()[name]; else this._events = {}; return this; };
+        P.emit = function(name, ...args) {
+          const list = (this._bucket()[name] || []).slice();
+          // Node semantics: an 'error' with no listener THROWS — otherwise failures
+          // dissolve into silence (and awaited events dangle forever).
+          if (name === 'error' && list.length === 0) {
+            throw args[0] instanceof Error ? args[0] : new Error('Unhandled error: ' + args[0]);
           }
-          off(name, handler) {
-            const list = this._bucket()[name] || [];
-            const index = list.findIndex(h => h === handler || h.listener === handler);
-            if (index >= 0) list.splice(index, 1);
-            return this;
-          }
-          removeListener(name, handler) { return this.off(name, handler); }
-          removeAllListeners(name) { if (name) delete this._bucket()[name]; else this._events = {}; return this; }
-          emit(name, ...args) {
-            const list = (this._bucket()[name] || []).slice();
-            // Node semantics: an 'error' with no listener THROWS — otherwise failures
-            // dissolve into silence (and awaited events dangle forever).
-            if (name === 'error' && list.length === 0) {
-              throw args[0] instanceof Error ? args[0] : new Error('Unhandled error: ' + args[0]);
-            }
-            for (const handler of list) handler.apply(this, args);
-            return list.length > 0;
-          }
-          listenerCount(name) { return (this._bucket()[name] || []).length; }
-          listeners(name) { return (this._bucket()[name] || []).slice(); }
-          rawListeners(name) { return (this._bucket()[name] || []).slice(); }
-          eventNames() { return Object.keys(this._bucket()); }
-          setMaxListeners() { return this; }
-          getMaxListeners() { return Infinity; }
-          prependListener(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).unshift(handler); return this; }
-          prependOnceListener(name, handler) {
-            const wrapper = (...args) => { this.off(name, wrapper); handler.apply(this, args); };
-            wrapper.listener = handler;
-            return this.prependListener(name, wrapper);
-          }
-        }
-        // Real node assigns its emitter methods onto the prototype as ENUMERABLE properties
-        // — express's `Object.assign(app, EventEmitter.prototype)` mixin depends on it.
-        // Class methods are non-enumerable by default; flip them.
-        for (const key of Object.getOwnPropertyNames(EventEmitter.prototype)) {
-          if (key === 'constructor') continue;
-          const descriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, key);
-          descriptor.enumerable = true;
-          Object.defineProperty(EventEmitter.prototype, key, descriptor);
-        }
+          for (const handler of list) handler.apply(this, args);
+          return list.length > 0;
+        };
+        P.listenerCount = function(name) { return (this._bucket()[name] || []).length; };
+        P.listeners = function(name) { return (this._bucket()[name] || []).slice(); };
+        P.rawListeners = function(name) { return (this._bucket()[name] || []).slice(); };
+        P.eventNames = function() { return Object.keys(this._bucket()); };
+        P.setMaxListeners = function() { return this; };
+        P.getMaxListeners = function() { return Infinity; };
+        P.prependListener = function(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).unshift(handler); return this; };
+        P.prependOnceListener = function(name, handler) {
+          const self = this;
+          const wrapper = function(...args) { self.off(name, wrapper); handler.apply(self, args); };
+          wrapper.listener = handler;
+          return this.prependListener(name, wrapper);
+        };
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.default = EventEmitter;
         EventEmitter.once = function(emitter, name) {
@@ -2733,11 +2729,28 @@ final class NodeEngine: @unchecked Sendable {
           const { Writable } = coreRequire('stream');
           const append = options && (options.flags === 'a' || options.flags === 'a+');
           let opened = false;
+          let announced = false;
+          // 'open'/'ready' must precede the writes (node opens the fd first). Announcing from
+          // a timer alone let a synchronous write beat them, producing the wrong order:
+          // finish,close,open,ready. ensureOpen() runs at whichever comes first.
+          function ensureOpen(stream) {
+            if (!opened) {
+              opened = true;
+              if (!append) fs.writeFileSync(file, '');
+              else if (!fs.existsSync(file)) fs.writeFileSync(file, '');
+            }
+            if (!announced) {
+              announced = true;
+              stream.fd = 3;
+              stream.emit('open', 3);
+              stream.emit('ready');
+            }
+          }
           const stream = new Writable({
             write(chunk, encoding, callback) {
               try {
-                if (!opened) { opened = true; if (append) fs.appendFileSync(file, chunk); else fs.writeFileSync(file, chunk); }
-                else fs.appendFileSync(file, chunk);
+                ensureOpen(stream);
+                fs.appendFileSync(file, chunk);
                 callback();
               } catch (error) { callback(error); }
             },
@@ -2757,10 +2770,7 @@ final class NodeEngine: @unchecked Sendable {
             return baseWrite(chunk, encoding, callback);
           };
           setImmediate(() => {
-            if (!opened && !append) { try { fs.writeFileSync(file, ''); opened = true; } catch (e) { stream.emit('error', e); return; } }
-            stream.fd = 3;
-            stream.emit('open', 3);
-            stream.emit('ready');
+            try { ensureOpen(stream); } catch (e) { stream.emit('error', e); }
           });
           return stream;
         };
