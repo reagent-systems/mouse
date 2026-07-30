@@ -3999,11 +3999,208 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
 
+      // Fill-ins found by auditing every core module's exports against real node's. Kept in
+      // ONE place (rather than scattered through the factories) because they are a
+      // completeness sweep, not part of any module's design: each is a member real packages
+      // reach for that we simply hadn't defined. Unsupportable ones say so when called.
+      function refuse(module, name, reason) {
+        return function() {
+          const error = new Error(module + '.' + name + ' is not available: ' + reason);
+          error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+          throw error;
+        };
+      }
+      function augmentCore(name, m) {
+        if (name === 'path') {
+          if (!m.format) m.format = function(parts) {
+            parts = parts || {};
+            const dir = parts.dir || parts.root || '';
+            const base = parts.base || ((parts.name || '') + (parts.ext || ''));
+            if (!dir) return base;
+            return dir === (parts.root || '') ? dir + base : dir + '/' + base;
+          };
+          if (!m.toNamespacedPath) m.toNamespacedPath = function(p) { return p; };
+          if (m.posix && !m.posix.format) m.posix.format = m.format;
+          if (m.win32 && !m.win32.format) m.win32.format = m.format;
+        } else if (name === 'querystring') {
+          if (!m.escape) m.escape = encodeURIComponent;
+          if (!m.unescape) m.unescape = decodeURIComponent;
+          if (!m.encode) m.encode = m.stringify;
+          if (!m.decode) m.decode = m.parse;
+        } else if (name === 'url') {
+          if (!m.URLSearchParams) m.URLSearchParams = globalThis.URLSearchParams;
+          if (!m.format) m.format = function(value) {
+            if (typeof value === 'string') return value;
+            if (value && value.href) return value.href;
+            value = value || {};
+            const auth = value.auth ? value.auth + '@' : '';
+            const host = value.host || (value.hostname || '') + (value.port ? ':' + value.port : '');
+            const search = value.search || '';
+            const hash = value.hash || '';
+            return (value.protocol || '') + (host ? '//' + auth + host : '') + (value.pathname || '') + search + hash;
+          };
+          if (!m.resolve) m.resolve = function(from, to) {
+            if (/^[a-zA-Z][\w+.-]*:/.test(to)) return to;
+            if (to.startsWith('//')) return (String(from).match(/^[a-zA-Z][\w+.-]*:/) || [''])[0] + to;
+            if (to.startsWith('/')) {
+              const match = String(from).match(/^([a-zA-Z][\w+.-]*:\/\/[^/?#]*)/);
+              return (match ? match[1] : '') + to;
+            }
+            return String(from).replace(/[^/]*([?#].*)?$/, '') + to;
+          };
+          if (!m.urlToHttpOptions) m.urlToHttpOptions = function(url) {
+            return { protocol: url.protocol, hostname: url.hostname, port: url.port,
+                     path: (url.pathname || '') + (url.search || ''), href: url.href };
+          };
+        } else if (name === 'assert') {
+          if (!m.AssertionError) {
+            m.AssertionError = function AssertionError(options) {
+              const error = new Error((options && options.message) || 'Assertion failed');
+              error.name = 'AssertionError';
+              error.code = 'ERR_ASSERTION';
+              return error;
+            };
+          }
+          if (!m.rejects) m.rejects = function(promise, expected) {
+            const run = typeof promise === 'function' ? promise() : promise;
+            return Promise.resolve(run).then(
+              function(){ throw new Error('Missing expected rejection'); },
+              function(){ /* rejected as required */ });
+          };
+          if (!m.doesNotReject) m.doesNotReject = function(promise) {
+            const run = typeof promise === 'function' ? promise() : promise;
+            return Promise.resolve(run).then(function(){}, function(e){ throw e; });
+          };
+          if (!m.doesNotMatch) m.doesNotMatch = function(value, regexp, message) {
+            if (regexp.test(value)) throw new Error(message || (value + ' matches ' + regexp));
+          };
+        } else if (name === 'events') {
+          if (!m.listenerCount) m.listenerCount = function(emitter, event) { return emitter.listenerCount(event); };
+          if (!m.getEventListeners) m.getEventListeners = function(emitter, event) { return emitter.listeners ? emitter.listeners(event) : []; };
+          if (!m.setMaxListeners) m.setMaxListeners = function() {};
+          if (!m.getMaxListeners) m.getMaxListeners = function() { return Infinity; };
+          if (!m.addAbortListener) m.addAbortListener = function(signal, listener) {
+            signal.addEventListener('abort', listener);
+            return { [Symbol.dispose]: function(){ signal.removeEventListener('abort', listener); } };
+          };
+        } else if (name === 'util') {
+          if (!m.TextEncoder) m.TextEncoder = globalThis.TextEncoder;
+          if (!m.TextDecoder) m.TextDecoder = globalThis.TextDecoder;
+          if (!m.formatWithOptions) m.formatWithOptions = function(options, ...rest) { return m.format.apply(null, rest); };
+          if (!m.isDeepStrictEqual) m.isDeepStrictEqual = function(a, b) { return JSON.stringify(a) === JSON.stringify(b); };
+          if (m.inspect && !m.inspect.custom) m.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
+          if (m.promisify && !m.promisify.custom) m.promisify.custom = Symbol.for('nodejs.util.promisify.custom');
+          if (!m.getSystemErrorName) m.getSystemErrorName = function(code) {
+            const names = { 2: 'ENOENT', 13: 'EACCES', 17: 'EEXIST', 20: 'ENOTDIR', 21: 'EISDIR', 32: 'EPIPE' };
+            return names[Math.abs(code)] || 'UNKNOWN';
+          };
+        } else if (name === 'buffer') {
+          if (!m.isUtf8) m.isUtf8 = function(input) {
+            const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
+            return !buffer.toString('utf8').includes('\uFFFD');
+          };
+          if (!m.isAscii) m.isAscii = function(input) {
+            const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
+            for (let i = 0; i < buffer.length; i++) if (buffer[i] > 0x7f) return false;
+            return true;
+          };
+        } else if (name === 'stream') {
+          if (!m.destroy) m.destroy = function(stream, error) { if (stream.destroy) stream.destroy(error); return stream; };
+          if (!m.isReadable) m.isReadable = function(stream) { return !!(stream && stream.readable && !stream.destroyed); };
+          // node returns NULL when it can't tell (a plain Readable has no writable side),
+          // not false — callers distinguish "not writable" from "unknown".
+          if (!m.isWritable) m.isWritable = function(stream) {
+            if (!stream || typeof stream.writable !== 'boolean') return null;
+            return !!(stream.writable && !stream.destroyed);
+          };
+          if (!m.isDestroyed) m.isDestroyed = function(stream) { return !!(stream && stream.destroyed); };
+          if (!m.isErrored) m.isErrored = function(stream) { return !!(stream && stream.errored); };
+          if (!m.getDefaultHighWaterMark) m.getDefaultHighWaterMark = function(objectMode) { return objectMode ? 16 : 65536; };
+          if (!m.setDefaultHighWaterMark) m.setDefaultHighWaterMark = function() {};
+          if (!m.addAbortSignal) m.addAbortSignal = function(signal, stream) {
+            if (signal && signal.addEventListener) {
+              signal.addEventListener('abort', function(){ if (stream.destroy) stream.destroy(signal.reason); });
+            }
+            return stream;
+          };
+        } else if (name === 'zlib') {
+          // CRC-32 is real and cheap; zip/tar code computes it directly.
+          if (!m.crc32) m.crc32 = function(input) {
+            const buffer = Buffer.isBuffer(input) ? input : Buffer.from(String(input));
+            let crc = 0xffffffff;
+            for (let i = 0; i < buffer.length; i++) {
+              crc ^= buffer[i];
+              for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+            }
+            return (crc ^ 0xffffffff) >>> 0;
+          };
+          if (!m.codes) m.codes = { Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1,
+                                    Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3, Z_MEM_ERROR: -4,
+                                    Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6 };
+          // No libbrotli/libzstd on the device: refuse rather than pretend.
+          for (const missing of ['brotliCompress', 'brotliCompressSync', 'brotliDecompress',
+                                 'brotliDecompressSync', 'createBrotliCompress', 'createBrotliDecompress']) {
+            if (!m[missing]) m[missing] = refuse('zlib', missing, 'brotli is not built into this device');
+          }
+        } else if (name === 'http' || name === 'https') {
+          if (!m.validateHeaderName) m.validateHeaderName = function(header) {
+            if (!/^[\^`\-\w!#$%&'*+.|~]+$/.test(String(header))) {
+              const error = new TypeError('Header name must be a valid HTTP token');
+              error.code = 'ERR_INVALID_HTTP_TOKEN';
+              throw error;
+            }
+          };
+          if (!m.validateHeaderValue) m.validateHeaderValue = function(header, value) {
+            if (value === undefined) {
+              const error = new TypeError('Invalid value "undefined" for header "' + header + '"');
+              error.code = 'ERR_HTTP_INVALID_HEADER_VALUE';
+              throw error;
+            }
+          };
+        } else if (name === 'os') {
+          if (!m.availableParallelism) m.availableParallelism = function() { return 1; };
+          if (!m.machine) m.machine = function() { return 'arm64'; };
+          if (!m.version) m.version = function() { return 'Darwin Kernel (Mouse)'; };
+        } else if (name === 'readline') {
+          // LAZY: readline/promises requires readline, so an eager assignment here recurses
+          // (readline → promises → readline → …) and never terminates.
+          if (!m.promises) {
+            Object.defineProperty(m, 'promises', {
+              get: function(){ return coreRequire('readline/promises'); },
+              configurable: true,
+            });
+          }
+        } else if (name === 'crypto') {
+          // Class identities for instanceof checks (the factories stay the entry points).
+          if (!m.Hash) m.Hash = Object.getPrototypeOf(m.createHash('sha256')).constructor;
+          if (!m.Hmac) m.Hmac = Object.getPrototypeOf(m.createHmac('sha256', 'k')).constructor;
+          for (const missing of ['createCipheriv', 'createDecipheriv', 'generateKeyPairSync',
+                                 'createSign', 'createVerify', 'createDiffieHellman']) {
+            if (!m[missing]) m[missing] = refuse('crypto', missing, 'ciphers and key exchange are not implemented (digests, HMAC and randomness are)');
+          }
+        } else if (name === 'child_process') {
+          if (!m.execFile) m.execFile = function(file, args, options, callback) {
+            if (typeof args === 'function') { callback = args; args = []; options = {}; }
+            else if (typeof options === 'function') { callback = options; options = {}; }
+            const parts = [file].concat((args || []).map(function(a){ return "'" + String(a).replace(/'/g, "'\\''") + "'"; }));
+            return m.exec(parts.join(' '), options, callback);
+          };
+          if (!m.fork) m.fork = refuse('child_process', 'fork', 'no process spawning on iOS (msh runs commands in-process)');
+          if (!m.ChildProcess) {
+            const EventEmitter = coreRequire('events');
+            function ChildProcess() { EventEmitter.call(this); }
+            ChildProcess.prototype = Object.create(EventEmitter.prototype);
+            ChildProcess.prototype.constructor = ChildProcess;
+            m.ChildProcess = ChildProcess;
+          }
+        }
+        return m;
+      }
       function coreRequire(name) {
         if (coreCache[name]) return coreCache[name];
         const factory = coreFactories[name];
         if (!factory) throw new Error("Unknown core module '" + name + "'");
-        const exports = factory();
+        const exports = augmentCore(name, factory());
         coreCache[name] = exports;
         return exports;
       }

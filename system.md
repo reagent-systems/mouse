@@ -617,6 +617,34 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   so check the file rather than awaiting `close`. Not chased further —
   the functional result is already correct and the remaining piece is a
   third-party polyfill's internal bookkeeping
+- **Whole-surface core-module audit: ~60 missing members filled.** The
+  proactive-audit method applied to EVERY core module at once — each
+  module's exports enumerated in both engines and diffed. ~180 names were
+  missing; the ones real packages actually reach for are now implemented in
+  a single documented `augmentCore()` sweep (kept in one place because it
+  is a completeness pass, not part of any module's design): `path.format`/
+  `toNamespacedPath`; `querystring.escape`/`unescape`/`encode`/`decode`;
+  `url.format`/`resolve`/`urlToHttpOptions`/`URLSearchParams`;
+  `assert.rejects`/`doesNotReject`/`doesNotMatch`/`AssertionError`;
+  `events.listenerCount`/`getEventListeners`/`setMaxListeners`/
+  `addAbortListener`; `buffer.isUtf8`/`isAscii`; `stream.destroy`/
+  `isReadable`/`isWritable`/`isDestroyed`/`isErrored`/`addAbortSignal`/
+  `getDefaultHighWaterMark`; **a real `zlib.crc32`** (zip/tar code computes
+  it directly) plus `zlib.codes`; `http.validateHeaderName`/
+  `validateHeaderValue`; `child_process.execFile` (through the msh bridge)
+  and a `ChildProcess` identity; `os.availableParallelism`/`machine`/
+  `version`; `readline.promises`; `crypto.Hash`/`Hmac` identities; and
+  `util.TextEncoder`/`TextDecoder`/`formatWithOptions`/`getSystemErrorName`
+  plus the `inspect.custom` and `promisify.custom` SYMBOLS libraries key
+  off. What can't be supported refuses honestly (brotli/zstd have no
+  library on the device; `child_process.fork` has no process to spawn;
+  ciphers and key exchange aren't implemented while digests/HMAC/randomness
+  are). The fixture caught three real bugs in my own first draft, all now
+  fixed: `stream.isWritable` must return NULL (not false) when writability
+  is indeterminate, node 22's default highWaterMark is 64 KiB (not 16),
+  and an eager `readline.promises` recursed forever (readline → promises →
+  readline) — it is a lazy getter now. 63 node fixtures, PHASE F, TTY, e2e,
+  package batches, Swift 6 build — green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
