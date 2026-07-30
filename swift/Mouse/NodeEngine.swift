@@ -4011,6 +4011,29 @@ final class NodeEngine: @unchecked Sendable {
         return out;
       };
 
+      // A form body is either urlencoded or multipart, and `formData()` reads both. The
+      // multipart boundary comes from the Content-Type header rather than the body itself.
+      globalThis.__parseFormBody = function(text, headers) {
+        const form = new FormData();
+        const type = (headers && typeof headers.get === 'function' && headers.get('content-type')) || '';
+        const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(type);
+        if (boundaryMatch) {
+          const boundary = '--' + (boundaryMatch[1] || boundaryMatch[2]).trim();
+          for (const part of text.split(boundary)) {
+            const split = part.indexOf('\r\n\r\n');
+            if (split < 0) continue;
+            const nameMatch = /name="([^"]*)"/i.exec(part.slice(0, split));
+            if (!nameMatch) continue;
+            let value = part.slice(split + 4);
+            if (value.endsWith('\r\n')) value = value.slice(0, -2);
+            form.append(nameMatch[1], value);
+          }
+          return form;
+        }
+        for (const pair of new URLSearchParams(text)) form.append(pair[0], pair[1]);
+        return form;
+      };
+
       globalThis.__toBytes = function(value, encoding) {
         if (Buffer.isBuffer(value)) return value;
         if (ArrayBuffer.isView(value)) {
@@ -4391,7 +4414,7 @@ final class NodeEngine: @unchecked Sendable {
       // Non-signal process events ('warning', 'exit', 'beforeExit', …): registered and
       // introspectable; the host emits what it can.
       const processEvents = {};
-      function makeOutputStream(sink) {
+      function makeOutputStream(sink, descriptor) {
         const listeners = {};
         const stream = {
           // Present on every other Writable here; a caller that guards on them should not have to
@@ -4459,6 +4482,9 @@ final class NodeEngine: @unchecked Sendable {
         // output is a pipe or a file the properties are absent, not false. Both are falsy, so
         // `if (stream.isTTY)` behaves the same either way — but `'columns' in stream` does not,
         // and that is the check a layout-aware writer makes.
+        Object.defineProperty(stream, 'fd', { value: descriptor, enumerable: true, configurable: true });
+        if (!('writable' in stream)) stream.writable = true;
+        if (!('readable' in stream)) stream.readable = false;
         if (__isTTY) {
           stream.isTTY = true;
           stream.columns = __ttyColumns;
@@ -4630,6 +4656,11 @@ final class NodeEngine: @unchecked Sendable {
             return shared[name].apply(this, arguments);
           };
         }
+        // `readable`/`writable` may already be accessors on these objects, and assigning over
+        // an accessor without a setter throws. Only fill what is genuinely absent.
+        Object.defineProperty(stream, 'fd', { value: 0, enumerable: true, configurable: true });
+        if (!('readable' in stream)) stream.readable = true;
+        if (!('writable' in stream)) stream.writable = false;
         return stream;
       }
 
@@ -4889,6 +4920,15 @@ final class NodeEngine: @unchecked Sendable {
           return process;
         },
         once: function(event, handler){ return process.on(event, handler); },
+        // The public EventEmitter surface was one method short: node has this and code that
+        // wants to run BEFORE existing handlers, exactly once, has nowhere else to go.
+        prependOnceListener: function(event, handler){
+          const wrapper = function(){
+            process.off(event, wrapper);
+            return handler.apply(this, arguments);
+          };
+          return process.prependListener(event, wrapper);
+        },
         off: function(event, handler){
           const list = signalHandlers[event] || processEvents[event];
           if (list) { const i = list.indexOf(handler); if (i >= 0) list.splice(i, 1); }
@@ -4915,8 +4955,8 @@ final class NodeEngine: @unchecked Sendable {
           for (const handler of list) handler.apply(process, args);
           return list.length > 0;
         },
-        stdout: makeOutputStream(bridge.stdout),
-        stderr: makeOutputStream(bridge.stderr),
+        stdout: makeOutputStream(bridge.stdout, 1),
+        stderr: makeOutputStream(bridge.stderr, 2),
         stdin: makeInputStream(),
       };
       function refusal(name) {
@@ -8309,6 +8349,12 @@ final class NodeEngine: @unchecked Sendable {
         });
         target.text = function() { target.bodyUsed = true; return Promise.resolve(bytes.toString()); };
         target.json = function() { target.bodyUsed = true; return Promise.resolve(JSON.parse(bytes.toString())); };
+        // The body readers are a SET — text, json, arrayBuffer, blob, bytes and formData. Only
+        // this one was missing, so a handler reading a posted form got "not a function".
+        target.formData = function() {
+          target.bodyUsed = true;
+          return Promise.resolve(globalThis.__parseFormBody(bytes.toString(), target.headers));
+        };
         target.bytes = function() { target.bodyUsed = true; return Promise.resolve(new Uint8Array(bytes)); };
         target.arrayBuffer = function() {
           target.bodyUsed = true;
@@ -8343,6 +8389,11 @@ final class NodeEngine: @unchecked Sendable {
         }
         target.text = function() { return drain().then(function(bytes){ return bytes.toString(); }); };
         target.json = function() { return drain().then(function(bytes){ return JSON.parse(bytes.toString()); }); };
+        target.formData = function() {
+          return drain().then(function(bytes){
+            return globalThis.__parseFormBody(bytes.toString(), target.headers);
+          });
+        };
         target.bytes = function() { return drain().then(function(bytes){ return new Uint8Array(bytes); }); };
         target.arrayBuffer = function() {
           return drain().then(function(bytes) {

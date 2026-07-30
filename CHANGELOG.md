@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `process.prependOnceListener`, `fd`/`readable`/`writable` on `process.stdout`,
+  `stderr` and `stdin`, and `Response.formData()` — which reads urlencoded and multipart bodies,
+  taking the multipart boundary from the Content-Type header. It was the only body reader
+  missing from the fetch set.
+
 - Node layer: `process.threadCpuUsage`, `process.finalization` and `process.assert`; and
   `process.dlopen`/`process.execve` refuse by name with the reason (no executable mapping, no
   exec) instead of being absent.
