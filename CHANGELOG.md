@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `crypto.diffieHellman` works — node's key-object agreement over X25519
+  and the EC curves. Its refusal cited the bignum that finite-field DH needs, which is
+  a different function; the capability was already present via CryptoKit. Adds X25519
+  key generation, and `keyIdentify` now tells X25519 from Ed25519 by OID (same wrapper
+  shape and same 32 bytes, so length cannot). Verified by a cross-engine exchange where
+  node and this engine each hold half the pair and derive the same secret.
 - Node layer: `fs.glob`/`fs.globSync` are real — brace expansion, `**`, character
   classes and node's dotfile rules, returning node's exact file lists on a real tree.
   `path.matchesGlob` and glob's `exclude` option stay refused, each naming a measured

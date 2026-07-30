@@ -1074,6 +1074,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **`crypto.diffieHellman` — a real constraint attached to the wrong function.** The
+  refusal read "finite-field DH needs a bignum implementation", which is true and
+  applies to `crypto.createDiffieHellman`. But `crypto.diffieHellman({privateKey,
+  publicKey})` is a DIFFERENT function: node's KEY OBJECT agreement, which covers
+  X25519 and the EC curves — every one of which CryptoKit already does, and three of
+  which this engine was already computing through `createECDH`. So the capability was
+  present and only the entry point was missing. Same shape as cluster's and
+  BroadcastChannel's refusals: a genuine limit, bound to the wrong thing.
+  What was actually missing was smaller than the reason implied: X25519 key
+  GENERATION (its PKCS#8/SPKI wrappers are fixed-shape like Ed25519's, differing only
+  in the OID — 1.3.101.110 against .112), and teaching `keyIdentify` to tell the two
+  apart. They resist a length check: same wrapper shape, same 32 raw bytes, so only the
+  OID separates them, and a fixture now pins that they stay distinct.
+  Verified two ways. Both halves inside one engine, for all four curves, matching real
+  node's secret lengths exactly. And a CROSS-ENGINE exchange, which is the one that
+  matters: node generates a pair, this engine generates a pair, each computes the shared
+  secret from its own private key and the other's public key, and the two secrets are
+  identical. A secret both engines derive independently cannot be a private convention.
+  `createDiffieHellman` still refuses and still says bignum, which is now the truth
+  about the function it names. X448 has no CryptoKit support and refuses too — and the
+  fixture that used to pin x25519 as refused had gone stale in my favour, so it was
+  corrected to pin x448 rather than left to pass by luck.
 - **`fs.glob` ships; `path.matchesGlob` keeps its refusal, now with numbers.** The
   refusal said "glob semantics are a corpus of edge cases and a partial matcher would
   be worse than none". That is a judgement about RISK, not a claim of impossibility —

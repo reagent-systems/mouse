@@ -1216,6 +1216,12 @@ final class NodeEngine: @unchecked Sendable {
         // parsed loosely, so a malformed key errors instead of yielding garbage.
         let ed25519PrivatePrefix = Data([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03,
                                          0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20])
+        // X25519's PKCS#8/SPKI wrappers are fixed-shape like Ed25519's — only the OID differs
+        // (1.3.101.110 vs .112) — so the raw 32 bytes CryptoKit wants are a prefix strip away.
+        let x25519PrivatePrefix = Data([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03,
+                                        0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20])
+        let x25519PublicPrefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e,
+                                       0x03, 0x21, 0x00])
         let ed25519PublicPrefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
                                         0x03, 0x21, 0x00])
         func pemBody(_ pem: String) -> Data? {
@@ -1265,6 +1271,18 @@ final class NodeEngine: @unchecked Sendable {
             }
             if edPrivate(pem) != nil || edPublic(pem) != nil {
                 return ["type": "ed25519", "curve": ""] as [String: Any]
+            }
+            // X25519 is told apart from Ed25519 by its OID alone — same wrapper shape, and both
+            // are 32 raw bytes, so a length check would confuse them.
+            if let body = NodeKeys.der(fromPEM: pem) {
+                if body.count == x25519PrivatePrefix.count + 32,
+                   body.prefix(x25519PrivatePrefix.count) == x25519PrivatePrefix {
+                    return ["type": "x25519", "curve": ""] as [String: Any]
+                }
+                if body.count == x25519PublicPrefix.count + 32,
+                   body.prefix(x25519PublicPrefix.count) == x25519PublicPrefix {
+                    return ["type": "x25519", "curve": ""] as [String: Any]
+                }
             }
             return ["type": "unknown", "curve": ""] as [String: Any]
         }
@@ -1382,6 +1400,11 @@ final class NodeEngine: @unchecked Sendable {
                 let key = P521.Signing.PrivateKey()
                 return ["privateKey": key.pemRepresentation,
                         "publicKey": key.publicKey.pemRepresentation] as [String: Any]
+            case ("x25519", _):
+                let key = Curve25519.KeyAgreement.PrivateKey()
+                return ["privateKey": pemWrap(x25519PrivatePrefix + key.rawRepresentation, "PRIVATE KEY"),
+                        "publicKey": pemWrap(x25519PublicPrefix + key.publicKey.rawRepresentation,
+                                             "PUBLIC KEY")] as [String: Any]
             case ("ed25519", _):
                 let key = Curve25519.Signing.PrivateKey()
                 let privateBody = ed25519PrivatePrefix + key.rawRepresentation
@@ -1482,6 +1505,50 @@ final class NodeEngine: @unchecked Sendable {
                 }
             } catch { return NSNull() }
         }
+        // `crypto.diffieHellman({privateKey, publicKey})` — node's KEY OBJECT agreement, which is
+        // X25519 and the EC curves, NOT finite-field DH. The refusal used to say "finite-field DH
+        // needs a bignum implementation": true of `createDiffieHellman`, and the wrong function.
+        // CryptoKit reads EC PEMs directly; X25519 has no PEM initialiser, so its fixed wrapper
+        // is stripped above.
+        let keyAgree: @convention(block) (String, String) -> Any = { privatePEM, publicPEM in
+            func der(_ pem: String) -> Data? {
+                let joined = pem.split(separator: "\n").filter { !$0.hasPrefix("-----") }.joined()
+                return Data(base64Encoded: joined)
+            }
+            // X25519 first: its OID is what distinguishes it, and CryptoKit wants raw bytes.
+            if let privateDER = der(privatePEM), let publicDER = der(publicPEM),
+               privateDER.count == x25519PrivatePrefix.count + 32,
+               privateDER.prefix(x25519PrivatePrefix.count) == x25519PrivatePrefix,
+               publicDER.count == x25519PublicPrefix.count + 32,
+               publicDER.prefix(x25519PublicPrefix.count) == x25519PublicPrefix {
+                do {
+                    let key = try Curve25519.KeyAgreement.PrivateKey(
+                        rawRepresentation: privateDER.suffix(32))
+                    let peer = try Curve25519.KeyAgreement.PublicKey(
+                        rawRepresentation: publicDER.suffix(32))
+                    let secret = try key.sharedSecretFromKeyAgreement(with: peer)
+                    return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+                } catch { return NSNull() }
+            }
+            // Then the EC curves, whichever one the PEM turns out to be.
+            if let key = try? P256.KeyAgreement.PrivateKey(pemRepresentation: privatePEM),
+               let peer = try? P256.KeyAgreement.PublicKey(pemRepresentation: publicPEM),
+               let secret = try? key.sharedSecretFromKeyAgreement(with: peer) {
+                return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+            }
+            if let key = try? P384.KeyAgreement.PrivateKey(pemRepresentation: privatePEM),
+               let peer = try? P384.KeyAgreement.PublicKey(pemRepresentation: publicPEM),
+               let secret = try? key.sharedSecretFromKeyAgreement(with: peer) {
+                return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+            }
+            if let key = try? P521.KeyAgreement.PrivateKey(pemRepresentation: privatePEM),
+               let peer = try? P521.KeyAgreement.PublicKey(pemRepresentation: publicPEM),
+               let secret = try? key.sharedSecretFromKeyAgreement(with: peer) {
+                return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+            }
+            return NSNull()
+        }
+        expose("keyAgree", keyAgree)
         expose("ecdhGenerate", ecdhGenerate)
         expose("ecdhCompute", ecdhCompute)
         expose("keyIdentify", keyIdentify)
@@ -8612,8 +8679,8 @@ final class NodeEngine: @unchecked Sendable {
         function generateKeyPairSync(type, options) {
           options = options || {};
           const kind = String(type).toLowerCase();
-          if (kind !== 'ec' && kind !== 'ed25519' && kind !== 'rsa') {
-            throw Object.assign(new Error("Key type '" + type + "' is not available: this device generates RSA through SecKey and EC (P-256/384/521) and Ed25519 through CryptoKit; DSA and DH have no system implementation"),
+          if (kind !== 'ec' && kind !== 'ed25519' && kind !== 'x25519' && kind !== 'rsa') {
+            throw Object.assign(new Error("Key type '" + type + "' is not available: this device generates RSA through SecKey and EC (P-256/384/521), Ed25519 and X25519 through CryptoKit; DSA, DH and X448 have no system implementation"),
                                 { code: 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED' });
           }
           const pair = kind === 'rsa'
@@ -8825,7 +8892,27 @@ final class NodeEngine: @unchecked Sendable {
           createDiffieHellman: refuseCrypto('createDiffieHellman', 'finite-field DH needs a bignum implementation'),
           createDiffieHellmanGroup: refuseCrypto('createDiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
           getDiffieHellman: refuseCrypto('getDiffieHellman', 'finite-field DH needs a bignum implementation'),
-          diffieHellman: refuseCrypto('diffieHellman', 'finite-field DH needs a bignum implementation'),
+          // Key-object agreement: X25519 and the EC curves, all of which CryptoKit does. The
+          // finite-field API (createDiffieHellman) is the one that needs a bignum, and it is a
+          // different function — the old refusal here named that one by mistake.
+          diffieHellman: function(options) {
+            options = options || {};
+            const privatePem = keyPem(options.privateKey);
+            const publicPem = keyPem(options.publicKey);
+            if (!privatePem || !publicPem) {
+              throw Object.assign(new TypeError('The "options.privateKey" and ' +
+                                                '"options.publicKey" properties are required'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            const secret = bridge.keyAgree(privatePem, publicPem);
+            if (secret === null || secret === undefined) {
+              throw Object.assign(
+                new Error('crypto.diffieHellman failed: this key pair is not an X25519 or EC ' +
+                          'pair (X448 and finite-field groups are not available here)'),
+                { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+            }
+            return Buffer.from(String(secret), 'base64');
+          },
           ECDH: { convertKey: refuseCrypto('ECDH.convertKey', 'point compression conversion is not exposed by CryptoKit') },
           DiffieHellman: refuseCrypto('DiffieHellman', 'finite-field DH needs a bignum implementation'),
           DiffieHellmanGroup: refuseCrypto('DiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
