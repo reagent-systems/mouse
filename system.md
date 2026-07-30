@@ -585,14 +585,38 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   `class extends` still works, and the ES5 `.call` path works. Verified by
   a 10-case shape audit and fixture `stream-es5-inherits` (all six bases
   ES5-callable, an inherited Writable collecting real data end to end, and
-  a `class extends Transform` still transforming). The conversion was done
+  a `class extends Transform` still transforming).
+  Also from the same audit method: **10 of node's 11 observable stream
+  STATE properties were missing** — `readableEnded`, `readableFlowing`
+  (null-then-boolean, as node reports it), `readableLength`,
+  `readableObjectMode`, `writableEnded`, `writableFinished`,
+  `writableLength`, `writableObjectMode`, `closed`, `errored`. Every "is
+  this stream done?" helper in the ecosystem branches on these, and they
+  all silently read `undefined`. Now real getters over the existing state,
+  matching node's types exactly and pinned behaviourally by fixture
+  `stream-state-props`. The conversion was done
   with `node --check` on the extracted bootstrap in the loop, which caught
   two transformation slips (single-line methods, missing object commas)
   before they ever reached a test. Also, real node disagreed with the first
   draft of the fixture and was RIGHT: node's `StringDecoder` validates its
   encoding and throws `ERR_UNKNOWN_ENCODING`, ours accepted anything —
-  now fixed and asserted. All 60 node fixtures, PHASE F, TTY, e2e, the
+  now fixed and asserted. All 61 node fixtures, PHASE F, TTY, e2e, the
   package batches, and the Swift 6 build green
+- **archiver: correct output, completion events don't propagate (closed
+  investigation).** Re-tested after the ES5 fix, and the finding is stable
+  and specific: archiver writes a **byte-correct ZIP** (50 bytes, `PK`
+  magic, `archive.pointer()` agreeing with the file size) through both
+  `archive.pipe(out)` and `stream.pipeline(archive, out, cb)`, but neither
+  the destination's `close`/`finish` nor pipeline's callback fires. Our own
+  streams DO signal correctly — standalone and under `pipeline` with an
+  ordinary Readable, proven in `fs-stream-events` — so the gap is inside
+  readable-stream's end-of-stream detection for archiver's readable side,
+  not our emitters. Instrumenting `out.write` also perturbs it (the writes
+  stop happening), which points at readable-stream's flow-control rather
+  than a missing method. Practical guidance for now: the archive is valid,
+  so check the file rather than awaiting `close`. Not chased further —
+  the functional result is already correct and the remaining piece is a
+  third-party polyfill's internal bookkeeping
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

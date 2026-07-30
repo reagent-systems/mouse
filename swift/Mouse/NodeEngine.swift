@@ -2893,6 +2893,18 @@ final class NodeEngine: @unchecked Sendable {
         function Readable(options) { Stream.call(this); initReadable(this, options); }
         Readable.prototype = Object.create(Stream.prototype);
         Readable.prototype.constructor = Readable;
+        // node's observable stream STATE. Libraries branch on these to decide whether a
+        // stream finished (readable-stream, pump, get-stream, and every "is it done yet"
+        // helper) — 10 of the 11 were missing, so those checks silently read undefined.
+        Object.defineProperties(Readable.prototype, {
+          readableEnded: { get: function(){ return !!this._endEmitted; }, configurable: true },
+          // node reports null before flowing starts, then true/false.
+          readableFlowing: { get: function(){ return this._flowing ? true : (this._everFlowed ? false : null); }, configurable: true },
+          readableLength: { get: function(){ return (this._buf || []).reduce(function(n, c){ return n + (c.length || 1); }, 0); }, configurable: true },
+          readableObjectMode: { get: function(){ return !!this._objectMode; }, configurable: true },
+          closed: { get: function(){ return !!this._closeEmitted; }, configurable: true },
+          errored: { get: function(){ return this._errored || null; }, configurable: true },
+        });
         Object.assign(Readable.prototype, {
           _read: function() {},
           _coerce: function(chunk) {
@@ -2927,7 +2939,7 @@ final class NodeEngine: @unchecked Sendable {
               process.nextTick(() => {
                 this.readable = false;
                 this.emit('end');
-                process.nextTick(() => this.emit('close'));
+                process.nextTick(() => { this._closeEmitted = true; this.emit('close'); });
               });
             }
           },
@@ -2945,7 +2957,7 @@ final class NodeEngine: @unchecked Sendable {
             this._maybeEnd();
             return this._readableEncoding ? out : Buffer.from(out);
           },
-          resume: function() { if (!this._flowing) { this._flowing = true; this._drain(); } return this; },
+          resume: function() { if (!this._flowing) { this._flowing = true; this._everFlowed = true; this._drain(); } return this; },
           pause: function() { this._flowing = false; return this; },
           isPaused: function() { return !this._flowing; },
           setEncoding: function(enc) { this._readableEncoding = enc; return this; },
@@ -3059,7 +3071,7 @@ final class NodeEngine: @unchecked Sendable {
             const finish = () => {
               this.writable = false;
               this.emit('finish');
-              process.nextTick(() => this.emit('close'));
+              process.nextTick(() => { this._closeEmitted = true; this.emit('close'); });
             };
             if (this._final) this._final((err) => { if (err) this.emit('error', err); finish(); });
             else finish();
@@ -3077,6 +3089,16 @@ final class NodeEngine: @unchecked Sendable {
         Writable.prototype = Object.create(Stream.prototype);
         Writable.prototype.constructor = Writable;
         Object.assign(Writable.prototype, writableMethods);
+        // Same for the writable side; defined once and re-applied to Duplex/Transform below.
+        const writableState = {
+          writableEnded: { get: function(){ return !!this._writableEnded; }, configurable: true },
+          writableFinished: { get: function(){ return !!this._finishEmitted; }, configurable: true },
+          writableLength: { get: function(){ return (this._wbuf || []).length; }, configurable: true },
+          writableObjectMode: { get: function(){ return !!this._writableObjectMode; }, configurable: true },
+          closed: { get: function(){ return !!this._closeEmitted; }, configurable: true },
+          errored: { get: function(){ return this._errored || null; }, configurable: true },
+        };
+        Object.defineProperties(Writable.prototype, writableState);
 
         // Duplex inherits Readable's prototype and GRAFTS the writable methods on — JS gives
         // one prototype chain, and node does the same thing.
@@ -3084,6 +3106,7 @@ final class NodeEngine: @unchecked Sendable {
         Duplex.prototype = Object.create(Readable.prototype);
         Duplex.prototype.constructor = Duplex;
         Object.assign(Duplex.prototype, writableMethods);
+        Object.defineProperties(Duplex.prototype, writableState);
 
         function Transform(options) {
           options = options || {};
