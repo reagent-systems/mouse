@@ -112,6 +112,9 @@ final class NodeEngine: @unchecked Sendable {
             handlesLock.lock(); openHandles -= 1; handlesLock.unlock()
             wakeup.signal()
         })
+    /// Children whose handle still holds the event loop open (node's ref/unref, per child).
+    private var refedChildren: Set<Int> = []
+
     /// Child engines by id — a spawned node process is one of these.
     private var children: [Int: NodeEngine] = [:]
 
@@ -618,6 +621,7 @@ final class NodeEngine: @unchecked Sendable {
                 rawModeChanged: { _ in }))
             child.markStdioAsPipe()
             children[id] = child
+            refedChildren.insert(id)
             let source = (try? String(contentsOf: realURL(script), encoding: .utf8)) ?? script
             Task.detached { [weak self] in
                 let result = await child.run(source: source, path: script,
@@ -628,7 +632,9 @@ final class NodeEngine: @unchecked Sendable {
                     if !result.err.isEmpty { carried.value.call(withArguments: ["stderr", result.err]) }
                     carried.value.call(withArguments: ["exit", Int(result.status)])
                     self.children[id] = nil
-                    self.outstanding -= 1
+                    // Only give back the handle if it is still held; an unref'd child already
+                    // returned it.
+                    if self.refedChildren.remove(id) != nil { self.outstanding -= 1 }
                 }
             }
             return Int32(id)
@@ -642,6 +648,20 @@ final class NodeEngine: @unchecked Sendable {
         let spawnKill: @convention(block) (Int32) -> Void = { [weak self] id in
             self?.children[Int(id)]?.terminate()
         }
+        // `child.unref()` must genuinely release the handle. esbuild keeps its service alive
+        // with a ping loop and unrefs the child so the loop does not hold the PROGRAM open —
+        // with a no-op unref, `transform()` resolved and then nothing ever exited.
+        let spawnRef: @convention(block) (Int32, Bool) -> Void = { [weak self] id, refed in
+            guard let self, children[Int(id)] != nil else { return }
+            if refed, !refedChildren.contains(Int(id)) {
+                refedChildren.insert(Int(id))
+                outstanding += 1
+            } else if !refed, refedChildren.contains(Int(id)) {
+                refedChildren.remove(Int(id))
+                outstanding -= 1
+            }
+        }
+        expose("spawnRef", spawnRef)
         expose("spawnNode", spawnNode)
         expose("spawnWrite", spawnWrite)
         expose("spawnEnd", spawnEnd)
@@ -2699,6 +2719,19 @@ final class NodeEngine: @unchecked Sendable {
       }
 
       // ---- ESM interop (the transpiler emits these) ----
+      // One coercion for "bytes a caller handed us": a Buffer, ANY view over bytes (a Uint8Array
+      // from wasm, a DataView), an ArrayBuffer, or a string with its encoding. The shape this
+      // replaces — `Buffer.isBuffer(x) ? x : Buffer.from(String(x))` — turns a Uint8Array of
+      // [7,0,0,0] into the TEXT "7,0,0,0", which is exactly how esbuild's protocol packets and
+      // Go's stdout writes were corrupted. Ten places had that shape.
+      globalThis.__toBytes = function(value, encoding) {
+        if (Buffer.isBuffer(value)) return value;
+        if (ArrayBuffer.isView(value)) {
+          return Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+        }
+        if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
+        return Buffer.from(String(value), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+      };
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
       globalThis.__reexportStar = function(target, source) {
         for (const key of Object.keys(source)) {
@@ -3930,13 +3963,13 @@ final class NodeEngine: @unchecked Sendable {
             return encoding ? buffer.toString(encoding) : buffer;
           },
           writeFileSync: function(file, data, options) {
-            const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+            const buffer = __toBytes(data);
             if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), false)) {
               throw new Error("EACCES: cannot write '" + file + "'");
             }
           },
           appendFileSync: function(file, data) {
-            const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+            const buffer = __toBytes(data);
             if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), true)) {
               throw new Error("EACCES: cannot append '" + file + "'");
             }
@@ -5249,7 +5282,8 @@ final class NodeEngine: @unchecked Sendable {
           child.pid = id;
           child.stdin = new Writable({
             write: function(chunk, encoding, callback) {
-              const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8');
+              // A protocol writes Uint8Arrays; stringifying one is how the packets died.
+              const bytes = __toBytes(chunk, encoding);
               bridge.spawnWrite(id, bytes.toString('latin1'));
               callback();
             },
@@ -5261,8 +5295,8 @@ final class NodeEngine: @unchecked Sendable {
             bridge.spawnKill(id);
             return true;
           };
-          child.unref = function(){ return child; };
-          child.ref = function(){ return child; };
+          child.unref = function(){ bridge.spawnRef(id, false); return child; };
+          child.ref = function(){ bridge.spawnRef(id, true); return child; };
           child.disconnect = function(){};
           return child;
         }
@@ -5530,7 +5564,7 @@ final class NodeEngine: @unchecked Sendable {
             throw Object.assign(new Error('WebSocket is not open'), { code: 'ERR_WEBSOCKET_NOT_OPEN' });
           }
           if (typeof data === 'string') { bridge.wsSend(this._id, data, true); return; }
-          const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data.buffer ? new Uint8Array(data.buffer) : data);
+          const bytes = __toBytes(data);
           bridge.wsSend(this._id, bytes.toString('base64'), false);
         }
         close(code, reason) {
@@ -5956,8 +5990,7 @@ final class NodeEngine: @unchecked Sendable {
         ServerResponse.prototype.flushHeaders = function() { this._sendHeaders(); };
 
         ServerResponse.prototype._write = function(chunk, encoding, callback) {
-          const buffer = Buffer.isBuffer(chunk) ? chunk
-            : Buffer.from(String(chunk), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+          const buffer = __toBytes(chunk, encoding);
           // A first write() means the length isn't known up front: headers go out framed
           // chunked, exactly as node does.
           if (!this.headersSent) this._sendHeaders();
@@ -5981,7 +6014,7 @@ final class NodeEngine: @unchecked Sendable {
           // response can be framed with Content-Length instead of chunked.
           if (!this.headersSent && !this._wroteBody) {
             const buffer = chunk === undefined || chunk === null ? Buffer.alloc(0)
-              : (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8'));
+              : __toBytes(chunk, encoding);
             this._sendHeaders(this._bodyless ? undefined : buffer.length);
             if (buffer.length && !this._bodyless) this.socket.write(buffer);
           } else {
@@ -6361,8 +6394,7 @@ final class NodeEngine: @unchecked Sendable {
         });
 
         ClientRequest.prototype._write = function(chunk, encoding, callback) {
-          const buffer = Buffer.isBuffer(chunk) ? chunk
-            : Buffer.from(String(chunk), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+          const buffer = __toBytes(chunk, encoding);
           this._sendHeaders();
           this._wroteBody = true;
           if (buffer.length) {
@@ -6382,7 +6414,7 @@ final class NodeEngine: @unchecked Sendable {
           if (this._finished) return this;
           if (!this._headersSent && !this._wroteBody) {
             const buffer = chunk === undefined || chunk === null ? Buffer.alloc(0)
-              : (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8'));
+              : __toBytes(chunk, encoding);
             this._sendHeaders(framelessMethods.indexOf(this.method) < 0 ? buffer.length : undefined);
             if (buffer.length) this._queue(buffer);
           } else {
@@ -7155,7 +7187,7 @@ final class NodeEngine: @unchecked Sendable {
         };
         Cipher.prototype.setAutoPadding = function(on) { this._autoPad = on !== false; return this; };
         Cipher.prototype.update = function(data, inputEncoding, outputEncoding) {
-          const chunk = Buffer.isBuffer(data) ? data : Buffer.from(String(data), inputEncoding || 'utf8');
+          const chunk = __toBytes(data, inputEncoding);
           this._chunks.push(chunk);
           const empty = Buffer.alloc(0);
           return outputEncoding ? empty.toString(outputEncoding) : empty;
@@ -7324,7 +7356,7 @@ final class NodeEngine: @unchecked Sendable {
           this._chunks = [];
         }
         Signer.prototype.update = function(data, encoding) {
-          this._chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(String(data), encoding || 'utf8'));
+          this._chunks.push(__toBytes(data, encoding));
           return this;
         };
         Signer.prototype.sign = function(key, outputEncoding) {
@@ -7828,8 +7860,7 @@ final class NodeEngine: @unchecked Sendable {
         };
         Socket.prototype._write = function(chunk, encoding, callback) {
           if (!this._sid || this.destroyed) { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); return; }
-          const buffer = Buffer.isBuffer(chunk) ? chunk
-            : Buffer.from(String(chunk), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+          const buffer = __toBytes(chunk, encoding);
           this.bytesWritten += buffer.length;
           this._touchTimeout();
           if (bridge.netWrite(this._sid, buffer.toString('base64'))) callback();

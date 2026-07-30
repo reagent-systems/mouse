@@ -104,6 +104,7 @@ so a TUI navigates and edits.
 | **Phase D — webpack bundles, and WebAssembly works** | **webpack 5 bundles a real project on the engine, byte-identical to real node's output, minified by terser, and the bundle runs.** That is the bundling half of phase D. Two bugs paid for it: `require(".")` did not resolve, and `Buffer.from(arrayBuffer)` COPIED where node shares — which silently broke every wasm interop, webpack's own hashes included. Fixing it revealed that **WebAssembly runs here** (JSC's interpreter-mode wasm), so wasm packages are viable without waiting for the JIT |
 | **Phase G — a live child process** | `spawn('node', …)` is a real process now: a SECOND engine on its own queue, with streaming stdout/stderr, a writable stdin, `kill`, and exit/close events — verified against real node on an INTERLEAVED exchange, where each request depends on the previous answer (a collect-then-report child cannot pass that). `fork` gives the same child and refuses only its IPC channel. Non-node commands still run through msh, which is the right shape for `git status` |
 | **Phase G — byte-exact child stdio** | A piped child's stdio carries BYTES now: latin1 transport both ways, `fs.write` on fd 1/2 accepting any `ArrayBufferView` and reporting the true byte count, `fs.read` on fd 0 WAITING for data with exactly one callback per read, `fs.constants` filled from 4 entries to node's 55, and a piped child correctly reporting `isTTY: false`. Verified against real node on a Go-style child that reads with `fs.read(0)` rather than events — identical bytes, counts and EOF |
+| **Phase D — esbuild-wasm runs** | **A whole compiler in WebAssembly transforms AND bundles on the engine, byte-identical to real node.** The last two pieces were one shared byte coercion (ten places stringified a plain `Uint8Array` instead of taking its bytes) and a REAL `child.unref()` — esbuild keeps its service alive with a ping loop and unrefs the child, so a no-op unref meant `transform()` resolved and then nothing ever exited |
 
 ### Verification performed
 
@@ -1041,7 +1042,30 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
-- **esbuild-wasm still does not run, and the gap is narrower again.** Its service
+- **esbuild-wasm RUNS: a whole compiler in wasm, transforming and bundling
+  byte-identically to node.** The last two faults, after the five stdio ones:
+  1. **Ten places stringified a plain `Uint8Array`.** The shape
+     `Buffer.isBuffer(x) ? x : Buffer.from(String(x))` turns `[7,0,0,0]` into the
+     TEXT `"7,0,0,0"`, and it was in every writer: socket writes, HTTP request and
+     response bodies, cipher and signer updates, `child.stdin`, WebSocket sends,
+     `fs` writes. esbuild writes its protocol packets as `Uint8Array`s, so its
+     requests were arriving as ASCII digits. One shared `__toBytes` now handles a
+     Buffer, any view over bytes, an ArrayBuffer, or a string with its encoding.
+  2. **`child.unref()` was a no-op.** esbuild keeps its service alive with a ping
+     loop and unrefs the child so that loop does not hold the PROGRAM open. With a
+     no-op, `transform()` resolved correctly and then the process never exited —
+     which is why this looked like a hang long after it had actually started
+     working. `ref`/`unref` now move the child's handle exactly once either way,
+     like a socket's.
+  The chase in full, five turns: "wasm is broken" (wrong — wasm runs) → "no live
+  child process" (built one) → "text-only pipes" (made them byte-exact, five
+  defects) → "something in the handshake" (a `Uint8Array` stringified on the way
+  in) → "it resolves but never exits" (unref). Every step killed a hypothesis and
+  fixed a real bug that had nothing to do with esbuild: any program writing binary
+  to a socket, an HTTP body, a cipher or a child was affected by the coercion bug
+  alone.
+- **esbuild-wasm still does not run, and the gap is narrower again (SUPERSEDED —
+  it runs now, see above).** Its service
   child now starts, speaks, and emits correct length-prefixed packets (verified by
   running the service directly: a version handshake and a `ping` command, bytes
   intact). Driving it through the library still hangs, so something in its

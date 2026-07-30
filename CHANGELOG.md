@@ -43,7 +43,8 @@ carry breaking changes.
   screen**. Verified against real `node` (65 byte-identical fixtures) and
   by running the genuine articles: the Anthropic SDK with token streaming,
   TypeScript's `tsc` (`--watch` included — edit, recompile, diagnostics),
-  **webpack 5** (bundles byte-identically to real node, terser and all), inquirer/prompts, commander/yargs, express routing,
+  **webpack 5** (bundles byte-identically to real node, terser and all),
+  **esbuild-wasm** (a compiler in WebAssembly, driven over a live child process), inquirer/prompts, commander/yargs, express routing,
   tar, prettier, and glob. Big bundles cache their transpile,
   so a 9 MB CLI relaunches in a fifth of a second.
 - **`npm` / `npx` / `pnpm`**: real registry resolution (full semver),
