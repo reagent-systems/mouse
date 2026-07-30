@@ -153,6 +153,13 @@ construction — IP literals and hosts-file names — because node's `resolve4`
 queries a DNS server through c-ares and never reads the hosts file. Record
 types getaddrinfo cannot answer must keep saying so rather than returning an
 empty list.
+Real-package proofs that must keep working (each found bugs no fixture did):
+express (http server), ws in both directions (upgrade + framing), chokidar (the
+watcher every dev tool uses), and **`tsc --watch`** — TypeScript's compiler in
+watch mode must compile, detect an edit through our watcher, recompile, and
+report the same diagnostics as real node. That last one is the phase-D loop
+(edit → recompile → diagnostics) and the heaviest consumer of `fs.watch` there
+is; if it breaks, suspect the watcher or `Stats` before suspecting tsc.
 CIPHERS verify two ways, and the second is the one that matters: with a FIXED
 key and IV the ciphertext, auth tag and derived keys must be byte-identical to
 real node's (a much stronger check than "it round-trips"), and cross-engine —

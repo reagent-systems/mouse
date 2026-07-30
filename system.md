@@ -95,6 +95,7 @@ so a TUI navigates and edits.
 | **Phase G — `fs.watch`** | Real file watching (`NodeWatch.swift`) on kqueue via `DispatchSource`: files, directories, recursive trees, `watchFile`/`unwatchFile`, and the async-iterator form. A directory watch also watches the files inside it, which is the only way kqueue can NAME a modification. **chokidar works** — the watcher under webpack, vite, nodemon and `jest --watch` reports the same events on our engine as on node's. `Stats` grew its real fields in the process (see below) |
 | **Phase G — the core-module surface audit** | Every core module's exports diffed against real node's and the gaps filled where they matter: `fs` 81→105 of 106 (`Stats`/`Dirent` as real classes, `opendir`, `cp`, `writev`/`readv`, `statfs`, the access constants), `fs/promises` 13→32 of 32 (including `open` and a real `FileHandle`), `os` and `stream` and `buffer` and `dns` and `url` and `timers` complete, plus `events.on` as an async iterator, `util.parseArgs`, `process.uptime`/`loadEnvFile`, `assert.CallTracker`. It also found a bug that mattered: our `URL` resolved relative URLs by trimming the base after the last slash |
 | **Phase G — real ciphers and KDFs** | `crypto` 17→70 of 71: AES-128/192/256 in GCM, CBC, CTR and ECB plus ChaCha20-Poly1305 (CryptoKit for the AEAD modes, CommonCrypto for the rest — the only system API that exposes CBC/CTR), `pbkdf2`, `hkdf`, `KeyObject`/`createSecretKey`, `randomFill`, `getCiphers`/`getCipherInfo`/`getHashes`/`getCurves`, `crypto.hash`. Ciphertext, tags and derived keys are byte-identical to node's, and **what one engine seals the other opens**. The asymmetric family refuses with the reason (it needs SecKey key parsing) rather than half-working |
+| **Phase G — `tsc --watch` runs** | TypeScript's compiler in WATCH mode, installed by our package manager and running on our engine: it compiled clean, detected an edit through our kqueue watcher, recompiled, and reported the same diagnostic (`TS2339`) in the same order as real node. The heaviest real consumer of `fs.watch` there is, and a phase-D milestone reached early — **the credible-IDE loop (edit → recompile → diagnostics) now closes on the device** |
 
 ### Verification performed
 
@@ -1004,6 +1005,16 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **`tsc --watch` works, and it passed on the first attempt.** TypeScript's own
+  compiler in watch mode — a 10 MB bundle that builds a watch host out of
+  `fs.watch`/`fs.watchFile`, resolves modules, compiles, and reports diagnostics
+  — ran on our engine against a real project: clean first pass, then an edit was
+  detected, the project recompiled, and the diagnostic (`TS2339: Property
+  'toUpperCase' does not exist on type 'number'`) matched real node's exactly,
+  in the same order. No engine changes were needed, which is the interesting
+  part: the `fs.watch` and `Stats` work done for chokidar was what tsc needed
+  too. **The edit → recompile → diagnostics loop now closes on the device**,
+  which is what phase D was for.
 - **Real symmetric crypto, proven the only way that counts.** AES in GCM, CBC,
   CTR and ECB and ChaCha20-Poly1305 are real — AEAD modes through CryptoKit,
   CBC/CTR/ECB through CommonCrypto, which is the only system API that exposes
@@ -1476,7 +1487,8 @@ into one order. Each ships something usable alone.
 A  msh language           control flow, $(), script files      ✅ DONE — see §5
 B  WebView compute engine the only legal JIT; 10–30× on JS     small, huge leverage
 C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3×
-D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
+D  web toolchain          tsc, bundling, Preview container     PARTLY DONE — tsc compiles AND
+                          watches on the engine (see §0); bundling + Preview remain
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
 G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, real ciphers+KDFs — express, ws and chokidar run; gaps: asymmetric crypto, TLS server, socket pooling, WebView JIT)
