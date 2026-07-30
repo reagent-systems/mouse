@@ -103,6 +103,7 @@ so a TUI navigates and edits.
 | **Phase G — the `WebSocket` global, and `wss://`** | The standard `WebSocket` (which node 22 also exposes) on URLSession's WebSocket task — the one path to **TLS WebSockets** here, since `wss://` needs a handshake we cannot put on a raw socket. Text and binary frames, `binaryType`, `addEventListener`, clean close codes, and `CloseEvent`/`MessageEvent`. Behaves exactly as node 22's does against the same `ws` server. The `ws` PACKAGE keeps riding our own sockets for `ws://`, in both directions |
 | **Phase D — webpack bundles, and WebAssembly works** | **webpack 5 bundles a real project on the engine, byte-identical to real node's output, minified by terser, and the bundle runs.** That is the bundling half of phase D. Two bugs paid for it: `require(".")` did not resolve, and `Buffer.from(arrayBuffer)` COPIED where node shares — which silently broke every wasm interop, webpack's own hashes included. Fixing it revealed that **WebAssembly runs here** (JSC's interpreter-mode wasm), so wasm packages are viable without waiting for the JIT |
 | **Phase G — a live child process** | `spawn('node', …)` is a real process now: a SECOND engine on its own queue, with streaming stdout/stderr, a writable stdin, `kill`, and exit/close events — verified against real node on an INTERLEAVED exchange, where each request depends on the previous answer (a collect-then-report child cannot pass that). `fork` gives the same child and refuses only its IPC channel. Non-node commands still run through msh, which is the right shape for `git status` |
+| **Phase G — byte-exact child stdio** | A piped child's stdio carries BYTES now: latin1 transport both ways, `fs.write` on fd 1/2 accepting any `ArrayBufferView` and reporting the true byte count, `fs.read` on fd 0 WAITING for data with exactly one callback per read, `fs.constants` filled from 4 entries to node's 55, and a piped child correctly reporting `isTTY: false`. Verified against real node on a Go-style child that reads with `fs.read(0)` rather than events — identical bytes, counts and EOF |
 
 ### Verification performed
 
@@ -1013,6 +1014,41 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **Byte-exact child stdio: five defects, found by following one program.** Chasing
+  esbuild's service protocol through a live child turned up five separate faults,
+  every one of which would bite any program doing binary I/O:
+  1. **`fs.write(1, uint8Array, …)` stringified its buffer.** Go's wasm runtime
+     writes stdout that way, and `Buffer.isBuffer` is false for a plain
+     `Uint8Array` — so the bytes became `"7,0,0,0,…"` and the reported count was
+     that string's length. Go panicked with "invalid return from write: got 28
+     from a write of 149". Any `ArrayBufferView` is legal there now.
+  2. **`fs.constants` had 4 of node's 55 entries.** The surface audit counted
+     `constants` as PRESENT because the key existed — a present member can be an
+     empty shell. Go reads `constants.O_WRONLY` directly and panics on undefined
+     ("call of Value.Int on undefined"). Now filled with this platform's real
+     values, dumped from node rather than guessed.
+  3. **A pipe's bytes were decoded as UTF-8.** Text is right for a screen and
+     destroys a binary protocol; a piped child now uses latin1 in both
+     directions — one codepoint per byte, lossless through the String hop.
+  4. **`fs.read(0)` answered 0 immediately**, which a Go program reads as EOF, so
+     the service exited the moment it started listening. It waits for bytes now.
+  5. **A read could call back more than once**, because it waited on `readable`
+     AND `end` — a caller reads that as several reads, enough to desync any
+     protocol. One callback per read, listeners cleaned up either way.
+  Plus a fidelity bug of my own making: a spawned child reported `isTTY: true`
+  because the sink reuses the TTY machinery. A pipe is not a terminal, or a
+  program takes its interactive path — colors, spinners, raw mode — while writing
+  to a parent that wanted bytes.
+  Verified against real node with a child that reads the way Go does — `fs.read(0)`
+  with a callback, not events: identical bytes, counts and EOF.
+- **esbuild-wasm still does not run, and the gap is narrower again.** Its service
+  child now starts, speaks, and emits correct length-prefixed packets (verified by
+  running the service directly: a version handshake and a `ping` command, bytes
+  intact). Driving it through the library still hangs, so something in its
+  handshake beyond the pipes remains — `stdio: ['pipe','pipe','inherit']` asks for
+  an inherited stderr we always pipe, and the service also expects keepalive
+  behavior. That is the next thing to chase, and it is a smaller thing than
+  "wasm", "spawn", or "text pipes" — each of which this chase eliminated in turn.
 - **A live child process, and how far it got esbuild.** `child_process.spawn` meant
   "run a command through msh and collect its output" — correct for `git status`,
   useless for a long-lived peer. A node child is now a SECOND engine on its own

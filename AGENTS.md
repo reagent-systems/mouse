@@ -176,6 +176,17 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**A piped child's stdio is BYTES.** latin1 is the transport in both directions (one
+codepoint per byte, lossless through the String hop); UTF-8 is for a terminal and
+destroys a binary protocol. `fs.write` on fd 1/2 must accept ANY `ArrayBufferView`
+— Go's wasm runtime writes `Uint8Array`s, and `Buffer.isBuffer` is false for those
+— and report the true byte count. `fs.read` on fd 0 must WAIT for data (answering 0
+reads as EOF and ends a service instantly) and call back EXACTLY once per read.
+A piped child must report `isTTY: false` even though the sink reuses the TTY
+machinery, or programs take their interactive path while writing to a pipe.
+**`fs.constants` is 55 entries, not 4.** Go reads `constants.O_WRONLY` directly.
+A surface audit that counts `constants` as present because the KEY exists will
+miss this — a present member can be an empty shell.
 A NODE child from `child_process.spawn` is a SECOND NodeEngine on its own queue,
 with live pipes; anything else runs through msh and reports collected output.
 Verify a child with an INTERLEAVED exchange — each request depending on the

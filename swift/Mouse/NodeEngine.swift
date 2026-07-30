@@ -124,6 +124,10 @@ final class NodeEngine: @unchecked Sendable {
             outstanding -= 1
         }
     }
+    /// This engine's stdout/stderr/stdin are a pipe to a parent, not a terminal.
+    private var stdioIsPipe = false
+    /// Mark stdio as a pipe before `run` — a spawned child does this.
+    func markStdioAsPipe() { stdioIsPipe = true }
     private var watchersUsed = false
     private var socketsUsed = false
     private var hasOpenHandles: Bool {
@@ -612,6 +616,7 @@ final class NodeEngine: @unchecked Sendable {
                 },
                 rows: 24, columns: 80,
                 rawModeChanged: { _ in }))
+            child.markStdioAsPipe()
             children[id] = child
             let source = (try? String(contentsOf: realURL(script), encoding: .utf8)) ?? script
             Task.detached { [weak self] in
@@ -1305,7 +1310,15 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(env, forKeyedSubscript: "__env" as NSString)
         context.setObject(cwd, forKeyedSubscript: "__cwd" as NSString)
         context.setObject(stdin, forKeyedSubscript: "__stdin" as NSString)
-        context.setObject(tty != nil, forKeyedSubscript: "__isTTY" as NSString)
+        // A pipe is not a terminal: the sink is the same machinery, but `isTTY` must be false
+        // or a program takes its interactive path — colors, spinners, raw mode — while writing
+        // to a parent that wanted bytes.
+        context.setObject(tty != nil && !stdioIsPipe, forKeyedSubscript: "__isTTY" as NSString)
+        // A child's stdio is a PIPE, and a pipe carries bytes. Decoding it as UTF-8 destroys a
+        // binary protocol (esbuild's length-prefixed packets), so a piped child encodes through
+        // latin1 — one codepoint per byte, lossless in both directions — while a terminal keeps
+        // UTF-8, which is what a screen wants.
+        context.setObject(stdioIsPipe, forKeyedSubscript: "__stdioBinary" as NSString)
         context.setObject(tty?.rows ?? 24, forKeyedSubscript: "__ttyRows" as NSString)
         context.setObject(tty?.columns ?? 80, forKeyedSubscript: "__ttyColumns" as NSString)
     }
@@ -2802,7 +2815,11 @@ final class NodeEngine: @unchecked Sendable {
           columns: __ttyColumns,
           rows: __ttyRows,
           write: function(chunk, encoding, callback) {
-            sink(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+            // Binary out through latin1 when this is a pipe: `Buffer.from(chunk).toString()`
+            // is a UTF-8 decode, and it silently mangles every byte above 0x7f.
+            sink(typeof chunk === 'string'
+              ? (__stdioBinary ? Buffer.from(chunk, encoding && encoding !== 'buffer' ? encoding : 'utf8').toString('latin1') : chunk)
+              : Buffer.from(chunk).toString(__stdioBinary ? 'latin1' : 'utf8'));
             if (typeof encoding === 'function') encoding();
             else if (typeof callback === 'function') callback();
             return true;
@@ -2861,7 +2878,9 @@ final class NodeEngine: @unchecked Sendable {
         // A TTY with someone listening keeps the process alive, like node's ref'd stdin —
         // without this the event loop would see quiescence and end a program mid-wait.
         function updateLiveness() {
-          if (!__isTTY || !bridge.stdinActive) return;
+          // A pipe counts as much as a terminal here: a child waiting on stdin must keep its
+          // loop alive, or it exits the moment it starts listening.
+          if ((!__isTTY && !__stdioBinary) || !bridge.stdinActive) return;
           const listening = ['data', 'readable', 'keypress'].some(function(e){ return (listeners[e] || []).length; });
           bridge.stdinActive(listening && !paused);
         }
@@ -2921,13 +2940,15 @@ final class NodeEngine: @unchecked Sendable {
             const value = buffered;
             buffered = '';
             if (!value.length) return null;
-            return stream._encoding ? value : Buffer.from(value);
+            return stream._encoding ? value : Buffer.from(value, __stdioBinary ? 'latin1' : 'utf8');
           },
           // A keystroke from the host: flowing listeners get 'data'; paused-mode consumers
           // (ink reads via 'readable' + read()) get the buffer filled and a 'readable' poke.
           _push: function(text){
+            // The same transport in reverse: a pipe's bytes arrived as latin1.
+            const asBuffer = function(value) { return Buffer.from(value, __stdioBinary ? 'latin1' : 'utf8'); };
             if ((listeners['data'] || []).length) {
-              stream.emit('data', stream._encoding ? text : Buffer.from(text));
+              stream.emit('data', stream._encoding ? text : asBuffer(text));
               if ((listeners['readable'] || []).length) { buffered += text; stream.emit('readable'); }
             } else {
               buffered += text;
@@ -2935,6 +2956,11 @@ final class NodeEngine: @unchecked Sendable {
             }
           },
           pipe: function(destination){ stream.on('data', c => destination.write(c)); return destination; },
+          // Anything a synchronous reader could not take goes back to the front of the buffer.
+          unshift: function(chunk){
+            buffered = (Buffer.isBuffer(chunk) ? chunk.toString(__stdioBinary ? 'latin1' : 'utf8') : String(chunk)) + buffered;
+          },
+          _ended: false,
           unref: function(){ return this; }, ref: function(){ return this; },
         };
         return stream;
@@ -2946,6 +2972,7 @@ final class NodeEngine: @unchecked Sendable {
         process.stdin._push(text);
       };
       globalThis.__mouseEndInput = function() {
+        process.stdin._ended = true;
         // EOF on stdin: a child reading to completion ends here, which is what `child.stdin.end()`
         // means on the other side of the pipe.
         if (process.stdin.push) process.stdin.push(null);
@@ -3981,7 +4008,26 @@ final class NodeEngine: @unchecked Sendable {
           },
           realpathSync: function(file) { return resolvePath(file); },
           chmodSync: function() {},
-          constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
+          // node's full set, with THIS platform's values (dumped from real node on Darwin, not
+          // guessed). Four of them is not "constants present": Go's wasm runtime reads
+          // `constants.O_WRONLY` and friends directly, and an undefined there panics the whole
+          // module with "call of Value.Int on undefined" — which is how esbuild-wasm died.
+          constants: {
+            COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4, F_OK: 0,
+            O_APPEND: 8, O_CREAT: 512, O_DIRECTORY: 1048576, O_DSYNC: 4194304,
+            O_EXCL: 2048, O_NOCTTY: 131072, O_NOFOLLOW: 256, O_NONBLOCK: 4,
+            O_RDONLY: 0, O_RDWR: 2, O_SYMLINK: 2097152, O_SYNC: 128,
+            O_TRUNC: 1024, O_WRONLY: 1, R_OK: 4, S_IFBLK: 24576,
+            S_IFCHR: 8192, S_IFDIR: 16384, S_IFIFO: 4096, S_IFLNK: 40960,
+            S_IFMT: 61440, S_IFREG: 32768, S_IFSOCK: 49152, S_IRGRP: 32,
+            S_IROTH: 4, S_IRUSR: 256, S_IRWXG: 56, S_IRWXO: 7,
+            S_IRWXU: 448, S_IWGRP: 16, S_IWOTH: 2, S_IWUSR: 128,
+            S_IXGRP: 8, S_IXOTH: 1, S_IXUSR: 64, UV_DIRENT_BLOCK: 7,
+            UV_DIRENT_CHAR: 6, UV_DIRENT_DIR: 2, UV_DIRENT_FIFO: 4, UV_DIRENT_FILE: 1,
+            UV_DIRENT_LINK: 3, UV_DIRENT_SOCKET: 5, UV_DIRENT_UNKNOWN: 0, UV_FS_COPYFILE_EXCL: 1,
+            UV_FS_COPYFILE_FICLONE: 2, UV_FS_COPYFILE_FICLONE_FORCE: 4, UV_FS_O_FILEMAP: 0,
+            UV_FS_SYMLINK_DIR: 1, UV_FS_SYMLINK_JUNCTION: 2, W_OK: 2, X_OK: 1,
+          },
           accessSync: function(file) {
             if (!fs.existsSync(file)) {
               const error = new Error("ENOENT: no such file or directory, access '" + file + "'");
@@ -4032,18 +4078,38 @@ final class NodeEngine: @unchecked Sendable {
         // writeSync(fd, buffer[, offset[, length[, position]]]) — honor the slice, or a
         // program writing part of a scratch buffer would get the whole thing on disk.
         fs.writeSync = function(fd, data, offset, length, position) {
-          let buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
-          if (Buffer.isBuffer(data) && typeof offset === 'number') {
+          // ANY view over bytes is legal here, not just our Buffer subclass: Go's wasm runtime
+          // writes stdout through `fs.write(1, uint8Array, …)`, and `Buffer.isBuffer` is false
+          // for a plain Uint8Array — so this used to stringify it ("7,0,0,0,…") and report that
+          // string's length, which made Go panic with "invalid return from write".
+          let buffer;
+          if (Buffer.isBuffer(data)) buffer = data;
+          else if (ArrayBuffer.isView(data)) buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+          else buffer = Buffer.from(String(data));
+          if (typeof data !== 'string' && typeof offset === 'number') {
             const from = offset | 0;
             const count = typeof length === 'number' ? length | 0 : buffer.length - from;
             buffer = buffer.slice(from, from + count);
           }
-          if (fd === 1) { bridge.stdout(buffer.toString()); return buffer.length; }
-          if (fd === 2) { bridge.stderr(buffer.toString()); return buffer.length; }
+          // A pipe carries bytes; latin1 is the transport that survives the String hop.
+          const encoding = __stdioBinary ? 'latin1' : 'utf8';
+          if (fd === 1) { bridge.stdout(buffer.toString(encoding)); return buffer.length; }
+          if (fd === 2) { bridge.stderr(buffer.toString(encoding)); return buffer.length; }
           fs.appendFileSync(descriptor(fd).path, buffer);
           return buffer.length;
         };
         fs.readSync = function(fd, buffer, offset, length, position) {
+          // fd 0 is stdin, which is a pipe, not a file: serve it from whatever has arrived.
+          if (fd === 0) {
+            const pending = process.stdin.read();
+            if (!pending || !pending.length) return 0;
+            const bytes = Buffer.isBuffer(pending) ? pending : Buffer.from(String(pending), __stdioBinary ? 'latin1' : 'utf8');
+            const count = Math.min(length === undefined ? bytes.length : length, bytes.length);
+            for (let i = 0; i < count; i++) buffer[(offset || 0) + i] = bytes[i];
+            // Anything that did not fit goes back, or it would be lost.
+            if (count < bytes.length) process.stdin.unshift(bytes.slice(count));
+            return count;
+          }
           const entry = descriptor(fd);
           const content = fs.readFileSync(entry.path);
           const pos = position === null || position === undefined ? entry.position : position;
@@ -4116,6 +4182,34 @@ final class NodeEngine: @unchecked Sendable {
             };
           })(fs[name + 'Sync']);
         }
+        // fd 0's async read waits for bytes instead of reporting EOF. Go's wasm runtime reads
+        // stdin this way, and a 0-byte answer tells it the pipe closed — which ended esbuild's
+        // service the moment it started listening.
+        const stdinRead = function(fd, buffer, offset, length, position, callback) {
+          if (typeof offset === 'function') { callback = offset; offset = 0; length = buffer.length; }
+          else if (typeof position === 'function') { callback = position; position = null; }
+          // EXACTLY ONE callback per read, and both waiting listeners removed when either
+          // fires. Waiting on 'readable' AND 'end' without this called back several times for
+          // one read, which a caller reads as several reads — enough to desync any protocol.
+          let settled = false;
+          const attempt = function() {
+            if (settled) return;
+            let count = 0;
+            try { count = fs.readSync(0, buffer, offset || 0, length === undefined ? buffer.length : length, null); }
+            catch (error) { settled = true; done(); callback(error); return; }
+            if (count > 0) { settled = true; done(); callback(null, count, buffer); return; }
+            if (process.stdin._ended) { settled = true; done(); callback(null, 0, buffer); return; }
+            process.stdin.once('readable', attempt);
+            process.stdin.once('end', attempt);
+          };
+          const done = function() {
+            if (process.stdin.off) {
+              process.stdin.off('readable', attempt);
+              process.stdin.off('end', attempt);
+            }
+          };
+          attempt();
+        };
         // read/write hand the BUFFER back as the third callback argument (node's contract:
         // (err, bytesRead, buffer) / (err, bytesWritten, buffer)) — the generic wrapper
         // above only passes two, and callers like tar read that third slot.
@@ -4124,6 +4218,11 @@ final class NodeEngine: @unchecked Sendable {
           fs[name] = function(...args) {
             const callback = typeof args[args.length - 1] === 'function' ? args.pop() : function(){};
             const buffer = args[1];
+            // Reading stdin is the one case that must WAIT rather than answer immediately.
+            if (name === 'read' && args[0] === 0) {
+              stdinRead(0, buffer, args[2], args[3], args[4], callback);
+              return;
+            }
             setImmediate(function() {
               try { callback(null, sync.apply(fs, args), buffer); }
               catch (error) { callback(error); }
@@ -5135,8 +5234,9 @@ final class NodeEngine: @unchecked Sendable {
           child.spawnargs = ['node'].concat(argv.map(String));
           const id = bridge.spawnNode(script, rest, String((options && options.cwd) || '/'),
                                       function(event, payload) {
-            if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload))); return; }
-            if (event === 'stderr') { child.stderr.push(Buffer.from(String(payload))); return; }
+            // latin1 both ways: the child wrote bytes, and these are those bytes.
+            if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload), 'latin1')); return; }
+            if (event === 'stderr') { child.stderr.push(Buffer.from(String(payload), 'latin1')); return; }
             if (event === 'exit') {
               child.exitCode = payload;
               child.stdout.push(null);
@@ -5149,7 +5249,8 @@ final class NodeEngine: @unchecked Sendable {
           child.pid = id;
           child.stdin = new Writable({
             write: function(chunk, encoding, callback) {
-              bridge.spawnWrite(id, Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk));
+              const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8');
+              bridge.spawnWrite(id, bytes.toString('latin1'));
               callback();
             },
             final: function(callback) { bridge.spawnEnd(id); callback(); },
