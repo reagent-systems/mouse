@@ -1074,6 +1074,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The event-sequence audit: two events that never fired.** Real code WAITS on events, so
+  one that never fires is a hang and one that fires twice is a double-free — and ordering
+  matters as much as presence. Nine lifecycles recorded as ordered lists and diffed against
+  node. Two events were MISSING:
+  - **A failed `fs.createReadStream` emitted `'error'` with no `'close'`.** node emits both,
+    and a caller that releases its resources in `'close'` waited forever for a stream that
+    had already failed.
+  - **A `ClientRequest` never emitted `'close'` at all.** It was tied to the SOCKET closing,
+    and with keep-alive the socket outlives the exchange — so the event simply never came.
+    Fixing it also had to get the ORDER right: tying it to the body being parsed put `'close'`
+    before the response's own `'end'`, inverting what a caller sees, so it now follows the
+    response's `'end'`.
+  Two ordering divergences are **deliberately pinned to our values with the reason
+  recorded**: gzip emits its header chunk after `'finish'` rather than before (our coder
+  produces output at the flush), and a server's request `'end'` precedes the response's
+  `'finish'` where node has it the other way. Both are tick-level orderings with no
+  consequence for a caller doing one thing per event, and closing them means moving when EOF
+  is pushed through the stream core — real risk for no gain. Measured and named beats quietly
+  different, which is the same call made for `process.stdout` and the MessagePort duality.
+  92 fixtures; http, express, ws, webpack (byte-identical), pkg and the SSE streaming check
+  all still behave.
 - **The error-code audit — and an fs that quietly did more than it was asked.** The class
   with the widest blast radius, because real code BRANCHES on `error.code`: `if (e.code ===
   'ENOENT') create()` takes the wrong path when the code is wrong, and nothing looks broken

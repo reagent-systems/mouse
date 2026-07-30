@@ -8,6 +8,9 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: two events that never fired now do. A failed `fs.createReadStream` emits
+  `'close'` after `'error'`, and a `ClientRequest` emits `'close'` when its response ends —
+  it had been tied to the socket closing, which keep-alive outlives.
 - Node layer: fs errors carry node's `code`, `syscall` and `path`, and five operations now
   fail where node fails instead of silently succeeding. `rmdirSync` on a file deleted it,
   `writeFileSync` into a missing directory created the tree, and `mkdirSync` built a whole

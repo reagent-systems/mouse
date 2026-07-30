@@ -465,6 +465,11 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Audit event SEQUENCES, not just event presence.** Record the ordered list of events for
+  each lifecycle and diff it against the reference. A missing event is a hang (a failed read
+  stream with no 'close'; a keep-alive request whose 'close' was tied to the socket), and an
+  event in the wrong place inverts what a caller sees. Fixing a missing event without
+  checking its POSITION just moves the bug.
 - **A permissive filesystem API destroys data or invents it.** Three boundaries found the
   same disposition: `rmSync` deleting a tree without `recursive`, `writeFileSync({flag:'a'})`
   truncating, `rmdirSync` deleting a file it was handed, `writeFileSync` fabricating missing

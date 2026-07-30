@@ -5144,7 +5144,15 @@ final class NodeEngine: @unchecked Sendable {
           setImmediate(() => {
             let content;
             try { content = fs.readFileSync(file); }
-            catch (error) { stream.emit('error', error); return; }
+            catch (error) {
+              // node emits 'error' then 'close'. Without the close, a caller that releases its
+              // resources there waits forever for a stream that already failed.
+              stream.emit('error', error);
+              process.nextTick(function() {
+                if (!stream._closeEmitted) { stream._closeEmitted = true; stream.emit('close'); }
+              });
+              return;
+            }
             stream.fd = 3;
             stream.emit('open', 3);
             stream.emit('ready');
@@ -7926,6 +7934,15 @@ final class NodeEngine: @unchecked Sendable {
                              !request._sentClose;
             if (request._agent) request._agent._release(request._poolName, request.socket, reusable);
             else request.socket.end();
+            // node closes the REQUEST after its response has ENDED — not when the socket does
+            // (with keep-alive the socket outlives the exchange, so 'close' never fired at all),
+            // and not merely when the body is parsed, which would put it BEFORE the response's
+            // own 'end' and invert the order a caller sees.
+            const closeRequest = function() {
+              if (!request._closeEmitted) { request._closeEmitted = true; request.emit('close'); }
+            };
+            if (message._endEmitted) process.nextTick(closeRequest);
+            else message.once('end', function(){ process.nextTick(closeRequest); });
           }
 
           return {
