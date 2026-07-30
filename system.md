@@ -1074,6 +1074,29 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **node 17+'s stream operators — the "stream depth" item.** `map`, `filter`, `flatMap`,
+  `take` and `drop` return streams; `forEach`, `toArray`, `reduce`, `some`, `every` and
+  `find` return promises; `iterator([options])` exposes the async iterator with
+  `destroyOnReturn`. Every one is expressible over async iteration, which already
+  worked here, so the gap was the SURFACE rather than the machinery — 25 assertions
+  matched real node on the first run.
+  The edge cases are what a naive version gets wrong, and they are pinned: an unseeded
+  `reduce` takes the FIRST value as its accumulator rather than folding it into
+  `undefined` (and throws on an empty stream); on an empty stream `every()` is true
+  while `some()` is false; `take(0)` yields nothing and `drop(99)` yields nothing;
+  `flatMap` flattens exactly one level and treats a string as a value, not an iterable;
+  and an async mapper is awaited rather than yielding a promise.
+  **Measured effect on the shape sweep**, which is the point of having the sweep:
+  `crypto.Hash` went from 56 missing properties to 16, `stream.Readable` from 20 to 8,
+  and the total across all 28 shapes from 362 to 204. What remains on the stream classes
+  is now a short, nameable list rather than a category: `compose`, `wrap`, `unpipe`,
+  `setDefaultEncoding`, and the state-introspection getters (`readableHighWaterMark`,
+  `readableDidRead`, `writableNeedDrain`, `writableBuffer` and their neighbours).
+  `http.Server`'s 17 and `process.stdout`'s 27 are untouched and remain the two largest
+  single gaps — `process.stdout` because it is a hand-built object rather than a real
+  Writable, so it cannot be piped TO.
+  Every stream-dependent harness was re-run, since this adds to Readable's prototype:
+  http, express, ws, webpack (still byte-identical) and esbuild-wasm all still match.
 - **Hash/Hmac/Cipher are streams now — and making them streams uncovered a worse bug
   underneath.** Top of the shape sweep's list: in node these are Transforms, so
   `fs.createReadStream(f).pipe(hash)` is the ordinary way to hash a file, and it could

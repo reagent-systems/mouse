@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: node 17+'s stream operators are real — `map`, `filter`, `flatMap`, `take`
+  and `drop` return streams; `forEach`, `toArray`, `reduce`, `some`, `every` and `find`
+  return promises; plus `iterator([options])`. Matches real node including the edge
+  cases: unseeded `reduce`, and `every`/`some` inverting on an empty stream.
 - Node layer: `crypto`'s `Hash`, `Hmac` and `Cipher` are real Transform streams, so
   `fs.createReadStream(f).pipe(hash)` works. A spent hash now reports
   ERR_CRYPTO_HASH_FINALIZED instead of digesting twice.

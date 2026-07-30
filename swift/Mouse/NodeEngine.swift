@@ -5574,6 +5574,112 @@ final class NodeEngine: @unchecked Sendable {
               [Symbol.asyncIterator]() { return this; },
             };
           },
+          // node 17+'s stream operators. Every one is expressible over async iteration, which
+          // already worked here — the gap was the surface, not the machinery. The ones returning
+          // a stream return an OBJECT-MODE Readable, as node's do, so a mapper may yield anything.
+          iterator: function(options) {
+            const iterable = this[Symbol.asyncIterator]();
+            // `destroyOnReturn: false` keeps the source alive after a partial read, which is what
+            // `for await ... break` needs when the caller still wants the stream.
+            if (options && options.destroyOnReturn === false) {
+              return { next: iterable.next.bind(iterable),
+                       return() { return Promise.resolve({ value: undefined, done: true }); },
+                       [Symbol.asyncIterator]() { return this; } };
+            }
+            return iterable;
+          },
+          map: function(fn, options) {
+            const self = this;
+            let index = 0;
+            return Readable.from((async function* () {
+              for await (const value of self) yield await fn(value, index++);
+            })(), options);
+          },
+          filter: function(fn, options) {
+            const self = this;
+            let index = 0;
+            return Readable.from((async function* () {
+              for await (const value of self) if (await fn(value, index++)) yield value;
+            })(), options);
+          },
+          flatMap: function(fn, options) {
+            const self = this;
+            let index = 0;
+            return Readable.from((async function* () {
+              for await (const value of self) {
+                const produced = await fn(value, index++);
+                // A mapper may return one value or something iterable; node flattens one level.
+                if (produced && typeof produced[Symbol.asyncIterator] === 'function') {
+                  for await (const inner of produced) yield inner;
+                } else if (produced && typeof produced[Symbol.iterator] === 'function' &&
+                           typeof produced !== 'string') {
+                  for (const inner of produced) yield inner;
+                } else {
+                  yield produced;
+                }
+              }
+            })(), options);
+          },
+          take: function(count, options) {
+            const self = this;
+            let left = Number(count);
+            return Readable.from((async function* () {
+              if (left <= 0) return;
+              for await (const value of self) {
+                yield value;
+                if (--left <= 0) return;
+              }
+            })(), options);
+          },
+          drop: function(count, options) {
+            const self = this;
+            let left = Number(count);
+            return Readable.from((async function* () {
+              for await (const value of self) {
+                if (left > 0) { left -= 1; continue; }
+                yield value;
+              }
+            })(), options);
+          },
+          forEach: async function(fn) {
+            let index = 0;
+            for await (const value of this) await fn(value, index++);
+          },
+          toArray: async function() {
+            const out = [];
+            for await (const value of this) out.push(value);
+            return out;
+          },
+          reduce: async function(fn, initial) {
+            let accumulator = initial;
+            let seeded = arguments.length > 1;
+            let index = 0;
+            for await (const value of this) {
+              // Unseeded, the FIRST value becomes the accumulator rather than being folded in.
+              if (!seeded) { accumulator = value; seeded = true; index += 1; continue; }
+              accumulator = await fn(accumulator, value, index++);
+            }
+            if (!seeded) {
+              throw Object.assign(new TypeError('Reduce of an empty stream requires an initial value'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            return accumulator;
+          },
+          some: async function(fn) {
+            let index = 0;
+            for await (const value of this) if (await fn(value, index++)) return true;
+            return false;
+          },
+          every: async function(fn) {
+            let index = 0;
+            for await (const value of this) if (!await fn(value, index++)) return false;
+            return true;
+          },
+          find: async function(fn) {
+            let index = 0;
+            for await (const value of this) if (await fn(value, index++)) return value;
+            return undefined;
+          },
         });
 
         Readable.from = function(iterable) {
