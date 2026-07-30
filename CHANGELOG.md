@@ -27,7 +27,10 @@ carry breaking changes.
   both directions against real node, so a node client cannot tell our
   server from node's. On top of that, **`http.createServer`** — keep-alive,
   pipelining, chunked bodies, response bytes identical to node's — which
-  means **express apps serve requests from the phone**. Full-screen programs get a real TTY: keystrokes,
+  means **express apps serve requests from the phone** — and the HTTP client
+  moved onto raw sockets too, so response bodies stream in as they arrive and
+  protocol upgrades work: **real WebSockets** through the genuine `ws`
+  package, in both directions. Full-screen programs get a real TTY: keystrokes,
   arrows/F-keys/Ctrl-combos, bracketed paste, resize as `SIGWINCH`, and
   terminal query replies — so **ink/React TUIs draw on the terminal
   screen**. Verified against real `node` (65 byte-identical fixtures) and

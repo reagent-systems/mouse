@@ -3062,6 +3062,86 @@ final class NodeEngine: @unchecked Sendable {
           stream._closeEmitted = true;
           stream.emit('close');
         }
+        // node's streams carry `_readableState` / `_writableState`, and real packages READ
+        // them — `ws` decides how to finish a closing handshake from
+        // `socket._readableState.endEmitted` and `receiver._writableState.finished`, so with
+        // these missing its close handler threw and a WebSocket never emitted 'close'. They
+        // are exposed as LIVE VIEWS over the fields we already keep, not as a second copy of
+        // the truth: every property is a getter, and the few libraries write to are mapped
+        // back onto the real field.
+        function defineStateView(prototype, name, describe) {
+          Object.defineProperty(prototype, name, {
+            configurable: true,
+            get: function() {
+              const hidden = '_' + name + 'View';
+              if (!this[hidden]) {
+                const view = {};
+                const spec = describe(this);
+                for (const key of Object.keys(spec)) {
+                  const entry = spec[key];
+                  Object.defineProperty(view, key, {
+                    enumerable: true, configurable: true,
+                    get: entry.get,
+                    set: entry.set || function(){},   // writes libraries make but we derive
+                  });
+                }
+                Object.defineProperty(this, hidden, { value: view, writable: true, enumerable: false });
+              }
+              return this[hidden];
+            },
+          });
+        }
+        function readableStateSpec(stream) {
+          return {
+            objectMode: { get: () => !!stream._objectMode },
+            highWaterMark: { get: () => 16384 },
+            buffer: { get: () => stream._buf || [] },
+            length: { get: () => (stream._buf || []).reduce((n, c) => n + (c.length || 1), 0) },
+            pipes: { get: () => [] },
+            flowing: { get: () => (stream._flowing ? true : (stream._everFlowed ? false : null)) },
+            ended: { get: () => !!stream._sawEOF, set: (v) => { stream._sawEOF = !!v; } },
+            endEmitted: { get: () => !!stream._endEmitted, set: (v) => { stream._endEmitted = !!v; } },
+            reading: { get: () => false },
+            constructed: { get: () => true },
+            sync: { get: () => false },
+            needReadable: { get: () => !stream._buf || !stream._buf.length },
+            emittedReadable: { get: () => false },
+            readableListening: { get: () => stream.listenerCount('readable') > 0 },
+            resumeScheduled: { get: () => !!stream._draining },
+            closed: { get: () => !!stream._closeEmitted },
+            closeEmitted: { get: () => !!stream._closeEmitted },
+            destroyed: { get: () => !!stream.destroyed, set: (v) => { stream.destroyed = !!v; } },
+            errored: { get: () => stream._errored || null },
+            errorEmitted: { get: () => !!stream._errored },
+            encoding: { get: () => stream._readableEncoding || null },
+            autoDestroy: { get: () => true },
+            awaitDrainWriters: { get: () => null },
+          };
+        }
+        function writableStateSpec(stream) {
+          return {
+            objectMode: { get: () => !!stream._writableObjectMode },
+            highWaterMark: { get: () => 16384 },
+            length: { get: () => (stream._wbuf || []).reduce((n, entry) => n + ((entry[0] && entry[0].length) || 1), 0) },
+            corked: { get: () => stream._corked || 0 },
+            writing: { get: () => !!stream._writing },
+            needDrain: { get: () => !!stream._needDrain },
+            ending: { get: () => !!stream._writableEnded, set: (v) => { stream._writableEnded = !!v; } },
+            ended: { get: () => !!stream._writableEnded, set: (v) => { stream._writableEnded = !!v; } },
+            finished: { get: () => !!stream._finishEmitted, set: (v) => { stream._finishEmitted = !!v; } },
+            prefinished: { get: () => !!stream._finishEmitted },
+            bufferedRequestCount: { get: () => (stream._wbuf || []).length },
+            pendingcb: { get: () => (stream._wbuf || []).length },
+            constructed: { get: () => true },
+            sync: { get: () => false },
+            closed: { get: () => !!stream._closeEmitted },
+            closeEmitted: { get: () => !!stream._closeEmitted },
+            destroyed: { get: () => !!stream.destroyed, set: (v) => { stream.destroyed = !!v; } },
+            errored: { get: () => stream._errored || null },
+            errorEmitted: { get: () => !!stream._errored },
+            autoDestroy: { get: () => true },
+          };
+        }
         function initReadable(self, options) {
           options = options || {};
           self._buf = [];
@@ -3223,8 +3303,17 @@ final class NodeEngine: @unchecked Sendable {
             if (!ok) this._needDrain = true;
             return ok;
           },
+          // cork/uncork: node buffers writes while corked so a caller can coalesce several
+          // into one packet. `ws` corks around every frame (header + payload + mask), so
+          // without these a WebSocket send throws before a single byte goes out.
+          cork() { this._corked = (this._corked || 0) + 1; },
+          uncork() {
+            if (!this._corked) return;
+            this._corked -= 1;
+            if (!this._corked) this._flushWrites();
+          },
           _flushWrites() {
-            if (this._writing) return;
+            if (this._writing || this._corked) return;
             const step = () => {
               if (!this._wbuf.length) {
                 this._writing = false;
@@ -3246,6 +3335,8 @@ final class NodeEngine: @unchecked Sendable {
             if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
             else if (typeof encoding === 'function') { callback = encoding; encoding = null; }
             if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+            this._corked = 0;           // end() implies uncork, as in node
+            this._flushWrites();
             this._writableEnded = true;
             if (callback) this.once('finish', callback);
             this._maybeFinish();
@@ -3277,6 +3368,7 @@ final class NodeEngine: @unchecked Sendable {
         Object.assign(Writable.prototype, writableMethods);
         // Same for the writable side; defined once and re-applied to Duplex/Transform below.
         const writableState = {
+          writableCorked: { get: function(){ return this._corked || 0; }, configurable: true },
           writableEnded: { get: function(){ return !!this._writableEnded; }, configurable: true },
           writableFinished: { get: function(){ return !!this._finishEmitted; }, configurable: true },
           writableLength: { get: function(){ return (this._wbuf || []).length; }, configurable: true },
@@ -3293,6 +3385,11 @@ final class NodeEngine: @unchecked Sendable {
         Duplex.prototype.constructor = Duplex;
         Object.assign(Duplex.prototype, writableMethods);
         Object.defineProperties(Duplex.prototype, writableState);
+
+        defineStateView(Readable.prototype, '_readableState', readableStateSpec);
+        defineStateView(Writable.prototype, '_writableState', writableStateSpec);
+        defineStateView(Duplex.prototype, '_readableState', readableStateSpec);
+        defineStateView(Duplex.prototype, '_writableState', writableStateSpec);
 
         function Transform(options) {
           options = options || {};
@@ -3721,25 +3818,20 @@ final class NodeEngine: @unchecked Sendable {
         });
       };
       function makeHttpModule(defaultProtocol) {
-        function request(url, options, callback) {
-          if (typeof url === 'object') {
-            callback = options;
-            options = url;
-            // node accepts `host` OR `hostname`, and `host` may carry the port. Reading only
-            // `hostname` built "http://undefined:PORT" — a request that failed silently and
-            // left a server-plus-client script waiting forever.
-            const protocol = options.protocol || defaultProtocol;
-            let authority = options.hostname || options.host || 'localhost';
-            if (options.port && authority.indexOf(':') < 0) authority += ':' + options.port;
-            url = protocol + '//' + authority + (options.path || '/');
-          }
-          if (typeof options === 'function') { callback = options; options = {}; }
-          options = options || {};
+        // https keeps riding URLSession: TLS is a handshake we cannot put on a raw socket, and
+        // the system already owns a correct one. Its limits are URLSession's — a response
+        // arrives complete rather than incrementally, and there is no upgrade path.
+        function tlsRequest(url, options, callback) {
           const EventEmitter = coreRequire('events');
           const clientRequest = new EventEmitter();
           let body = '';
           clientRequest.write = function(chunk) { body += chunk; return true; };
           clientRequest.setHeader = function(name, value) { (options.headers = options.headers || {})[name] = value; };
+          clientRequest.getHeader = function(name) { return (options.headers || {})[name]; };
+          clientRequest.removeHeader = function(name) { delete (options.headers || {})[name]; };
+          clientRequest.setTimeout = function(){ return clientRequest; };
+          clientRequest.abort = function(){};
+          clientRequest.destroy = function(){};
           clientRequest.end = function(chunk) {
             if (chunk) body += chunk;
             const headers = {};
@@ -3749,7 +3841,9 @@ final class NodeEngine: @unchecked Sendable {
                 const response = new EventEmitter();
                 response.statusCode = result.status;
                 response.headers = result.headers;
+                response.httpVersion = '1.1';
                 response.setEncoding = function(){ return response; };
+                response.resume = function(){ return response; };
                 if (callback) callback(response);
                 clientRequest.emit('response', response);
                 setImmediate(function() {
@@ -3760,10 +3854,9 @@ final class NodeEngine: @unchecked Sendable {
               })
               .catch(function(error) { clientRequest.emit('error', error); });
           };
-          clientRequest.abort = function(){};
-          clientRequest.on = EventEmitter.prototype.on.bind(clientRequest);
           return clientRequest;
         }
+
         const EventEmitter = coreRequire('events');
         const { Readable, Writable } = coreRequire('stream');
         const net = coreRequire('net');
@@ -3774,7 +3867,6 @@ final class NodeEngine: @unchecked Sendable {
           destroy() {}
         }
         class OutgoingMessage extends Writable {}
-        class ClientRequest extends OutgoingMessage {}
         // -- the HTTP/1.1 SERVER, on top of real net ------------------------------------
         // Wire behavior is matched to real node's, measured with a raw-socket client rather
         // than assumed: user headers keep insertion order, then Date, then
@@ -4174,6 +4266,367 @@ final class NodeEngine: @unchecked Sendable {
           if (callback) this.on('timeout', callback);
           return this;
         };
+
+        // -- the HTTP/1.1 CLIENT, over raw sockets --------------------------------------
+        // Plaintext http rides `net` rather than URLSession, for three things URLSession
+        // cannot do: deliver a response body INCREMENTALLY (it handed us the complete body,
+        // so a streaming endpoint could not be read chunk by chunk), stream a request body,
+        // and hand the socket over on a 101 — which is exactly what a WebSocket client needs.
+        // https stays on URLSession, because TLS is a handshake we cannot put on a raw socket.
+        //
+        // The wire format was measured against real node, not assumed: user headers in
+        // insertion order, then Host, then Connection, then framing; `end(body)` with nothing
+        // written yet sends Content-Length; write()-then-end() is chunked; and GET/HEAD/
+        // DELETE/OPTIONS/TRACE/CONNECT get NO framing header at all (node writes a body for
+        // those raw, unframed, if you insist on sending one).
+        const framelessMethods = ['GET', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT'];
+
+        function ClientRequest(options, callback) {
+          Writable.call(this);
+          const self = this;
+          this._hostOwnsClose = true;
+          this.method = String(options.method || 'GET').toUpperCase();
+          this.path = options.path || '/';
+          this._host = options.hostname || options.host || 'localhost';
+          if (this._host.indexOf(':') >= 0 && !options.port) {
+            const split = this._host.lastIndexOf(':');
+            this.port = Number(this._host.slice(split + 1));
+            this._host = this._host.slice(0, split);
+          } else {
+            this.port = Number(options.port) || 80;
+          }
+          this._order = [];
+          this._headersSent = false;
+          this._chunked = false;
+          this._wroteBody = false;
+          this._finished = false;
+          this._upgraded = false;
+          this._responded = false;
+          if (options.headers) {
+            for (const name of Object.keys(options.headers)) {
+              if (options.headers[name] !== undefined) this.setHeader(name, options.headers[name]);
+            }
+          }
+          if (options.auth) {
+            this.setHeader('Authorization', 'Basic ' + Buffer.from(String(options.auth)).toString('base64'));
+          }
+          if (callback) this.once('response', callback);
+
+          this.socket = new net.Socket();
+          this.connection = this.socket;
+          this.socket.on('error', function(error) { self.emit('error', error); });
+          this.socket.on('close', function() {
+            // A response framed by EOF ends here; anything else already ended.
+            if (self._parser) self._parser.finish();
+            if (!self._closeEmitted) { self._closeEmitted = true; self.emit('close'); }
+          });
+          this.socket.on('connect', function() {
+            self.emit('socket', self.socket);
+            self._flushPending();
+          });
+          this._parser = makeResponseParser(this);
+          this.socket.on('data', function(chunk) { self._parser.push(chunk); });
+          this.socket.connect(this.port, this._host);
+          if (options.timeout) this.setTimeout(options.timeout);
+        }
+        ClientRequest.prototype = Object.create(Writable.prototype);
+        ClientRequest.prototype.constructor = ClientRequest;
+
+        ClientRequest.prototype._slot = function(name) {
+          const key = String(name).toLowerCase();
+          for (let i = 0; i < this._order.length; i++) if (this._order[i][0] === key) return this._order[i];
+          return null;
+        };
+        ClientRequest.prototype.setHeader = function(name, value) {
+          const slot = this._slot(name);
+          if (slot) { slot[1] = name; slot[2] = value; }
+          else this._order.push([String(name).toLowerCase(), name, value]);
+          return this;
+        };
+        ClientRequest.prototype.getHeader = function(name) {
+          const slot = this._slot(name);
+          return slot ? slot[2] : undefined;
+        };
+        ClientRequest.prototype.getHeaders = function() {
+          const out = {};
+          for (const [key, , value] of this._order) out[key] = value;
+          return out;
+        };
+        ClientRequest.prototype.getHeaderNames = function() { return this._order.map(h => h[0]); };
+        ClientRequest.prototype.hasHeader = function(name) { return !!this._slot(name); };
+        ClientRequest.prototype.removeHeader = function(name) {
+          const key = String(name).toLowerCase();
+          this._order = this._order.filter(h => h[0] !== key);
+          return this;
+        };
+
+        ClientRequest.prototype._headerBytes = function(oneShotLength) {
+          const lines = [this.method + ' ' + this.path + ' HTTP/1.1'];
+          let sawHost = false, sawConnection = false, sawLength = false, sawEncoding = false;
+          for (const [key, name, value] of this._order) {
+            if (key === 'host') sawHost = true;
+            if (key === 'connection') sawConnection = true;
+            if (key === 'content-length') sawLength = true;
+            if (key === 'transfer-encoding') sawEncoding = true;
+            const values = Array.isArray(value) ? value : [value];
+            for (const one of values) lines.push(name + ': ' + one);
+          }
+          if (!sawHost) lines.push('Host: ' + this._host + (this.port === 80 ? '' : ':' + this.port));
+          if (!sawConnection) lines.push('Connection: keep-alive');
+          else this._sentClose = String(this.getHeader('connection')).toLowerCase().indexOf('close') >= 0;
+          if (!sawLength && !sawEncoding && framelessMethods.indexOf(this.method) < 0) {
+            if (oneShotLength !== undefined) lines.push('Content-Length: ' + oneShotLength);
+            else { lines.push('Transfer-Encoding: chunked'); this._chunked = true; }
+          } else if (sawEncoding && String(this.getHeader('transfer-encoding')).toLowerCase().indexOf('chunked') >= 0) {
+            this._chunked = true;
+          }
+          return lines.join('\r\n') + '\r\n\r\n';
+        };
+
+        // Writes queue until the socket is connected — a request built synchronously after
+        // `http.request(...)` would otherwise write into a socket mid-handshake.
+        ClientRequest.prototype._queue = function(data) {
+          if (this.socket.connecting || this.socket.pending) {
+            (this._pending = this._pending || []).push(data);
+            return;
+          }
+          this.socket.write(data);
+        };
+        ClientRequest.prototype._flushPending = function() {
+          const pending = this._pending;
+          this._pending = null;
+          if (pending) for (const data of pending) this.socket.write(data);
+        };
+        ClientRequest.prototype._sendHeaders = function(oneShotLength) {
+          if (this._headersSent) return;
+          this._headersSent = true;
+          this._queue(this._headerBytes(oneShotLength));
+        };
+        ClientRequest.prototype.flushHeaders = function() { this._sendHeaders(); };
+        Object.defineProperty(ClientRequest.prototype, 'headersSent', {
+          get: function() { return !!this._headersSent; }, configurable: true,
+        });
+
+        ClientRequest.prototype._write = function(chunk, encoding, callback) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk
+            : Buffer.from(String(chunk), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+          this._sendHeaders();
+          this._wroteBody = true;
+          if (buffer.length) {
+            if (this._chunked) {
+              this._queue(buffer.length.toString(16) + '\r\n');
+              this._queue(buffer);
+              this._queue('\r\n');
+            } else {
+              this._queue(buffer);
+            }
+          }
+          callback();
+        };
+        ClientRequest.prototype.end = function(chunk, encoding, callback) {
+          if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+          else if (typeof encoding === 'function') { callback = encoding; encoding = null; }
+          if (this._finished) return this;
+          if (!this._headersSent && !this._wroteBody) {
+            const buffer = chunk === undefined || chunk === null ? Buffer.alloc(0)
+              : (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8'));
+            this._sendHeaders(framelessMethods.indexOf(this.method) < 0 ? buffer.length : undefined);
+            if (buffer.length) this._queue(buffer);
+          } else {
+            if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+            if (this._chunked) this._queue('0\r\n\r\n');
+          }
+          this._finished = true;
+          this.writable = false;
+          if (callback) process.nextTick(callback);
+          const self = this;
+          process.nextTick(function(){ self.emit('finish'); });
+          return this;
+        };
+
+        ClientRequest.prototype.abort = function() { this.destroy(); };
+        ClientRequest.prototype.destroy = function(error) {
+          if (this._destroyed) return this;
+          this._destroyed = true;
+          this.aborted = true;
+          this.socket.destroy();
+          if (error) this.emit('error', error);
+          return this;
+        };
+        ClientRequest.prototype.setTimeout = function(ms, callback) {
+          const self = this;
+          this.socket.setTimeout(ms, function(){ self.emit('timeout'); });
+          if (callback) this.once('timeout', callback);
+          return this;
+        };
+        ClientRequest.prototype.setNoDelay = function(on) { this.socket.setNoDelay(on); return this; };
+        ClientRequest.prototype.setSocketKeepAlive = function(on, delay) {
+          this.socket.setKeepAlive(on, delay);
+          return this;
+        };
+
+        // The response side: a status line, headers, then a body framed by Content-Length,
+        // chunked encoding, or the close. Chunks reach the IncomingMessage as they arrive.
+        function makeResponseParser(request) {
+          let buffer = Buffer.alloc(0);
+          let phase = 'head';
+          let message = null;
+          let remaining = 0;
+          let chunkState = 'size';
+
+          function push(chunk) {
+            if (phase === 'done' || phase === 'upgraded') return;
+            buffer = Buffer.concat([buffer, chunk]);
+            pump();
+          }
+
+          function pump() {
+            while (true) {
+              if (phase === 'head') {
+                const end = buffer.indexOf('\r\n\r\n');
+                if (end < 0) return;
+                const head = buffer.slice(0, end).toString('latin1');
+                buffer = buffer.slice(end + 4);
+                if (!startResponse(head)) return;
+                continue;
+              }
+              if (phase === 'length') {
+                if (!buffer.length) return;
+                const take = Math.min(remaining, buffer.length);
+                message.push(buffer.slice(0, take));
+                buffer = buffer.slice(take);
+                remaining -= take;
+                if (remaining === 0) { complete(); return; }
+                return;
+              }
+              if (phase === 'chunked') {
+                if (chunkState === 'size') {
+                  const at = buffer.indexOf('\r\n');
+                  if (at < 0) return;
+                  const size = parseInt(buffer.slice(0, at).toString('latin1').split(';')[0], 16);
+                  buffer = buffer.slice(at + 2);
+                  if (!size) {
+                    if (buffer.indexOf('\r\n') === 0) buffer = buffer.slice(2);
+                    complete();
+                    return;
+                  }
+                  remaining = size;
+                  chunkState = 'data';
+                  continue;
+                }
+                if (buffer.length < remaining + 2) return;
+                message.push(buffer.slice(0, remaining));
+                buffer = buffer.slice(remaining + 2);
+                chunkState = 'size';
+                continue;
+              }
+              if (phase === 'eof') {
+                if (buffer.length) { message.push(buffer); buffer = Buffer.alloc(0); }
+                return;
+              }
+              return;
+            }
+          }
+
+          function startResponse(head) {
+            const lines = head.split('\r\n');
+            const status = lines[0].split(' ');
+            message = new IncomingMessage(request.socket);
+            message.httpVersion = (status[0] || 'HTTP/1.1').replace('HTTP/', '');
+            message.httpVersionMajor = Number(message.httpVersion.split('.')[0]) || 1;
+            message.httpVersionMinor = Number(message.httpVersion.split('.')[1]) || 1;
+            message.statusCode = Number(status[1]) || 0;
+            message.statusMessage = status.slice(2).join(' ');
+            for (let i = 1; i < lines.length; i++) {
+              const at = lines[i].indexOf(':');
+              if (at < 0) continue;
+              const name = lines[i].slice(0, at).trim();
+              const value = lines[i].slice(at + 1).trim();
+              const key = name.toLowerCase();
+              message.rawHeaders.push(name, value);
+              if (key === 'set-cookie') (message.headers[key] = message.headers[key] || []).push(value);
+              else if (message.headers[key] === undefined) message.headers[key] = value;
+              else message.headers[key] += ', ' + value;
+            }
+
+            // 101: the protocol changes and the socket stops being ours. This is the path a
+            // WebSocket client takes, and the reason this client had to leave URLSession.
+            if (message.statusCode === 101) {
+              phase = 'upgraded';
+              const head = buffer;
+              buffer = Buffer.alloc(0);
+              request._upgraded = true;
+              request.emit('upgrade', message, request.socket, head);
+              return false;
+            }
+            if (message.statusCode === 100) {
+              phase = 'head';          // an interim response; the real one follows
+              request.emit('continue');
+              return true;
+            }
+
+            request._responded = true;
+            request.emit('response', message);
+
+            const encoding = String(message.headers['transfer-encoding'] || '').toLowerCase();
+            const bodyless = request.method === 'HEAD' || message.statusCode === 204 ||
+                             message.statusCode === 304;
+            if (bodyless) { complete(); return true; }
+            if (encoding.indexOf('chunked') >= 0) { phase = 'chunked'; chunkState = 'size'; return true; }
+            if (message.headers['content-length'] !== undefined) {
+              remaining = Number(message.headers['content-length']);
+              if (!remaining) { complete(); return true; }
+              phase = 'length';
+              return true;
+            }
+            phase = 'eof';   // framed by the close
+            return true;
+          }
+
+          function complete() {
+            if (!message || message.complete) return;
+            message.complete = true;
+            phase = 'done';
+            message.push(null);
+            // We advertise keep-alive like node does but keep no socket pool, so the socket
+            // retires once its response is delivered.
+            request.socket.end();
+          }
+
+          return {
+            push: push,
+            finish: function() {
+              // The socket closed: an EOF-framed body ends here, anything else is already done.
+              if (phase === 'eof' && message) { phase = 'done'; message.complete = true; message.push(null); }
+            },
+          };
+        }
+
+        // One entry point, two transports: plaintext over our own sockets, TLS over URLSession.
+        function request(url, options, callback) {
+          if (typeof url === 'string' || (typeof URL === 'function' && url instanceof URL)) {
+            if (typeof options === 'function') { callback = options; options = {}; }
+            const parsed = new URL(String(url));
+            options = Object.assign({}, options, {
+              protocol: options.protocol || parsed.protocol,
+              hostname: options.hostname || parsed.hostname,
+              port: options.port || (parsed.port || (parsed.protocol === 'https:' ? 443 : 80)),
+              path: options.path || (parsed.pathname + (parsed.search || '')),
+            });
+            if (parsed.username) options.auth = parsed.username + ':' + parsed.password;
+          } else {
+            if (typeof options === 'function') { callback = options; }
+            options = Object.assign({}, url);
+          }
+          const protocol = options.protocol || defaultProtocol;
+          if (protocol === 'https:') {
+            const authority = options.hostname || options.host || 'localhost';
+            const port = options.port && Number(options.port) !== 443 ? ':' + options.port : '';
+            const full = 'https://' + authority + port + (options.path || '/');
+            return tlsRequest(full, options, callback);
+          }
+          return new ClientRequest(options, callback);
+        }
 
         return {
           request: request,

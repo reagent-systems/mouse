@@ -91,6 +91,7 @@ so a TUI navigates and edits.
 | **The T↔G join — Node on a TTY** | `NodeProgram` (`TerminalPrograms.swift`): `node`/`npx`/installed bins launched interactively become terminal programs. `process.stdin.isTTY` is true, keystrokes arrive as `data` events, stdin listeners keep the event loop alive (node's ref'd-stdin rule). The program picks its mode like on a real terminal: plain printing stays in the scrollback (lines land ANSI-stripped, stderr keeps its color); `setRawMode(true)` or the alt screen hands it the grid — the ink model. Terminal discipline is real: cooked-mode ^C is SIGINT (handlers run, or the program dies 130), raw-mode ^C is a byte the program reads; rotation emits `resize` with the live geometry, and a program is born knowing `stdout.columns` |
 | **Phase G — real TCP** | `NodeSockets.swift`: `net` is no longer a stub that refuses. POSIX sockets on `DispatchSource` (not a thread each), non-blocking connect, name resolution off the I/O queue, honest backpressure at a 64 KB high-water mark, `ref`/`unref` feeding the event loop's quiescence test. `net.Socket` is a real Duplex over an fd and `net.Server` turns `accept()` into `'connection'`. Verified BOTH directions against real node: a real node client cannot tell our server from node's, and a real node server cannot tell our client from node's. This is what `http.createServer` — the dev-server story — stands on |
 | **Phase G — `http.createServer`** | A real HTTP/1.1 server on top of `net`: an incremental request parser (Content-Length and chunked bodies, pipelined requests, duplicate-header rules), `IncomingMessage` as a Readable, `ServerResponse` as a Writable, keep-alive, `Expect: 100-continue`, and `'upgrade'` for a WebSocket handshake. Framing matches node's on the WIRE, measured rather than assumed. **Real express runs on it** — installed by our own package manager, answering real node's client identically, JSON body parsing and 404 page included. `https.createServer` refuses, honestly: TLS needs a handshake we cannot put on a raw socket |
+| **Phase G — WebSockets, and the HTTP client on raw sockets** | `http.request` left URLSession for `net`, which is what makes three things possible: response bodies arrive INCREMENTALLY, request bodies can stream, and a 101 hands the socket over. Request bytes match node's per request. On top of that, **the real `ws` package works in both directions** — a real node ws client cannot tell our server from node's, and a real node ws server cannot tell our client from node's, closing handshake included. `https` stays on URLSession, where the system owns the TLS handshake |
 
 ### Verification performed
 
@@ -956,6 +957,38 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   of returning a plausible empty list. Deliberately NOT fixture-compared:
   node's `resolve4` goes to a DNS server through c-ares and never reads the
   hosts file, so a twin fixture there would compare two different mechanisms.
+- **WebSockets work, and getting there cost three fixes that had nothing to do
+  with WebSockets.** The real `ws` package now runs both ways (verified against
+  real node as the peer, both as client and as server, closing handshake
+  included). The three bugs it exposed:
+  1. **`socket.cork()`/`uncork()` did not exist.** `ws` corks around every
+     frame to coalesce header, payload and mask into one packet, so a
+     WebSocket `send()` threw before a single byte went out. They are real
+     now (writes queue while corked; `end()` implies uncork).
+  2. **`http.request` could not upgrade at all**, because it rode URLSession.
+     Rewritten over `net`: request bytes measured against real node
+     (user headers, then Host, then Connection, then framing; `end(body)`
+     sends Content-Length; write-then-end is chunked; GET/HEAD/DELETE/
+     OPTIONS/TRACE/CONNECT get no framing header — node writes a body for
+     those unframed if you insist). This also closes a gap noted since the
+     fetch work: response bodies now arrive INCREMENTALLY instead of
+     complete, so a streaming endpoint can be read chunk by chunk.
+  3. **Our streams had no `_readableState`/`_writableState`.** `ws` decides
+     how to finish a closing handshake by reading
+     `socket._readableState.endEmitted` and
+     `receiver._writableState.finished`; with those undefined its close
+     handler threw, so messages flowed perfectly and `'close'` never fired.
+     They are now LIVE VIEWS over the fields we already keep — every
+     property a getter, with the few libraries write to mapped back — rather
+     than a second copy of the truth to drift.
+- **Two divergences from node's HTTP client, both deliberate.** We open one
+  connection per request; node's agent pools sockets and sends several down
+  one connection. Per-request bytes are identical (that is what the wire
+  fixture asserts, after normalizing the Host port), and closing after each
+  response is correct HTTP — just less efficient. Socket pooling is future
+  work, not a bug. And `https.request` stays on URLSession: TLS is a
+  handshake we cannot put on a raw socket, so an https request keeps
+  URLSession's limits (complete bodies, no upgrade) while http has neither.
 - **A divergence recorded rather than papered over.** Node reports a
   server's `'connection'` before the connecting client's `'connect'`; we
   report the reverse, because a loopback handshake completes inside
@@ -1364,7 +1397,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP + http.createServer — express runs; gaps: TLS server, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP, http client+server, WebSockets — express and ws run; gaps: TLS server, socket pooling, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

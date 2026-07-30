@@ -153,6 +153,25 @@ construction — IP literals and hosts-file names — because node's `resolve4`
 queries a DNS server through c-ares and never reads the hosts file. Record
 types getaddrinfo cannot answer must keep saying so rather than returning an
 empty list.
+The HTTP CLIENT is TWO transports and the split is deliberate: plaintext
+`http.request` rides `net` (so response bodies arrive incrementally, request
+bodies can stream, and a 101 hands the socket over — the WebSocket path),
+while `https.request` stays on URLSession because TLS is a handshake we cannot
+put on a raw socket. Verify the client the same way as the server: a neutral
+raw-socket sink prints what it received and our request BYTES must equal
+node's per request (normalize the Host port; split the stream into requests).
+Do NOT compare packet boundaries or connection reuse — node's agent pools
+sockets and sends several requests down one connection, we open one per
+request. That is a recorded divergence, not a bug; pooling is future work.
+**`socket.cork()`/`uncork()` and `_readableState`/`_writableState` are
+load-bearing for real packages.** `ws` corks around every frame (without cork
+a WebSocket send throws) and reads `socket._readableState.endEmitted` /
+`receiver._writableState.finished` to finish a closing handshake (without them
+messages flow but `'close'` never fires). The state objects are LIVE VIEWS
+over the fields the streams already keep — keep them that way rather than
+storing a second copy that can drift. Regression: the real `ws` package must
+work in BOTH directions against real node as the peer, closing handshake
+included.
 The HTTP SERVER (`http.createServer`, in the engine's http module) verifies at
 the WIRE, not through its API: one raw-socket client sends literal request
 strings and prints the exact response bytes (normalizing `Date`), and those
