@@ -90,6 +90,7 @@ so a TUI navigates and edits.
 | **Phase T — the terminal screen** | `TerminalScreen.swift`: VT100/xterm grid (cursor, scroll regions, IL/DL/ICH/DCH/ECH, SGR incl. 256/truecolor, alt screen) + byte-at-a-time `AnsiParser`. `TerminalPrograms.swift`: the `TerminalProgram` contract — a full-screen program owns screen + keyboard, the fork/exec-less stand-in for a foreground process on a PTY — plus the first two real programs: `less`/`more` (true pager) and live `top`. `Terminal.swift` hosts programs (grid renderer, key routing, resize-as-SIGWINCH). **Android parity deferred** — the Kotlin terminal is transcript-only until this is mirrored |
 | **The T↔G join — Node on a TTY** | `NodeProgram` (`TerminalPrograms.swift`): `node`/`npx`/installed bins launched interactively become terminal programs. `process.stdin.isTTY` is true, keystrokes arrive as `data` events, stdin listeners keep the event loop alive (node's ref'd-stdin rule). The program picks its mode like on a real terminal: plain printing stays in the scrollback (lines land ANSI-stripped, stderr keeps its color); `setRawMode(true)` or the alt screen hands it the grid — the ink model. Terminal discipline is real: cooked-mode ^C is SIGINT (handlers run, or the program dies 130), raw-mode ^C is a byte the program reads; rotation emits `resize` with the live geometry, and a program is born knowing `stdout.columns` |
 | **Phase G — real TCP** | `NodeSockets.swift`: `net` is no longer a stub that refuses. POSIX sockets on `DispatchSource` (not a thread each), non-blocking connect, name resolution off the I/O queue, honest backpressure at a 64 KB high-water mark, `ref`/`unref` feeding the event loop's quiescence test. `net.Socket` is a real Duplex over an fd and `net.Server` turns `accept()` into `'connection'`. Verified BOTH directions against real node: a real node client cannot tell our server from node's, and a real node server cannot tell our client from node's. This is what `http.createServer` — the dev-server story — stands on |
+| **Phase G — `http.createServer`** | A real HTTP/1.1 server on top of `net`: an incremental request parser (Content-Length and chunked bodies, pipelined requests, duplicate-header rules), `IncomingMessage` as a Readable, `ServerResponse` as a Writable, keep-alive, `Expect: 100-continue`, and `'upgrade'` for a WebSocket handshake. Framing matches node's on the WIRE, measured rather than assumed. **Real express runs on it** — installed by our own package manager, answering real node's client identically, JSON body parsing and 404 page included. `https.createServer` refuses, honestly: TLS needs a handshake we cannot put on a raw socket |
 
 ### Verification performed
 
@@ -911,6 +912,40 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   lesson: **a green run on a concurrent path is not evidence.** The bugs
   were found by running the same fixture twenty times and by tracing host
   events, not by reading the code.
+- **`http.createServer`, verified at the WIRE.** The decisive test is not an
+  API fixture but a byte comparison: the same raw-socket client (a literal
+  request string in, the exact response bytes out, `Date` normalized) runs
+  against our server and against real node's, across 12 request shapes —
+  keep-alive, pipelined requests down one socket, HEAD, 204, HTTP/1.0,
+  chunked request bodies, duplicate headers, explicit `Connection: close`.
+  All 12 match byte-for-byte, which is the only way to know the framing is
+  node's and not merely plausible. Four rules had to be MEASURED, because
+  each is invisible from the API and wrong by default:
+  1. Header order is user headers in insertion order, then `Date`, then
+     `Connection`/`Keep-Alive`, then the framing header.
+  2. `res.end(body)` with nothing written yet sends **Content-Length**, not
+     chunked — node's one-shot path.
+  3. `writeHead()` **commits** the framing, so `writeHead(404, …)` followed
+     by `end('nope')` is chunked, NOT the Content-Length that same body
+     would have gotten otherwise.
+  4. 204/304/1xx carry no framing header at all, and an HTTP/1.0 response
+     is framed by the close rather than a deduced Content-Length.
+- **Real express on the engine — and the one bug in the way was in
+  `Buffer`.** Express failed every route with "Buffer.isBuffer is not a
+  function", thrown from inside express, while `Buffer.isBuffer` worked fine
+  everywhere else. Cause: express uses `safe-buffer`, which copies Buffer's
+  statics with `for (var key in src)`. Ours were CLASS statics — 
+  non-enumerable — so the copy produced a Buffer with no statics at all;
+  and `Buffer.allocUnsafeSlow` was missing, which is what pushed
+  safe-buffer onto that copying path instead of re-exporting the real
+  module. Fixed by declaring the statics enumerable (as node has them) and
+  adding `allocUnsafeSlow`, `compare`, `isEncoding`, `of`, `poolSize`. One
+  fix, and every package in the safe-buffer family benefits. The lesson is
+  the method's whole point: **the bug was in `Buffer`, found by running a
+  web framework.** A fixture for `isBuffer` passed the entire time.
+  Also found the same way: our `http.request` read only `options.hostname`,
+  so the ubiquitous `{ host, port, path }` form built `http://undefined:PORT`
+  and failed silently — a server-plus-client script waited forever.
 - **A divergence recorded rather than papered over.** Node reports a
   server's `'connection'` before the connecting client's `'connect'`; we
   report the reverse, because a loopback handshake completes inside
@@ -1319,7 +1354,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP net; gaps: http.createServer, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP + http.createServer — express runs; gaps: TLS server, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

@@ -147,6 +147,28 @@ reverse (a loopback handshake completes inside `connect()`; the accept is a
 dispatch-source event). Deferring delivery does not reorder it. Assert each
 socket's OWN event sequence instead. Likewise `server.getConnections()`
 mid-exchange is nondeterministic in real node (1, 2 or 3 across runs).
+The HTTP SERVER (`http.createServer`, in the engine's http module) verifies at
+the WIRE, not through its API: one raw-socket client sends literal request
+strings and prints the exact response bytes (normalizing `Date`), and those
+bytes must be IDENTICAL against our server and real node's, across keep-alive,
+pipelining, HEAD, 204, HTTP/1.0, chunked request bodies, duplicate headers and
+`Connection: close`. Four framing rules were measured and are easy to break:
+user headers keep insertion order, then `Date`, then `Connection`/`Keep-Alive`,
+then framing; `res.end(body)` with nothing written yet sends Content-Length,
+not chunked; `writeHead()` COMMITS the framing (so `writeHead` + `end(body)`
+is chunked); and 204/304/1xx get no framing header while HTTP/1.0 is framed by
+the close. Also keep the real-package proof green: express installed by our own
+PackageManager, served by our engine, answering real node's client identically.
+`https.createServer` refuses on purpose (no TLS handshake on a raw socket) —
+a DELIBERATE divergence from node, which creates a server that fails later, so
+it must not be a twin fixture.
+**Buffer's statics must stay ENUMERABLE**, and all four allocators
+(`from`/`alloc`/`allocUnsafe`/`allocUnsafeSlow`) must exist. `safe-buffer` —
+under express, body-parser and hundreds more — copies them with
+`for (key in src)` and only re-exports the real module when all four are
+present. Class statics are non-enumerable, which silently produced a Buffer
+with no `isBuffer` INSIDE those packages while every direct test passed. Do
+not convert them back to `static` members.
 The T↔G JOIN (`NodeProgram` + the engine's TTY surface) verifies like any
 terminal program — `TerminalProgramIO.write` → `AnsiParser`, grid asserted
 after keystrokes, pumping the main runloop between steps — covering both

@@ -1534,6 +1534,41 @@ final class NodeEngine: @unchecked Sendable {
         equals(other) { return this.length === other.length && this.every((b, i) => b === other[i]); }
         toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
       }
+      // node's Buffer statics are ENUMERABLE own properties, and `safe-buffer` — a
+      // dependency of express, body-parser and hundreds of other packages — copies them with
+      // `for (var key in src)`. Class statics are NON-enumerable, so that copy produced a
+      // Buffer with no `isBuffer`, and express's `res.send()` died on
+      // "Buffer.isBuffer is not a function" for every route. Re-declaring them enumerable
+      // fixes the whole family at once; adding `allocUnsafeSlow` matters just as much,
+      // because safe-buffer only takes its transparent fast path when all four allocators
+      // are present, and otherwise builds the lossy copy above.
+      const bufferStatics = {
+        from: Buffer.from,
+        alloc: Buffer.alloc,
+        allocUnsafe: Buffer.allocUnsafe,
+        allocUnsafeSlow: function(size) { return Buffer.allocUnsafe(size); },
+        isBuffer: Buffer.isBuffer,
+        byteLength: Buffer.byteLength,
+        concat: Buffer.concat,
+        of: function() { return Buffer.from(Array.prototype.slice.call(arguments)); },
+        compare: function(a, b) {
+          const length = Math.min(a.length, b.length);
+          for (let i = 0; i < length; i++) { if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; }
+          return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+        },
+        isEncoding: function(name) {
+          return ['utf8', 'utf-8', 'hex', 'base64', 'base64url', 'latin1', 'binary', 'ascii',
+                  'ucs2', 'ucs-2', 'utf16le', 'utf-16le'].indexOf(String(name).toLowerCase()) >= 0;
+        },
+        poolSize: 8192,
+      };
+      for (const name of Object.keys(bufferStatics)) {
+        // defineProperty, not assignment: assigning over an existing non-enumerable own
+        // property keeps it non-enumerable, which is the whole bug.
+        Object.defineProperty(Buffer, name, {
+          value: bufferStatics[name], writable: true, enumerable: true, configurable: true,
+        });
+      }
       globalThis.Buffer = Buffer;
 
       // ---- Web globals JSC doesn't ship (wasm/Emscripten glue expects them) ----
@@ -3678,7 +3713,17 @@ final class NodeEngine: @unchecked Sendable {
       };
       function makeHttpModule(defaultProtocol) {
         function request(url, options, callback) {
-          if (typeof url === 'object') { callback = options; options = url; url = (options.protocol || defaultProtocol) + '//' + options.hostname + (options.port ? ':' + options.port : '') + (options.path || '/'); }
+          if (typeof url === 'object') {
+            callback = options;
+            options = url;
+            // node accepts `host` OR `hostname`, and `host` may carry the port. Reading only
+            // `hostname` built "http://undefined:PORT" — a request that failed silently and
+            // left a server-plus-client script waiting forever.
+            const protocol = options.protocol || defaultProtocol;
+            let authority = options.hostname || options.host || 'localhost';
+            if (options.port && authority.indexOf(':') < 0) authority += ':' + options.port;
+            url = protocol + '//' + authority + (options.path || '/');
+          }
           if (typeof options === 'function') { callback = options; options = {}; }
           options = options || {};
           const EventEmitter = coreRequire('events');
@@ -3712,16 +3757,415 @@ final class NodeEngine: @unchecked Sendable {
         }
         const EventEmitter = coreRequire('events');
         const { Readable, Writable } = coreRequire('stream');
+        const net = coreRequire('net');
         // The extendable class surface: HTTP client libraries subclass Agent and touch the
         // message classes for instanceof checks.
         class Agent extends EventEmitter {
           constructor(options) { super(); this.options = options || {}; this.sockets = {}; this.requests = {}; }
           destroy() {}
         }
-        class IncomingMessage extends Readable {}
         class OutgoingMessage extends Writable {}
         class ClientRequest extends OutgoingMessage {}
-        class ServerResponse extends OutgoingMessage {}
+        // -- the HTTP/1.1 SERVER, on top of real net ------------------------------------
+        // Wire behavior is matched to real node's, measured with a raw-socket client rather
+        // than assumed: user headers keep insertion order, then Date, then
+        // Connection/Keep-Alive, then framing. `res.end(body)` with no prior write sends
+        // Content-Length (not chunked) — node's one-shot path, and the difference is visible
+        // on the wire.
+        const STATUS_CODES = {
+          100: 'Continue', 101: 'Switching Protocols', 200: 'OK', 201: 'Created',
+          202: 'Accepted', 204: 'No Content', 206: 'Partial Content',
+          301: 'Moved Permanently', 302: 'Found', 303: 'See Other', 304: 'Not Modified',
+          307: 'Temporary Redirect', 308: 'Permanent Redirect', 400: 'Bad Request',
+          401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
+          405: 'Method Not Allowed', 406: 'Not Acceptable', 408: 'Request Timeout',
+          409: 'Conflict', 410: 'Gone', 411: 'Length Required',
+          413: 'Payload Too Large', 414: 'URI Too Long', 415: 'Unsupported Media Type',
+          416: 'Range Not Satisfiable', 418: "I'm a Teapot", 422: 'Unprocessable Entity',
+          426: 'Upgrade Required', 429: 'Too Many Requests', 431: 'Request Header Fields Too Large',
+          500: 'Internal Server Error', 501: 'Not Implemented', 502: 'Bad Gateway',
+          503: 'Service Unavailable', 504: 'Gateway Timeout', 505: 'HTTP Version Not Supported',
+        };
+
+        function IncomingMessage(socket) {
+          Readable.call(this);
+          this.socket = socket;
+          this.connection = socket;
+          this.httpVersion = '1.1';
+          this.httpVersionMajor = 1;
+          this.httpVersionMinor = 1;
+          this.method = null;
+          this.url = null;
+          this.headers = {};
+          this.rawHeaders = [];
+          this.trailers = {};
+          this.rawTrailers = [];
+          this.complete = false;
+          this.statusCode = null;
+          this.statusMessage = null;
+          this.aborted = false;
+        }
+        IncomingMessage.prototype = Object.create(Readable.prototype);
+        IncomingMessage.prototype.constructor = IncomingMessage;
+        IncomingMessage.prototype.setTimeout = function(ms, callback) {
+          if (this.socket) this.socket.setTimeout(ms, callback);
+          return this;
+        };
+        IncomingMessage.prototype._read = function() {};
+
+        function ServerResponse(socket, options) {
+          Writable.call(this);
+          options = options || {};
+          this.socket = socket;
+          this.connection = socket;
+          this.statusCode = 200;
+          this.statusMessage = undefined;
+          this.headersSent = false;
+          this.sendDate = true;
+          this.finished = false;
+          this._order = [];             // [lowercased, name, value] in insertion order
+          this._chunked = false;
+          this._wroteBody = false;
+          this._httpVersion = options.httpVersion || '1.1';
+          this._keepAlive = options.keepAlive !== false;
+          this._bodyless = !!options.bodyless;   // HEAD, and 204/304 responses
+          this._hostOwnsClose = true;            // the socket owns 'close'
+        }
+        ServerResponse.prototype = Object.create(Writable.prototype);
+        ServerResponse.prototype.constructor = ServerResponse;
+
+        ServerResponse.prototype._slot = function(name) {
+          const key = String(name).toLowerCase();
+          for (let i = 0; i < this._order.length; i++) if (this._order[i][0] === key) return this._order[i];
+          return null;
+        };
+        ServerResponse.prototype.setHeader = function(name, value) {
+          if (this.headersSent) throw Object.assign(new Error('Cannot set headers after they are sent to the client'),
+                                                    { code: 'ERR_HTTP_HEADERS_SENT' });
+          const slot = this._slot(name);
+          if (slot) { slot[1] = name; slot[2] = value; }
+          else this._order.push([String(name).toLowerCase(), name, value]);
+          return this;
+        };
+        ServerResponse.prototype.appendHeader = function(name, value) {
+          const slot = this._slot(name);
+          if (!slot) return this.setHeader(name, value);
+          const existing = Array.isArray(slot[2]) ? slot[2] : [slot[2]];
+          slot[2] = existing.concat(value);
+          return this;
+        };
+        ServerResponse.prototype.getHeader = function(name) {
+          const slot = this._slot(name);
+          return slot ? slot[2] : undefined;
+        };
+        ServerResponse.prototype.getHeaders = function() {
+          const out = {};
+          for (const [key, , value] of this._order) out[key] = value;
+          return out;
+        };
+        ServerResponse.prototype.getHeaderNames = function() { return this._order.map(h => h[0]); };
+        ServerResponse.prototype.hasHeader = function(name) { return !!this._slot(name); };
+        ServerResponse.prototype.removeHeader = function(name) {
+          const key = String(name).toLowerCase();
+          this._order = this._order.filter(h => h[0] !== key);
+          return this;
+        };
+        ServerResponse.prototype.writeHead = function(status, message, headers) {
+          if (typeof message === 'object' && message !== null) { headers = message; message = undefined; }
+          this.statusCode = status;
+          if (message !== undefined) this.statusMessage = message;
+          if (headers) {
+            if (Array.isArray(headers)) {
+              for (let i = 0; i < headers.length; i += 2) this.setHeader(headers[i], headers[i + 1]);
+            } else {
+              for (const name of Object.keys(headers)) this.setHeader(name, headers[name]);
+            }
+          }
+          // writeHead COMMITS the framing, which is observable: node answers
+          // `writeHead(404, {...}); res.end('nope')` with Transfer-Encoding: chunked, not the
+          // Content-Length its one-shot path would have deduced. Sending the header bytes
+          // here is what reproduces that (node buffers them to coalesce one packet, which
+          // changes segmentation, not the byte stream).
+          this._sendHeaders();
+          return this;
+        };
+
+        // The exact byte layout node produces. `oneShotLength` is set when end(body) can
+        // frame the whole response with Content-Length.
+        ServerResponse.prototype._sendHeaders = function(oneShotLength) {
+          if (this.headersSent) return;
+          this.headersSent = true;
+          const message = this.statusMessage !== undefined ? this.statusMessage
+                        : (STATUS_CODES[this.statusCode] || 'unknown');
+          const lines = ['HTTP/1.1 ' + this.statusCode + ' ' + message];
+          let sawConnection = false, sawLength = false, sawEncoding = false, sawDate = false;
+          for (const [key, name, value] of this._order) {
+            if (key === 'connection') sawConnection = true;
+            if (key === 'content-length') sawLength = true;
+            if (key === 'transfer-encoding') sawEncoding = true;
+            if (key === 'date') sawDate = true;
+            const values = Array.isArray(value) ? value : [value];
+            for (const one of values) lines.push(name + ': ' + one);
+          }
+          if (this.sendDate && !sawDate) lines.push('Date: ' + new Date().toUTCString());
+          if (!sawConnection) {
+            if (this._keepAlive && this._httpVersion === '1.1') {
+              lines.push('Connection: keep-alive');
+              lines.push('Keep-Alive: timeout=5');
+            } else {
+              lines.push('Connection: close');
+            }
+          } else {
+            // An explicit `Connection: close` from the handler decides the socket's fate.
+            const value = String(this.getHeader('connection') || '').toLowerCase();
+            if (value.indexOf('close') >= 0) this._keepAlive = false;
+          }
+          // A body-less response carries NO framing header — measured: node answers 204 with
+          // neither Content-Length nor Transfer-Encoding, and the same goes for 304 and 1xx.
+          // For HTTP/1.0 node frames with the CLOSE rather than a deduced Content-Length.
+          const bodyless = this._bodyless || this.statusCode === 204 || this.statusCode === 304 ||
+                           (this.statusCode >= 100 && this.statusCode < 200);
+          this._bodyless = bodyless;
+          if (!sawLength && !sawEncoding && !bodyless) {
+            if (this._httpVersion !== '1.1') this._keepAlive = false;
+            else if (oneShotLength !== undefined) lines.push('Content-Length: ' + oneShotLength);
+            else { lines.push('Transfer-Encoding: chunked'); this._chunked = true; }
+          } else if (sawEncoding && String(this.getHeader('transfer-encoding')).toLowerCase().indexOf('chunked') >= 0) {
+            this._chunked = true;
+          }
+          this.socket.write(lines.join('\r\n') + '\r\n\r\n');
+        };
+        ServerResponse.prototype.flushHeaders = function() { this._sendHeaders(); };
+
+        ServerResponse.prototype._write = function(chunk, encoding, callback) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk
+            : Buffer.from(String(chunk), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+          // A first write() means the length isn't known up front: headers go out framed
+          // chunked, exactly as node does.
+          if (!this.headersSent) this._sendHeaders();
+          this._wroteBody = true;
+          if (this._bodyless) { callback(); return; }
+          if (this._chunked) {
+            if (buffer.length) this.socket.write(buffer.length.toString(16) + '\r\n');
+            if (buffer.length) this.socket.write(buffer);
+            if (buffer.length) this.socket.write('\r\n');
+          } else if (buffer.length) {
+            this.socket.write(buffer);
+          }
+          callback();
+        };
+
+        ServerResponse.prototype.end = function(chunk, encoding, callback) {
+          if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+          else if (typeof encoding === 'function') { callback = encoding; encoding = null; }
+          if (this.finished) return this;
+          // The one-shot path: nothing written yet and the whole body in hand, so the
+          // response can be framed with Content-Length instead of chunked.
+          if (!this.headersSent && !this._wroteBody) {
+            const buffer = chunk === undefined || chunk === null ? Buffer.alloc(0)
+              : (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8'));
+            this._sendHeaders(this._bodyless ? undefined : buffer.length);
+            if (buffer.length && !this._bodyless) this.socket.write(buffer);
+          } else {
+            if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+            if (this._chunked && !this._bodyless) this.socket.write('0\r\n\r\n');
+          }
+          this.finished = true;
+          this.writable = false;
+          if (callback) this.once('finish', callback);
+          const self = this;
+          process.nextTick(function(){
+            self._finishEmitted = true;
+            self.emit('finish');
+            if (self._onDone) self._onDone();
+          });
+          return this;
+        };
+        ServerResponse.prototype.writeContinue = function() { this.socket.write('HTTP/1.1 100 Continue\r\n\r\n'); };
+        ServerResponse.prototype.setTimeout = function(ms, callback) {
+          if (this.socket) this.socket.setTimeout(ms, callback);
+          return this;
+        };
+
+        // One connection's request stream: headers, then a body framed by Content-Length or
+        // chunked encoding, then (keep-alive) the next request in the same buffer.
+        function serveConnection(server, socket) {
+          let buffer = Buffer.alloc(0);
+          let phase = 'head';
+          let message = null;
+          let remaining = 0;
+          let chunkState = 'size';
+          let closing = false;
+
+          socket.on('data', function(chunk) {
+            buffer = Buffer.concat([buffer, chunk]);
+            pump();
+          });
+          socket.on('end', function() {
+            if (message && !message.complete) { message.aborted = true; message.emit('aborted'); }
+          });
+          socket.on('error', function(error) { server.emit('clientError', error, socket); });
+
+          function pump() {
+            while (true) {
+              if (closing) return;
+              if (phase === 'head') {
+                const end = buffer.indexOf('\r\n\r\n');
+                if (end < 0) return;
+                const head = buffer.slice(0, end).toString('latin1');
+                buffer = buffer.slice(end + 4);
+                if (!startMessage(head)) return;
+                continue;
+              }
+              if (phase === 'length') {
+                if (!buffer.length) return;
+                const take = Math.min(remaining, buffer.length);
+                message.push(buffer.slice(0, take));
+                buffer = buffer.slice(take);
+                remaining -= take;
+                if (remaining === 0) { finishMessage(); continue; }
+                return;
+              }
+              if (phase === 'chunked') {
+                if (chunkState === 'size') {
+                  const at = buffer.indexOf('\r\n');
+                  if (at < 0) return;
+                  const size = parseInt(buffer.slice(0, at).toString('latin1').split(';')[0], 16);
+                  buffer = buffer.slice(at + 2);
+                  if (!size) {
+                    // Trailers, if any, end at the blank line.
+                    const trailerEnd = buffer.indexOf('\r\n');
+                    if (trailerEnd === 0) buffer = buffer.slice(2);
+                    finishMessage();
+                    continue;
+                  }
+                  remaining = size;
+                  chunkState = 'data';
+                  continue;
+                }
+                if (buffer.length < remaining + 2) return;
+                message.push(buffer.slice(0, remaining));
+                buffer = buffer.slice(remaining + 2);
+                chunkState = 'size';
+                continue;
+              }
+              return;   // a response is in flight; the next request waits in `buffer`
+            }
+          }
+
+          function startMessage(head) {
+            const lines = head.split('\r\n');
+            const parts = lines[0].split(' ');
+            message = new IncomingMessage(socket);
+            message.method = parts[0];
+            message.url = parts[1] || '/';
+            const version = (parts[2] || 'HTTP/1.1').replace('HTTP/', '');
+            message.httpVersion = version;
+            message.httpVersionMajor = Number(version.split('.')[0]) || 1;
+            message.httpVersionMinor = Number(version.split('.')[1]) || 1;
+            for (let i = 1; i < lines.length; i++) {
+              const at = lines[i].indexOf(':');
+              if (at < 0) continue;
+              const name = lines[i].slice(0, at).trim();
+              const value = lines[i].slice(at + 1).trim();
+              const key = name.toLowerCase();
+              message.rawHeaders.push(name, value);
+              // node's rules: set-cookie accumulates, most others keep the first, and a few
+              // comma-join.
+              if (key === 'set-cookie') (message.headers[key] = message.headers[key] || []).push(value);
+              else if (message.headers[key] === undefined) message.headers[key] = value;
+              else if (key === 'cookie') message.headers[key] += '; ' + value;
+              else if (['age','authorization','content-length','content-type','etag','expires',
+                        'from','host','if-modified-since','if-unmodified-since','last-modified',
+                        'location','max-forwards','proxy-authorization','referer','retry-after',
+                        'server','user-agent'].indexOf(key) < 0) message.headers[key] += ', ' + value;
+            }
+
+            const keepAlive = wantsKeepAlive(message);
+            const bodyless = message.method === 'HEAD';
+            const response = new ServerResponse(socket, {
+              httpVersion: message.httpVersion, keepAlive: keepAlive, bodyless: bodyless,
+            });
+            response._onDone = function() { responseDone(response, keepAlive); };
+
+            // An upgrade (WebSocket's handshake) hands the raw socket to the listener and
+            // this connection stops being HTTP.
+            if (message.headers.upgrade && server.listenerCount('upgrade')) {
+              phase = 'upgrade';
+              closing = true;
+              const head = buffer;
+              buffer = Buffer.alloc(0);
+              server.emit('upgrade', message, socket, head);
+              return false;
+            }
+
+            if (String(message.headers.expect || '').toLowerCase() === '100-continue') {
+              if (server.listenerCount('checkContinue')) {
+                setBodyFraming(message);
+                server.emit('checkContinue', message, response);
+                return true;
+              }
+              socket.write('HTTP/1.1 100 Continue\r\n\r\n');
+            }
+
+            setBodyFraming(message);
+            server.emit('request', message, response);
+            return true;
+          }
+
+          function setBodyFraming(msg) {
+            const encoding = String(msg.headers['transfer-encoding'] || '').toLowerCase();
+            if (encoding.indexOf('chunked') >= 0) { phase = 'chunked'; chunkState = 'size'; return; }
+            const length = Number(msg.headers['content-length'] || 0);
+            if (length > 0) { phase = 'length'; remaining = length; return; }
+            phase = 'idle';
+            finishMessage();
+          }
+
+          function finishMessage() {
+            if (!message || message.complete) { phase = 'idle'; return; }
+            message.complete = true;
+            phase = 'idle';
+            message.push(null);
+          }
+
+          function responseDone(response, keepAlive) {
+            if (!keepAlive) { closing = true; socket.end(); return; }
+            message = null;
+            phase = 'head';
+            // A pipelined request may already be sitting in the buffer.
+            if (buffer.length) process.nextTick(pump);
+          }
+
+          function wantsKeepAlive(msg) {
+            const value = String(msg.headers.connection || '').toLowerCase();
+            if (value.indexOf('close') >= 0) return false;
+            if (msg.httpVersionMajor === 1 && msg.httpVersionMinor === 0) return value.indexOf('keep-alive') >= 0;
+            return server.keepAlive !== false;
+          }
+        }
+
+        function Server(options, handler) {
+          if (typeof options === 'function') { handler = options; options = {}; }
+          options = options || {};
+          net.Server.call(this, options);
+          this.timeout = 0;
+          this.keepAliveTimeout = 5000;
+          this.headersTimeout = 60000;
+          this.requestTimeout = 300000;
+          this.maxHeadersCount = null;
+          if (handler) this.on('request', handler);
+          const self = this;
+          this.on('connection', function(socket) { serveConnection(self, socket); });
+        }
+        Server.prototype = Object.create(net.Server.prototype);
+        Server.prototype.constructor = Server;
+        Server.prototype.setTimeout = function(ms, callback) {
+          this.timeout = ms;
+          if (callback) this.on('timeout', callback);
+          return this;
+        };
+
         return {
           request: request,
           get: function(url, options, callback) {
@@ -3732,15 +4176,22 @@ final class NodeEngine: @unchecked Sendable {
           Agent: Agent,
           globalAgent: new Agent(),
           IncomingMessage: IncomingMessage,
+          ServerResponse: ServerResponse,
           OutgoingMessage: OutgoingMessage,
           ClientRequest: ClientRequest,
-          ServerResponse: ServerResponse,
-          createServer: function() { throw new Error('http servers are not available yet (the dev-server engine is on the roadmap)'); },
-          STATUS_CODES: { 200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found',
-                          304: 'Not Modified', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden',
-                          404: 'Not Found', 409: 'Conflict', 429: 'Too Many Requests',
-                          500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable' },
-          METHODS: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+          Server: Server,
+          // https needs TLS, which this device gives us only inside URLSession — there is no
+          // handshake we can put on a raw socket, so an https server says so instead of
+          // serving plaintext under an https name.
+          createServer: defaultProtocol === 'https:'
+            ? function() { throw new Error('https servers are not available: TLS needs a handshake we cannot put on a raw socket (http.createServer is real)'); }
+            : function(options, handler) { return new Server(options, handler); },
+          STATUS_CODES: STATUS_CODES,
+          METHODS: ['ACL', 'BIND', 'CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'GET', 'HEAD',
+                    'LINK', 'LOCK', 'M-SEARCH', 'MERGE', 'MKACTIVITY', 'MKCALENDAR', 'MKCOL',
+                    'MOVE', 'NOTIFY', 'OPTIONS', 'PATCH', 'POST', 'PROPFIND', 'PROPPATCH',
+                    'PURGE', 'PUT', 'REBIND', 'REPORT', 'SEARCH', 'SOURCE', 'SUBSCRIBE',
+                    'TRACE', 'UNBIND', 'UNLINK', 'UNLOCK', 'UNSUBSCRIBE'],
         };
       }
       coreFactories.http = function() { return makeHttpModule('http:'); };
