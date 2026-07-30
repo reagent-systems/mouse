@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `BroadcastChannel` (global and via `worker_threads`),
+  `receiveMessageOnPort` and `get`/`setEnvironmentData` work. Both had been refused as needing shared memory; a
+  broadcast is a name registry with fan-out through the main engine as hub, and the
+  synchronous drain pops a queue the port already holds. A MessagePort with no
+  listener now queues instead of dropping, and an open channel holds the event loop
+  as node's does. environmentData is inherited data, not shared data: a worker gets a
+  snapshot at spawn time and never sees a key set afterwards, which is node's rule.
 - Node layer: `cluster` works. The primary binds one listening socket and hands
   each accepted descriptor to a worker, which adopts it as an ordinary connected
   socket; worker lifecycle, `disconnect()` and the `online`/`listening`/`exit`

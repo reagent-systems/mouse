@@ -716,6 +716,14 @@ final class NodeEngine: @unchecked Sendable {
             self?.children[Int(id)]?.deliverMessage(json)
         }
         expose("spawnMessage", spawnMessage)
+        // A handle JavaScript itself owns. node's BroadcastChannel keeps the loop alive until it
+        // is closed or unref'd, and there was no way to express that from the bootstrap: every
+        // other handle here is owned by the host side (a socket, a child, a timer).
+        let loopHold: @convention(block) (Bool) -> Void = { [weak self] hold in
+            guard let self else { return }
+            outstanding += hold ? 1 : -1
+        }
+        expose("loopHold", loopHold)
         let spawnRef: @convention(block) (Int32, Bool) -> Void = { [weak self] id, refed in
             guard let self, children[Int(id)] != nil else { return }
             if refed, !refedChildren.contains(Int(id)) {
@@ -2768,6 +2776,13 @@ final class NodeEngine: @unchecked Sendable {
           this.port2._twin = this.port1;
         }
       };
+      // node exposes BroadcastChannel as a GLOBAL, not only through worker_threads. Lazily, so
+      // requiring the module stays the thing that builds the hub — the getter reads as the class
+      // to everything that matters (`new`, `typeof`, `instanceof`).
+      Object.defineProperty(globalThis, 'BroadcastChannel', {
+        configurable: true,
+        get: function(){ return coreRequire('worker_threads').BroadcastChannel; },
+      });
       globalThis.AbortSignal = class AbortSignal {
         constructor() { this.aborted = false; this.reason = undefined; this._listeners = []; this.onabort = null; }
         addEventListener(type, listener) { if (type === 'abort') this._listeners.push(listener); }
@@ -7102,6 +7117,22 @@ final class NodeEngine: @unchecked Sendable {
         const EventEmitter = coreRequire('events');
         let nextThreadId = 1;
 
+        // environmentData: a snapshot the parent hands down at SPAWN time, which is node's rule —
+        // a key set after a worker starts is invisible to it (verified). Refused here as needing
+        // "memory both engines can see", which was the fourth wrong refusal of the same shape:
+        // inherited-at-spawn data travels perfectly well as JSON, exactly like workerData.
+        // Pairs rather than an object so a non-string key behaves as node's does.
+        const environmentData = [];
+        function envSlot(key) {
+            const wanted = JSON.stringify(key === undefined ? null : key);
+            for (const pair of environmentData) if (pair.k === wanted) return pair;
+            return null;
+        }
+
+        // Who the hub can reach. Kept here rather than derived from the child table because a
+        // worker that has exited must stop receiving broadcasts.
+        const liveWorkers = [];
+
         function Worker(script, options) {
           EventEmitter.call(this);
           options = options || {};
@@ -7112,11 +7143,27 @@ final class NodeEngine: @unchecked Sendable {
           const argv = options.eval ? ['-e', String(script)] : [String(script)];
           this._child = child_process.spawn('node', argv, {
             ipc: true, worker: true,
-            workerData: JSON.stringify(options.workerData === undefined ? null : options.workerData),
+            // One envelope for everything inherited at spawn: the worker's data and the
+            // environmentData snapshot as it stands NOW.
+            workerData: JSON.stringify({
+              d: options.workerData === undefined ? null : options.workerData,
+              e: environmentData,
+            }),
             cwd: options.cwd,
           });
-          this._child.on('message', function(message){ self.emit('message', message); });
-          this._child.on('exit', function(code){ self.emit('exit', code); });
+          this._child.on('message', function(message) {
+            if (message && typeof message === 'object' && message[WIRE]) {
+              broadcastIn(message[WIRE], self);
+              return;
+            }
+            self.emit('message', message);
+          });
+          liveWorkers.push(this);
+          this._child.on('exit', function(code) {
+            const at = liveWorkers.indexOf(self);
+            if (at >= 0) liveWorkers.splice(at, 1);
+            self.emit('exit', code);
+          });
           this._child.on('error', function(error){ self.emit('error', error); });
           this.stdout = this._child.stdout;
           this.stderr = this._child.stderr;
@@ -7148,9 +7195,29 @@ final class NodeEngine: @unchecked Sendable {
           if (!peer) return;
           // Structured clone, as far as JSON reaches: the same limit the child channel has.
           const copy = message === undefined ? undefined : JSON.parse(JSON.stringify(message));
-          process.nextTick(function(){ peer.emit('message', copy); });
+          // Queue rather than dispatch: a port with nobody listening HOLDS its messages in node,
+          // which is what makes receiveMessageOnPort able to drain them synchronously later.
+          peer._queue = peer._queue || [];
+          peer._queue.push(copy);
+          process.nextTick(function(){ peer._drain(); });
         };
-        MessagePort.prototype.start = function(){ this._started = true; };
+        /// Deliver queued messages as events, but only once somebody is listening — otherwise
+        /// they stay queued for receiveMessageOnPort.
+        MessagePort.prototype._drain = function() {
+          if (!this._queue || !this._queue.length) return;
+          if (!this._started && this.listenerCount('message') === 0) return;
+          const pending = this._queue;
+          this._queue = [];
+          for (let i = 0; i < pending.length; i++) this.emit('message', pending[i]);
+        };
+        // Adding the listener is what starts a port in node; anything already queued arrives then.
+        const portOn = MessagePort.prototype.on;
+        MessagePort.prototype.on = MessagePort.prototype.addListener = function(type, listener) {
+          const result = portOn.call(this, type, listener);
+          if (type === 'message') { const self = this; process.nextTick(function(){ self._drain(); }); }
+          return result;
+        };
+        MessagePort.prototype.start = function(){ this._started = true; this._drain(); };
         MessagePort.prototype.close = function(){ this.emit('close'); if (this._peer) this._peer.emit('close'); };
         MessagePort.prototype.ref = function(){ return this; };
         MessagePort.prototype.unref = function(){ return this; };
@@ -7167,6 +7234,97 @@ final class NodeEngine: @unchecked Sendable {
           return error;
         }
 
+        // ---- BroadcastChannel: a registry and a fan-out, not shared memory ----------------
+        // The refusal here said "it needs a shared registry across threads", which reads like a
+        // shared-memory claim and is not one. BroadcastChannel is message passing: post to a
+        // name, every OTHER channel object with that name hears it. The registry only has to be
+        // reachable, not shared — and the main engine already talks to every worker over a JSON
+        // channel, so it can BE the hub. Same mistake shape as cluster's second refusal:
+        // borrowing real node's implementation constraint without checking that it applies.
+        const WIRE = '__mouseBroadcast';
+        const localChannels = {};        // name -> live channel objects in THIS engine
+
+        function deliverLocally(name, data, except) {
+            const list = localChannels[name];
+            if (!list) return;
+            // A copy per listener, and taken before delivery: a handler that closes a channel
+            // must not change who else hears this message.
+            for (const channel of list.slice()) {
+                if (channel === except || channel._closed) continue;
+                const event = { data: data, type: 'message', target: channel };
+                process.nextTick(function() {
+                    if (channel._closed) return;
+                    if (typeof channel.onmessage === 'function') channel.onmessage(event);
+                    channel.emit('message', event);
+                });
+            }
+        }
+
+        // Every engine sends what it originates to the hub, which is the only party that can
+        // reach the others. In the main engine `broadcastOut` fans out directly; in a worker it
+        // goes up the parent channel and the main engine fans it out from there.
+        function broadcastOut(name, data, origin) {
+            if (__isWorker) {
+                if (process.send) process.send({ [WIRE]: { name: name, data: data } });
+                return;
+            }
+            for (const worker of liveWorkers) {
+                if (worker === origin) continue;
+                try { worker._child.send({ [WIRE]: { name: name, data: data } }); } catch (error) { /* gone */ }
+            }
+        }
+
+        function BroadcastChannel(name) {
+            EventEmitter.call(this);
+            this.name = String(name);
+            this.onmessage = null;
+            this.onmessageerror = null;
+            this._closed = false;
+            // An open channel keeps the process alive in node — verified: a script that only
+            // constructs one never exits. Without the hold, a program waiting for a broadcast
+            // would exit before it arrived.
+            this._holding = true;
+            bridge.loopHold(true);
+            (localChannels[this.name] = localChannels[this.name] || []).push(this);
+        }
+        BroadcastChannel.prototype = Object.create(EventEmitter.prototype);
+        BroadcastChannel.prototype.constructor = BroadcastChannel;
+        BroadcastChannel.prototype.postMessage = function(message) {
+            if (this._closed) {
+                throw Object.assign(new Error('BroadcastChannel is closed'), { name: 'InvalidStateError' });
+            }
+            const data = message === undefined ? undefined : JSON.parse(JSON.stringify(message));
+            deliverLocally(this.name, data, this);   // never the sender itself, as node does
+            broadcastOut(this.name, data, null);
+        };
+        BroadcastChannel.prototype.close = function() {
+            if (this._closed) return;
+            this._closed = true;
+            const list = localChannels[this.name] || [];
+            const at = list.indexOf(this);
+            if (at >= 0) list.splice(at, 1);
+            if (!list.length) delete localChannels[this.name];
+            if (this._holding) { this._holding = false; bridge.loopHold(false); }
+        };
+        BroadcastChannel.prototype.ref = function() {
+            if (!this._closed && !this._holding) { this._holding = true; bridge.loopHold(true); }
+            return this;
+        };
+        BroadcastChannel.prototype.unref = function() {
+            if (this._holding) { this._holding = false; bridge.loopHold(false); }
+            return this;
+        };
+
+        /// A broadcast arriving from elsewhere: deliver to every local channel of that name (no
+        /// sender to exclude — it is in another engine), and, in the hub, relay to the others.
+        function broadcastIn(body, origin) {
+            if (!body || typeof body.name !== 'string') return false;
+            deliverLocally(body.name, body.data, null);
+            if (!__isWorker) broadcastOut(body.name, body.data, origin);
+            return true;
+        }
+        globalThis.__broadcastIn = broadcastIn;
+
         // The worker's own end of the channel, which exists only inside a worker.
         let parentPort = null;
         if (__isWorker) {
@@ -7178,11 +7336,24 @@ final class NodeEngine: @unchecked Sendable {
           parentPort.close = function(){ if (process.disconnect) process.disconnect(); };
           parentPort.ref = function(){ return parentPort; };
           parentPort.unref = function(){ return parentPort; };
-          process.on('message', function(message){ parentPort.emit('message', message); });
+          process.on('message', function(message) {
+            // Reserved envelope: a broadcast is not a message to this worker's port.
+            if (message && typeof message === 'object' && message[WIRE]) {
+              broadcastIn(message[WIRE], null);
+              return;
+            }
+            parentPort.emit('message', message);
+          });
         }
         let parsedWorkerData = null;
         if (__isWorker && __workerData) {
-          try { parsedWorkerData = JSON.parse(__workerData); } catch (error) { parsedWorkerData = null; }
+          try {
+            const envelope = JSON.parse(__workerData);
+            parsedWorkerData = envelope && 'd' in envelope ? envelope.d : null;
+            if (envelope && Array.isArray(envelope.e)) {
+              for (const pair of envelope.e) environmentData.push(pair);
+            }
+          } catch (error) { parsedWorkerData = null; }
         }
 
         return {
@@ -7193,15 +7364,38 @@ final class NodeEngine: @unchecked Sendable {
           Worker: Worker,
           MessageChannel: MessageChannel,
           MessagePort: MessagePort,
-          BroadcastChannel: function BroadcastChannel(){ throw refuseWorker('BroadcastChannel', 'it needs a shared registry across threads'); },
+          BroadcastChannel: BroadcastChannel,
           // Everything below needs SHARED MEMORY between contexts, which two JSContexts do not
           // have. Refusing by name beats an Atomics wait that never wakes.
-          receiveMessageOnPort: function(){ throw refuseWorker('receiveMessageOnPort', 'synchronous port draining needs shared memory between contexts'); },
+          // receiveMessageOnPort was in that list by association and did not belong: it does not
+          // WAIT for anything. It pops a message a port has already queued, and returns
+          // undefined when there is none — a local queue, not shared memory.
+          receiveMessageOnPort: function(port) {
+            if (!port || typeof port._drain !== 'function') {
+              throw Object.assign(new TypeError('The "port" argument must be a MessagePort instance'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            if (!port._queue || !port._queue.length) return undefined;
+            return { message: port._queue.shift() };
+          },
           moveMessagePortToContext: function(){ throw refuseWorker('moveMessagePortToContext', 'contexts here are separate engines with no shared memory'); },
           markAsUntransferable: function(){},
           isMarkedAsUntransferable: function(){ return false; },
-          setEnvironmentData: function(){ throw refuseWorker('setEnvironmentData', 'shared environment data needs memory both engines can see'); },
-          getEnvironmentData: function(){ throw refuseWorker('getEnvironmentData', 'shared environment data needs memory both engines can see'); },
+          setEnvironmentData: function(key, value) {
+            const slot = envSlot(key);
+            // node DELETES the entry when the value is omitted.
+            if (value === undefined) {
+              if (slot) environmentData.splice(environmentData.indexOf(slot), 1);
+              return;
+            }
+            const copy = JSON.parse(JSON.stringify(value));
+            if (slot) slot.v = copy;
+            else environmentData.push({ k: JSON.stringify(key === undefined ? null : key), v: copy });
+          },
+          getEnvironmentData: function(key) {
+            const slot = envSlot(key);
+            return slot ? slot.v : undefined;
+          },
           SHARE_ENV: Symbol('nodejs.worker_threads.SHARE_ENV'),
           resourceLimits: {},
         };

@@ -1074,6 +1074,41 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **`BroadcastChannel` and `receiveMessageOnPort`: two more refusals whose reasons
+  were wrong, and wrong in the same way as cluster's.** They sat under a comment
+  saying everything below "needs SHARED MEMORY between contexts", and neither does.
+  BroadcastChannel is message passing — post to a name, every OTHER channel object
+  with that name hears it — so the registry has to be REACHABLE, not shared, and the
+  main engine already talks to every worker over a JSON channel, so it can BE the
+  hub. `receiveMessageOnPort` never waits for anything: it pops a message the port
+  already queued and returns `undefined` when there is none, which is a local queue.
+  A THIRD one fell in the same pass: `setEnvironmentData`/`getEnvironmentData` were
+  refused as needing "memory both engines can see", but node's own rule is that a
+  worker inherits a SNAPSHOT at spawn time and never sees a key set afterwards
+  (verified) — which is inherited data, not shared data, and travels as JSON exactly
+  like `workerData`. Both now ride one spawn envelope with it.
+  Only `SharedArrayBuffer`, `Atomics.wait` and `moveMessagePortToContext` genuinely
+  need shared memory, and those still refuse. The lesson is now five for five: a
+  refusal that names an implementation constraint borrowed from real node deserves
+  re-checking, because this runtime's shape differs in ways that sometimes make the
+  "impossible" thing easy.
+  Two behaviours worth recording because they are not obvious. A MessagePort with
+  nobody listening QUEUES rather than drops, which is the whole basis of the
+  synchronous drain — so `postMessage` now enqueues and delivers only once a listener
+  exists. And an open BroadcastChannel HOLDS the event loop in node (verified: a
+  script that only constructs one never exits), which needed a new `loopHold` bridge
+  since every other handle here is owned by the host side. Verified against real node
+  on three programs — the single-engine registry, cross-worker fan-out through the
+  hub, and a late broadcast received while ONLY the channel held the loop — plus the
+  environmentData snapshot rules. 22 rounds, identical every time.
+- **A known divergence, named rather than half-fixed:** node's `MessageChannel`,
+  `MessagePort` and `BroadcastChannel` globals ARE the `worker_threads` classes
+  (`===` identical). Ours are two implementations: an EventTarget-based global pair
+  that the wasm/Emscripten glue expects, and worker_threads' EventEmitter-based pair.
+  So `receiveMessageOnPort` accepts the module's ports and not the global ones, where
+  node accepts both. Unifying means giving one class both surfaces (`on` AND
+  `addEventListener`, raw values AND `.data` events) and re-proving the wasm
+  harnesses — a boundary of its own, not a postscript to this one.
 - **`options.env` now actually reaches a spawned child.** It was silently dropped
   before: every child inherited the parent's environment. node REPLACES the
   environment when `env` is given (the caller spreads `process.env` in if it wants
