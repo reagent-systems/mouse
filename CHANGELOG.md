@@ -8,6 +8,20 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **finite-field Diffie-Hellman is real** — `createDiffieHellman`,
+  `createDiffieHellmanGroup` and `getDiffieHellman` with all eight MODP groups (RFC 2409 and
+  RFC 3526), on JavaScriptCore's native `BigInt`. Real node and this engine derive the same
+  2048-bit shared secret from opposite halves of an exchange.
+- Node layer: `crypto.generatePrime`/`generatePrimeSync` and `checkPrime`/`checkPrimeSync`,
+  including safe primes, the `add`/`rem`/`bigint` options, and Miller-Rabin that rejects
+  Carmichael numbers. All four were refused as "needs a bignum implementation"; the bignum was
+  in the engine the whole time.
+
+### Changed
+- The remaining refusals were audited by MEASURING the platform claim each rests on, rather
+  than reading headers. zstd's refusal survives (measured absent). The TLS-server refusal keeps
+  standing but its stated reason is wrong — Network.framework has the pieces. corecrypto has
+  X448 and bignum symbols, but they carry no ABI guarantee and are not usable.
 - Node layer: **unhandled promise rejections exit 1**, as node's do, and
   `process.on('unhandledRejection', …)` is honoured — a listener suppresses the exit and may
   set its own code. Fires for a bare rejection, an awaited one, and a throw inside an async
