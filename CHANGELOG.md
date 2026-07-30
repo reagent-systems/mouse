@@ -8,6 +8,9 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `readableAborted`, `readableDidRead` and `writableAborted` on streams — the
+  getters that distinguish a stream destroyed mid-flight from one that ran to completion.
+
 - Node layer: `process.prependOnceListener`, `fd`/`readable`/`writable` on `process.stdout`,
   `stderr` and `stdin`, and `Response.formData()` — which reads urlencoded and multipart bodies,
   taking the multipart boundary from the Content-Type header. It was the only body reader

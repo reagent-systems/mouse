@@ -7195,6 +7195,14 @@ final class NodeEngine: @unchecked Sendable {
           readableObjectMode: { get: function(){ return !!this._objectMode; }, configurable: true },
           closed: { get: function(){ return !!this._closeEmitted; }, configurable: true },
           errored: { get: function(){ return this._errored || null; }, configurable: true },
+          // Destroyed BEFORE the stream ended: node's way of saying the read was cut short
+          // rather than completed, which is how a consumer tells a truncated body from a whole
+          // one. `readableDidRead` answers "did anything ever come out of this?".
+          readableAborted: {
+            get: function(){ return !!this.destroyed && !this._endEmitted; },
+            configurable: true,
+          },
+          readableDidRead: { get: function(){ return !!this._didRead; }, configurable: true },
         });
         Object.assign(Readable.prototype, {
           _read: function() {},
@@ -7219,7 +7227,10 @@ final class NodeEngine: @unchecked Sendable {
             this._draining = true;
             process.nextTick(() => {
               this._draining = false;
-              while (this._flowing && this._buf.length) this.emit('data', this._coerce(this._buf.shift()));
+              while (this._flowing && this._buf.length) {
+                this._didRead = true;   // backs `readableDidRead`
+                this.emit('data', this._coerce(this._buf.shift()));
+              }
               if (this._flowing && !this._sawEOF && !this._buf.length) this._read(16384);
               this._maybeEnd();
             });
@@ -7602,6 +7613,11 @@ final class NodeEngine: @unchecked Sendable {
           writableCorked: { get: function(){ return this._corked || 0; }, configurable: true },
           writableEnded: { get: function(){ return !!this._writableEnded; }, configurable: true },
           writableFinished: { get: function(){ return !!this._finishEmitted; }, configurable: true },
+          // Destroyed before finishing: the write was cut short rather than completed.
+          writableAborted: {
+            get: function(){ return !!this.destroyed && !this._finishEmitted; },
+            configurable: true,
+          },
           // node counts BYTES outside object mode, not entries — a caller watching backpressure
           // compares this against writableHighWaterMark, so the units have to agree.
           writableLength: {
