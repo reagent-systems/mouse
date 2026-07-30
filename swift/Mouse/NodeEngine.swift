@@ -3337,29 +3337,201 @@ final class NodeEngine: @unchecked Sendable {
           });
         });
       }
-      globalThis.fetch = function(url, options) {
+      // ---- the fetch API family (Headers/Blob/File/FormData/Request/Response) ----
+      // Agent CLIs call model APIs through fetch and read `response.headers.get(...)`,
+      // iterate headers, and stream `response.body.getReader()`. The old fetch returned a
+      // hand-rolled literal with a two-method headers stub and no body stream, so all of
+      // that failed. These are the real shapes, built on our ReadableStream.
+      globalThis.Headers = class Headers {
+        constructor(init) {
+          this._pairs = [];
+          if (init instanceof Headers) { this._pairs = init._pairs.map(p => [p[0], p[1]]); }
+          else if (Array.isArray(init)) { for (const [k, v] of init) this.append(k, v); }
+          else if (init && typeof init === 'object') { for (const k of Object.keys(init)) this.append(k, init[k]); }
+        }
+        append(name, value) { this._pairs.push([String(name).toLowerCase(), String(value)]); }
+        set(name, value) { this.delete(name); this.append(name, value); }
+        get(name) {
+          const key = String(name).toLowerCase();
+          const hits = this._pairs.filter(p => p[0] === key).map(p => p[1]);
+          return hits.length ? hits.join(', ') : null;
+        }
+        getSetCookie() { return this._pairs.filter(p => p[0] === 'set-cookie').map(p => p[1]); }
+        has(name) { const key = String(name).toLowerCase(); return this._pairs.some(p => p[0] === key); }
+        delete(name) { const key = String(name).toLowerCase(); this._pairs = this._pairs.filter(p => p[0] !== key); }
+        forEach(fn, thisArg) { for (const [k, v] of this.entries()) fn.call(thisArg, v, k, this); }
+        keys() { return this._names()[Symbol.iterator](); }
+        values() { return this._names().map(n => this.get(n))[Symbol.iterator](); }
+        entries() { return this._names().map(n => [n, this.get(n)])[Symbol.iterator](); }
+        [Symbol.iterator]() { return this.entries(); }
+        _names() { const seen = []; for (const [k] of this._pairs) if (!seen.includes(k)) seen.push(k); return seen.sort(); }
+      };
+      globalThis.Blob = class Blob {
+        constructor(parts, options) {
+          const chunks = [];
+          for (const part of parts || []) {
+            if (part instanceof Blob) chunks.push(part._bytes);
+            else if (Buffer.isBuffer(part)) chunks.push(part);
+            else if (part instanceof Uint8Array) chunks.push(Buffer.from(part));
+            else if (part instanceof ArrayBuffer) chunks.push(Buffer.from(new Uint8Array(part)));
+            else chunks.push(Buffer.from(String(part)));
+          }
+          this._bytes = Buffer.concat(chunks);
+          this.type = (options && options.type) || '';
+        }
+        get size() { return this._bytes.length; }
+        text() { return Promise.resolve(this._bytes.toString()); }
+        bytes() { return Promise.resolve(new Uint8Array(this._bytes)); }
+        arrayBuffer() {
+          const copy = Buffer.from(this._bytes);
+          return Promise.resolve(copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.length));
+        }
+        slice(start, end, type) { return new Blob([this._bytes.slice(start, end)], { type: type || this.type }); }
+        stream() {
+          const bytes = this._bytes;
+          return new ReadableStream({ start: function(controller) { if (bytes.length) controller.enqueue(bytes); controller.close(); } });
+        }
+      };
+      globalThis.File = class File extends Blob {
+        constructor(parts, name, options) {
+          super(parts, options);
+          this.name = String(name);
+          this.lastModified = (options && options.lastModified) || Date.now();
+        }
+      };
+      globalThis.FormData = class FormData {
+        constructor() { this._pairs = []; }
+        append(name, value, filename) { this._pairs.push([String(name), value, filename]); }
+        set(name, value, filename) { this.delete(name); this.append(name, value, filename); }
+        get(name) { const hit = this._pairs.find(p => p[0] === String(name)); return hit ? hit[1] : null; }
+        getAll(name) { return this._pairs.filter(p => p[0] === String(name)).map(p => p[1]); }
+        has(name) { return this._pairs.some(p => p[0] === String(name)); }
+        delete(name) { this._pairs = this._pairs.filter(p => p[0] !== String(name)); }
+        forEach(fn, thisArg) { for (const [k, v] of this._pairs) fn.call(thisArg, v, k, this); }
+        keys() { return this._pairs.map(p => p[0])[Symbol.iterator](); }
+        values() { return this._pairs.map(p => p[1])[Symbol.iterator](); }
+        entries() { return this._pairs.map(p => [p[0], p[1]])[Symbol.iterator](); }
+        [Symbol.iterator]() { return this.entries(); }
+      };
+      // A body mixin shared by Request and Response.
+      function defineBody(target, bytes) {
+        target._bytes = bytes;
+        target.bodyUsed = false;
+        Object.defineProperty(target, 'body', {
+          configurable: true,
+          get: function() {
+            // One-shot stream over the buffered bytes: the bridge returns a complete
+            // response, so there is no incremental HTTP streaming yet (a bridge feature,
+            // recorded in system.md) — but the READER contract is real.
+            return new ReadableStream({ start: function(controller) {
+              if (bytes.length) controller.enqueue(new Uint8Array(bytes));
+              controller.close();
+            } });
+          },
+        });
+        target.text = function() { target.bodyUsed = true; return Promise.resolve(bytes.toString()); };
+        target.json = function() { target.bodyUsed = true; return Promise.resolve(JSON.parse(bytes.toString())); };
+        target.bytes = function() { target.bodyUsed = true; return Promise.resolve(new Uint8Array(bytes)); };
+        target.arrayBuffer = function() {
+          target.bodyUsed = true;
+          const copy = Buffer.from(bytes);
+          return Promise.resolve(copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.length));
+        };
+        target.blob = function() { target.bodyUsed = true; return Promise.resolve(new Blob([bytes])); };
+      }
+      globalThis.Request = class Request {
+        constructor(input, options) {
+          options = options || {};
+          this.url = input instanceof Request ? input.url : String(input);
+          this.method = String(options.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+          this.headers = new Headers(options.headers || (input instanceof Request ? input.headers : undefined));
+          this.signal = options.signal || (input instanceof Request ? input.signal : undefined);
+          this.redirect = options.redirect || 'follow';
+          const body = options.body !== undefined ? options.body : (input instanceof Request ? input._bytes : undefined);
+          defineBody(this, body === undefined || body === null ? Buffer.alloc(0)
+                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))));
+        }
+        clone() { return new Request(this, {}); }
+      };
+      globalThis.Response = class Response {
+        constructor(body, options) {
+          options = options || {};
+          this.status = options.status === undefined ? 200 : options.status;
+          this.statusText = options.statusText === undefined ? '' : String(options.statusText);
+          this.headers = new Headers(options.headers);
+          this.url = options.url || '';
+          this.redirected = !!options.redirected;
+          this.type = options.type || 'default';
+          defineBody(this, body === undefined || body === null ? Buffer.alloc(0)
+                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))));
+        }
+        get ok() { return this.status >= 200 && this.status < 300; }
+        clone() {
+          return new Response(this._bytes, { status: this.status, statusText: this.statusText,
+                                             headers: this.headers, url: this.url });
+        }
+        static json(data, options) {
+          const response = new Response(JSON.stringify(data), options);
+          if (!response.headers.has('content-type')) response.headers.set('content-type', 'application/json');
+          return response;
+        }
+        static error() { return new Response(null, { status: 0, type: 'error' }); }
+        static redirect(url, status) { return new Response(null, { status: status || 302, headers: { location: String(url) } }); }
+      };
+      globalThis.navigator = globalThis.navigator || {
+        userAgent: 'Mouse/1.0 (iOS; JavaScriptCore)',
+        platform: 'iPhone',
+        hardwareConcurrency: 1,
+        language: 'en-US',
+      };
+      // Now that zlib codes incrementally, the web compression streams are real.
+      globalThis.CompressionStream = class CompressionStream {
+        constructor(format) {
+          const zlib = coreRequire('zlib');
+          const mode = format === 'deflate' ? 'deflate' : (format === 'deflate-raw' ? 'deflateRaw' : 'gzip');
+          const coder = new zlib[mode[0].toUpperCase() + mode.slice(1)]();
+          this.readable = coder;
+          this.writable = coder;
+        }
+      };
+      globalThis.DecompressionStream = class DecompressionStream {
+        constructor(format) {
+          const zlib = coreRequire('zlib');
+          const mode = format === 'deflate' ? 'inflate' : (format === 'deflate-raw' ? 'inflateRaw' : 'gunzip');
+          const coder = new zlib[mode[0].toUpperCase() + mode.slice(1)]();
+          this.readable = coder;
+          this.writable = coder;
+        }
+      };
+
+      globalThis.fetch = function(input, options) {
         options = options || {};
+        const request = input instanceof Request && !options.method && !options.body && !options.headers
+          ? input : new Request(input, options);
         const headers = {};
-        if (options.headers) {
-          for (const key of Object.keys(options.headers)) headers[key] = String(options.headers[key]);
+        request.headers.forEach(function(value, name) { headers[name] = value; });
+        const bodyBase64 = request._bytes.length ? request._bytes.toString('base64') : '';
+        const signal = request.signal;
+        if (signal && signal.aborted) {
+          return Promise.reject(signal.reason || Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
         }
-        let bodyBase64 = '';
-        if (options.body !== undefined && options.body !== null) {
-          bodyBase64 = (Buffer.isBuffer(options.body) ? options.body : Buffer.from(String(options.body))).toString('base64');
-        }
-        return rawRequest(url, options.method || 'GET', headers, bodyBase64).then(function(result) {
+        const inFlight = rawRequest(request.url, request.method, headers, bodyBase64).then(function(result) {
           const bodyBuffer = Buffer.from(result.body || '', 'base64');
-          return {
-            ok: result.status >= 200 && result.status < 300,
+          return new Response(bodyBuffer, {
             status: result.status,
             statusText: String(result.status),
-            url: String(url),
-            headers: { get: function(name) { return result.headers[String(name).toLowerCase()] || null; },
-                       has: function(name) { return String(name).toLowerCase() in result.headers; } },
-            text: function() { return Promise.resolve(bodyBuffer.toString()); },
-            json: function() { return Promise.resolve(JSON.parse(bodyBuffer.toString())); },
-            arrayBuffer: function() { return Promise.resolve(bodyBuffer.buffer.slice(bodyBuffer.byteOffset, bodyBuffer.byteOffset + bodyBuffer.length)); },
-          };
+            headers: result.headers,
+            url: request.url,
+          });
+        });
+        if (!signal) return inFlight;
+        // An abort mid-flight rejects the caller; the request itself still completes in the
+        // bridge (no cancellation primitive there yet — recorded, not pretended).
+        return new Promise(function(resolve, reject) {
+          signal.addEventListener('abort', function() {
+            reject(signal.reason || Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+          });
+          inFlight.then(resolve, reject);
         });
       };
       function makeHttpModule(defaultProtocol) {

@@ -645,6 +645,35 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   and an eager `readline.promises` recursed forever (readline → promises →
   readline) — it is a lazy getter now. 63 node fixtures, PHASE F, TTY, e2e,
   package batches, Swift 6 build — green
+- **THE FETCH API FAMILY — the surface agent CLIs actually call model APIs
+  with.** The audit method applied to GLOBALS found 12 missing, and the
+  important five were the fetch family. `fetch` had been returning a
+  hand-rolled literal whose `headers` had exactly `get`/`has` and which had
+  no body stream at all — so `response.headers.entries()`, iteration,
+  `response instanceof Response`, `new Headers(...)` on a request, and
+  above all `response.body.getReader()` (how streaming model responses are
+  read) all failed. Now real: **`Headers`** (case-insensitive multimap with
+  append/get/set/has/delete/forEach/keys/values/entries/iterator and
+  `getSetCookie`), **`Blob`**/**`File`** (size/type/text/bytes/arrayBuffer/
+  slice/stream), **`FormData`**, **`Request`**, **`Response`** (status/ok/
+  statusText/headers/url/redirected/type/bodyUsed, text/json/bytes/
+  arrayBuffer/blob/clone, the static `json`/`error`/`redirect` helpers) and
+  a shared body mixin that exposes **`body` as a real ReadableStream**.
+  `fetch` now takes a `Request` or URL plus `Headers`, returns a genuine
+  `Response`, and honors `AbortSignal` (pre-aborted rejects immediately;
+  aborting mid-flight rejects the caller). Also added: `navigator`, and
+  **`CompressionStream`/`DecompressionStream`** — real, because zlib now
+  streams. Honest gaps left UNDEFINED on purpose so feature detection works
+  rather than mis-fires: `WebSocket`, `BroadcastChannel`, `MessagePort`.
+  Recorded limits: the bridge returns a complete response, so `body` is a
+  one-shot stream (incremental HTTP streaming is a bridge feature, not
+  faked), and abort rejects the caller without cancelling the underlying
+  request. The old hand-rolled fetch was DELETED, not left beside the new
+  one. Fixture `fetch-api-family` pins all of it — headers multimap and
+  iteration, Blob/File/FormData, Request/Response, clone, the static
+  helpers, and reading the body through `getReader()` — byte-identical to
+  real node, and the live-HTTP `fetch-http` fixture still matches. 64 node
+  fixtures, full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
