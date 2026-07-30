@@ -1205,8 +1205,12 @@ final class NodeEngine: @unchecked Sendable {
           for (const buffer of list) { result.set(buffer.subarray(0, Math.min(buffer.length, length - offset)), offset); offset += buffer.length; }
           return result;
         }
-        toString(encoding) {
-          const bytes = Array.from(this);
+        // toString(encoding, start, end) — the RANGE form matters: tar's header parser reads
+        // fixed-width fields out of a block with it.
+        toString(encoding, start, end) {
+          const from = start === undefined ? 0 : Math.max(0, start | 0);
+          const to = end === undefined ? this.length : Math.min(this.length, end | 0);
+          const bytes = Array.prototype.slice.call(this, from, to);
           if (encoding === 'base64') return b64Encode(bytes);
           if (encoding === 'hex') return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
           if (encoding === 'latin1' || encoding === 'binary') {
@@ -1216,6 +1220,71 @@ final class NodeEngine: @unchecked Sendable {
           }
           return utf8Decode(bytes);
         }
+        /// write(string, offset, length, encoding) — the argument shuffle node allows.
+        write(string, offset, length, encoding) {
+          if (typeof offset === 'string') { encoding = offset; offset = 0; length = undefined; }
+          else if (typeof length === 'string') { encoding = length; length = undefined; }
+          offset = offset === undefined ? 0 : offset | 0;
+          const source = Buffer.from(String(string), encoding || 'utf8');
+          const count = Math.min(length === undefined ? source.length : length | 0,
+                                 source.length, this.length - offset);
+          for (let i = 0; i < count; i++) this[offset + i] = source[i];
+          return count;
+        }
+        copy(target, targetStart, sourceStart, sourceEnd) {
+          targetStart = targetStart === undefined ? 0 : targetStart | 0;
+          sourceStart = sourceStart === undefined ? 0 : sourceStart | 0;
+          sourceEnd = sourceEnd === undefined ? this.length : Math.min(this.length, sourceEnd | 0);
+          const count = Math.min(sourceEnd - sourceStart, target.length - targetStart);
+          for (let i = 0; i < count; i++) target[targetStart + i] = this[sourceStart + i];
+          return Math.max(0, count);
+        }
+        _view() { return new DataView(this.buffer, this.byteOffset, this.byteLength); }
+        readUInt8(o) { return this[o | 0]; }
+        writeUInt8(v, o) { this[o | 0] = v & 0xff; return (o | 0) + 1; }
+        readInt8(o) { return this._view().getInt8(o | 0); }
+        writeInt8(v, o) { this._view().setInt8(o | 0, v); return (o | 0) + 1; }
+        readUInt16BE(o) { return this._view().getUint16(o | 0, false); }
+        readUInt16LE(o) { return this._view().getUint16(o | 0, true); }
+        writeUInt16BE(v, o) { this._view().setUint16(o | 0, v, false); return (o | 0) + 2; }
+        writeUInt16LE(v, o) { this._view().setUint16(o | 0, v, true); return (o | 0) + 2; }
+        readInt16BE(o) { return this._view().getInt16(o | 0, false); }
+        readInt16LE(o) { return this._view().getInt16(o | 0, true); }
+        readUInt32BE(o) { return this._view().getUint32(o | 0, false); }
+        readUInt32LE(o) { return this._view().getUint32(o | 0, true); }
+        writeUInt32BE(v, o) { this._view().setUint32(o | 0, v, false); return (o | 0) + 4; }
+        writeUInt32LE(v, o) { this._view().setUint32(o | 0, v, true); return (o | 0) + 4; }
+        readInt32BE(o) { return this._view().getInt32(o | 0, false); }
+        readInt32LE(o) { return this._view().getInt32(o | 0, true); }
+        writeInt32BE(v, o) { this._view().setInt32(o | 0, v, false); return (o | 0) + 4; }
+        writeInt32LE(v, o) { this._view().setInt32(o | 0, v, true); return (o | 0) + 4; }
+        readBigUInt64BE(o) { return this._view().getBigUint64(o | 0, false); }
+        readBigUInt64LE(o) { return this._view().getBigUint64(o | 0, true); }
+        writeBigUInt64BE(v, o) { this._view().setBigUint64(o | 0, BigInt(v), false); return (o | 0) + 8; }
+        writeBigUInt64LE(v, o) { this._view().setBigUint64(o | 0, BigInt(v), true); return (o | 0) + 8; }
+        readDoubleBE(o) { return this._view().getFloat64(o | 0, false); }
+        readDoubleLE(o) { return this._view().getFloat64(o | 0, true); }
+        writeDoubleBE(v, o) { this._view().setFloat64(o | 0, v, false); return (o | 0) + 8; }
+        writeDoubleLE(v, o) { this._view().setFloat64(o | 0, v, true); return (o | 0) + 8; }
+        readFloatBE(o) { return this._view().getFloat32(o | 0, false); }
+        readFloatLE(o) { return this._view().getFloat32(o | 0, true); }
+        compare(other) {
+          const length = Math.min(this.length, other.length);
+          for (let i = 0; i < length; i++) { if (this[i] !== other[i]) return this[i] < other[i] ? -1 : 1; }
+          return this.length === other.length ? 0 : (this.length < other.length ? -1 : 1);
+        }
+        indexOf(value, byteOffset, encoding) {
+          const needle = typeof value === 'number' ? Buffer.from([value & 0xff])
+            : (Buffer.isBuffer(value) ? value : Buffer.from(String(value), encoding || 'utf8'));
+          const start = byteOffset === undefined ? 0 : Math.max(0, byteOffset | 0);
+          if (needle.length === 0) return start;
+          outer: for (let i = start; i <= this.length - needle.length; i++) {
+            for (let j = 0; j < needle.length; j++) { if (this[i + j] !== needle[j]) continue outer; }
+            return i;
+          }
+          return -1;
+        }
+        includes(value, byteOffset, encoding) { return this.indexOf(value, byteOffset, encoding) !== -1; }
         slice(start, end) { return new Buffer(super.slice(start, end)); }
         equals(other) { return this.length === other.length && this.every((b, i) => b === other[i]); }
         toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
@@ -2439,10 +2508,14 @@ final class NodeEngine: @unchecked Sendable {
           const encoding = toEncoding(options);
           const stream = new Readable({ encoding: encoding });
           stream.path = file;
+          stream.fd = null;
+          stream.bytesRead = 0;
+          stream.close = function(callback) { stream.destroy(); if (callback) callback(); return stream; };
           setImmediate(() => {
             let content;
             try { content = fs.readFileSync(file); }
             catch (error) { stream.emit('error', error); return; }
+            stream.fd = 3;
             stream.emit('open', 3);
             stream.emit('ready');
             const CHUNK = 65536;
@@ -2471,8 +2544,22 @@ final class NodeEngine: @unchecked Sendable {
             },
           });
           stream.path = file;
+          // fs streams carry a handle surface (fd/close/bytesWritten) — tar's writers call
+          // stream.close() and read .fd; a plain Writable would be missing them.
+          stream.fd = null;
+          stream.bytesWritten = 0;
+          stream.close = function(callback) {
+            stream.end(function(){ if (callback) callback(); });
+            return stream;
+          };
+          const baseWrite = stream.write.bind(stream);
+          stream.write = function(chunk, encoding, callback) {
+            stream.bytesWritten += (chunk && chunk.length) ? chunk.length : 0;
+            return baseWrite(chunk, encoding, callback);
+          };
           setImmediate(() => {
             if (!opened && !append) { try { fs.writeFileSync(file, ''); opened = true; } catch (e) { stream.emit('error', e); return; } }
+            stream.fd = 3;
             stream.emit('open', 3);
             stream.emit('ready');
           });
@@ -3522,10 +3609,12 @@ final class NodeEngine: @unchecked Sendable {
             });
           };
           // Stream forms buffer to the flush — honest one-shot coding behind the stream API.
-          const createName = 'create' + mode[0].toUpperCase() + mode.slice(1);
-          zlib[createName] = function() {
+          const className = mode[0].toUpperCase() + mode.slice(1);
+          // The CLASS form too: minizlib (under tar) does `new zlib.Gzip(opts)` and throws
+          // "Compression method not supported" when the constructor is missing.
+          const Coder = function(options) {
             const chunks = [];
-            return new Transform({
+            const stream = new Transform({
               transform(chunk, encoding, callback) {
                 chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
                 callback();
@@ -3534,8 +3623,24 @@ final class NodeEngine: @unchecked Sendable {
                 try { callback(null, run(mode, Buffer.concat(chunks))); } catch (error) { callback(error); }
               },
             });
+            stream._opts = options || {};
+            // Coder streams answer flush() and params() calls; ours codes once at end.
+            stream.flush = function(kind, cb) { const done = typeof kind === 'function' ? kind : cb; if (done) done(); };
+            stream.params = function(level, strategy, cb) { if (cb) cb(); };
+            stream.close = function(cb) { if (cb) cb(); };
+            stream.reset = function() {};
+            return stream;
           };
+          zlib[className] = Coder;
+          zlib['create' + className] = function(options) { return new Coder(options); };
         }
+        // Flush constants and level names coder streams pass around.
+        Object.assign(zlib.constants, {
+          Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4,
+          Z_BLOCK: 5, Z_TREES: 6, Z_OK: 0, Z_STREAM_END: 1, Z_DEFAULT_STRATEGY: 0,
+          Z_DEFAULT_WINDOWBITS: 15, Z_DEFAULT_MEMLEVEL: 8, Z_DEFAULT_CHUNK: 16384,
+        });
+        Object.assign(zlib, zlib.constants);   // node mirrors the constants on the module
         return zlib;
       };
 

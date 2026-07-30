@@ -464,6 +464,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   HTTPS, and render ink UIs (the config-recovery dialog, verified
   byte-identical against pyte). Re-testing after a credential exists is a
   one-command follow-up, recorded here so it is not re-derived
+- **Batch 6 (stream/binary depth): ajv, boxen, cli-progress pass; Buffer
+  and zlib gain their real surface.** ajv compiles JSON-schema validators
+  via `new Function` codegen; boxen draws box borders; **cli-progress
+  renders a live progress bar** through the `cursorTo`/`clearLine` helpers
+  added in batch 1 — a direct payoff. tar pushed deeper and exposed two
+  real fidelity gaps: (1) **Buffer's binary surface** — `write(string,
+  offset, length, encoding)`, range-form `toString(enc, start, end)`
+  (tar's header codec reads fixed-width fields that way), `copy`,
+  `indexOf`/`includes`/`compare`, and the whole read/write UInt8/16/32,
+  Int, BigUInt64, Float/Double BE+LE family via DataView; (2) **zlib's
+  CLASS forms** — minizlib does `new zlib.Gzip(opts)` and throws
+  "Compression method not supported" without them, so Gzip/Gunzip/Deflate/
+  Inflate/DeflateRaw/InflateRaw/Unzip are now Transform-backed
+  constructors with `flush`/`params`/`close`/`reset`, plus the flush
+  constants mirrored on the module as node does. fs streams also gained
+  their handle surface (`fd`, `close(cb)`, `bytesWritten`/`bytesRead`).
+  Fixtures `buffer-binary-methods` and `zlib-classes` pin both against
+  real node. tar itself still fails deeper in its own handle bookkeeping
+  (`r.close` on an internal object, inside its WriteEntry path) — recorded
+  as the next symptom rather than guessed at. 52 node fixtures, full
+  battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
