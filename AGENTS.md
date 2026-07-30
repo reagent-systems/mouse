@@ -470,6 +470,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Prove a new gate FAILS before trusting that it passes.** Break the thing it
+  watches — revert the fix, force the constant, corrupt the input — and check the
+  gate goes red for the right reason, then restore. A gate that cannot fail is
+  worse than none, because it reads as evidence. This session shipped two that
+  could not: a cross-engine DH check comparing secret LENGTHS rather than
+  secrets, and a jest gate that set `cache: false` and so avoided the very path
+  that was broken. Both looked green and meant nothing.
 - **A harness must build the SHIPPING source, never a copy.** The terminal
   harnesses built `TerminalScreen.swift` and `TerminalPrograms.swift` from copies
   sitting in the scratchpad, so no change to the real terminal had ever been
