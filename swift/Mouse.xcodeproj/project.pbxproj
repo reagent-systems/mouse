@@ -15,6 +15,7 @@
 		26A30C412C7EDEC903FAB619 /* NodeDNS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 933C6240D3EEE403A1818213 /* NodeDNS.swift */; };
 		2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */; };
 		2E7F41B7E5FCEFF2ECC7AA09 /* NodeBrotli.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA007916E1B80807354B7C21 /* NodeBrotli.swift */; };
+		2F0EE6F9105610221954933F /* TerminalWidth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */; };
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
 		3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B23A8EB8050D0EFED1198A4 /* Workspace.swift */; };
 		3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */; };
@@ -67,6 +68,7 @@
 		AA049B76029F618EF94C1571 /* NodeKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeKeys.swift; sourceTree = "<group>"; };
 		B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtStyle.swift; sourceTree = "<group>"; };
 		B7281C456E2B06017F80854A /* GitHubAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAuth.swift; sourceTree = "<group>"; };
+		B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWidth.swift; sourceTree = "<group>"; };
 		BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		C5808E2C3F3EE351EB16E5DD /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
 		C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeEngine.swift; sourceTree = "<group>"; };
@@ -112,6 +114,7 @@
 				2D1234209A0254A06BB8E915 /* Terminal.swift */,
 				9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */,
 				525AB48D09A783EF07137189 /* TerminalScreen.swift */,
+				B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */,
 				5B23A8EB8050D0EFED1198A4 /* Workspace.swift */,
 				BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
@@ -239,6 +242,7 @@
 				A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */,
 				0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */,
 				5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */,
+				2F0EE6F9105610221954933F /* TerminalWidth.swift in Sources */,
 				3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */,
 				DD34307A47D2C84BD6C63C19 /* WorkspaceViews.swift in Sources */,
 			);

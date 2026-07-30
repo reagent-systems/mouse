@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Fixed
+- Terminal: wide characters occupy two columns. CJK, Kana, Hangul, fullwidth forms and emoji
+  were given one cell each, so every TUI drawing aligned or boxed output with non-Latin text
+  came out progressively crooked. A wide character now reserves a continuation cell, wraps whole
+  at the right edge instead of splitting, and clears its partner when either half is overwritten;
+  a lone combining mark attaches to the character already on screen rather than taking a column.
 - Node layer: `structuredClone`, worker `postMessage` (both directions), `workerData`,
   `setEnvironmentData` and the engine-to-engine IPC wire all use the real structured clone.
   Each was a JSON round-trip, so a `Map` posted to a worker arrived as `{}` — silently. node

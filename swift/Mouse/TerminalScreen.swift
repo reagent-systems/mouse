@@ -46,6 +46,10 @@ struct CellStyle: Equatable, Sendable {
 struct TerminalCell: Equatable, Sendable {
     var character: Character = " "
     var style: CellStyle = .plain
+    /// The right-hand column of a two-column character. It carries no glyph of its own — the
+    /// wide character to its left is drawn across both — but it must occupy the cell so the
+    /// grid's arithmetic stays honest.
+    var isContinuation: Bool = false
 
     static let blank = TerminalCell()
 }
@@ -209,13 +213,55 @@ final class TerminalScreen {
 
     /// Print one character at the cursor, wrapping at the right edge.
     func put(_ character: Character) {
+        let width = TerminalWidth.columns(of: character)
+        // A zero-width character belongs to the grapheme already on the screen. Swift usually
+        // merges it before it reaches here; when it arrives alone, attach it rather than letting
+        // it consume a column.
+        if width == 0 {
+            let target = cursorColumn > 0 ? cursorColumn - 1 : 0
+            if target < columns, !grid[cursorRow][target].isContinuation {
+                // A Character is a whole grapheme cluster, so the mark is merged by rebuilding
+                // the cluster from its text rather than mutated in place.
+                let merged = String(grid[cursorRow][target].character) + String(character)
+                if let combined = merged.first, merged.count == 1 {
+                    grid[cursorRow][target].character = combined
+                    isDirty = true
+                }
+            }
+            return
+        }
         if cursorColumn >= columns {
             cursorColumn = 0
             lineFeed()
         }
+        // A two-column character cannot straddle the right edge: it wraps whole, as a real
+        // terminal does, rather than being split across two lines.
+        if width == 2, cursorColumn == columns - 1 {
+            grid[cursorRow][cursorColumn] = TerminalCell(character: " ", style: style)
+            cursorColumn = 0
+            lineFeed()
+        }
+        clearWidePartner(row: cursorRow, column: cursorColumn)
         grid[cursorRow][cursorColumn] = TerminalCell(character: character, style: style)
-        cursorColumn += 1
+        if width == 2, cursorColumn + 1 < columns {
+            clearWidePartner(row: cursorRow, column: cursorColumn + 1)
+            grid[cursorRow][cursorColumn + 1] = TerminalCell(character: " ", style: style,
+                                                             isContinuation: true)
+        }
+        cursorColumn += width
         isDirty = true
+    }
+
+    /// Overwriting either half of a two-column character destroys the whole thing, so the other
+    /// half has to go blank. Without this a grid accumulates orphans: a continuation cell with
+    /// nothing to its left, or a wide glyph whose partner now holds someone else's letter.
+    private func clearWidePartner(row: Int, column: Int) {
+        guard row < grid.count, column < columns else { return }
+        if grid[row][column].isContinuation {
+            if column > 0 { grid[row][column - 1] = TerminalCell(style: grid[row][column - 1].style) }
+        } else if column + 1 < columns, grid[row][column + 1].isContinuation {
+            grid[row][column + 1] = TerminalCell(style: grid[row][column + 1].style)
+        }
     }
 
     /// Down one row, scrolling the region when already at its bottom.

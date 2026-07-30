@@ -470,6 +470,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A harness must build the SHIPPING source, never a copy.** The terminal
+  harnesses built `TerminalScreen.swift` and `TerminalPrograms.swift` from copies
+  sitting in the scratchpad, so no change to the real terminal had ever been
+  gated — the suite was green about code that does not ship. Source sets point at
+  `swift/Mouse/`, and `build-one.sh` picks a set from what a harness REFERENCES
+  rather than from its name: name-keyed dispatch means every new harness is
+  silently miscompiled until someone remembers to edit the case list.
 - **A defect has a SHAPE; sweep every site with that shape, not every site with
   that NAME.** `JSON.stringify` standing in for a structural operation was fixed in
   `assert.deepStrictEqual`, then found again in `util.isDeepStrictEqual`, then AGAIN

@@ -362,7 +362,8 @@ private struct TerminalScreenGrid: View {
             var style = cells[index].style
             if showCursor && index == min(screen.cursorColumn, cells.count - 1) {
                 style.inverse.toggle()
-                var cell = AttributedString(String(cells[index].character))
+                var cell = AttributedString(cells[index].isContinuation ? ""
+                                            : String(cells[index].character))
                 apply(style, to: &cell)
                 result += cell
                 index += 1
@@ -373,7 +374,9 @@ private struct TerminalScreenGrid: View {
             let runStart = index
             while index < cells.count, cells[index].style == style,
                   !(showCursor && index == min(screen.cursorColumn, cells.count - 1)) {
-                text.append(cells[index].character)
+                // A continuation cell has no glyph: the wide character to its left is drawn
+                // across both columns, so appending its placeholder would double the spacing.
+                if !cells[index].isContinuation { text.append(cells[index].character) }
                 index += 1
             }
             if index == runStart { index += 1; continue }
