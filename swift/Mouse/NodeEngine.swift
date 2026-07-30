@@ -6851,8 +6851,18 @@ final class NodeEngine: @unchecked Sendable {
             HTTP2_HEADER_CONTENT_LENGTH: 'content-length',
             NGHTTP2_CANCEL: 8, NGHTTP2_NO_ERROR: 0,
           },
-          connect: function() { throw new Error('http2 sessions are not available (fetch/https cover HTTP on this device)'); },
-          createServer: function() { throw new Error('http2 servers are not available (the dev-server engine is on the roadmap)'); },
+          // Both of these used to blame missing HTTP support. HTTP/1.1 is real in both
+          // directions now, so the truth is narrower and specific to HTTP/2: it is a different
+          // protocol — binary framing, HPACK header compression, stream multiplexing — and that
+          // is an implementation, not a shim over what we have.
+          connect: function() {
+            throw Object.assign(new Error('http2.connect is not available: HTTP/2 is a different protocol (binary framing, HPACK, multiplexed streams), not a mode of HTTP/1.1 — which is real here in both directions'),
+                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          },
+          createServer: function() {
+            throw Object.assign(new Error('http2.createServer is not available: HTTP/2 needs binary framing and HPACK of its own; http.createServer is real, and h2 also requires ALPN over TLS we cannot negotiate on a raw socket'),
+                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          },
         };
       };
       // The feature-detect tail: bundled CLIs import these and gate real use behind checks.
@@ -7157,10 +7167,28 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.inspector = function() {
-        return { url: function() { return undefined; }, open: function() { throw new Error('inspector is not available'); }, Session: class Session { connect() { throw new Error('inspector is not available'); } } };
+        // A refusal with no reason is not honest, it is just terse.
+        const inspectorReason = 'inspector is not available: it speaks the V8 Inspector Protocol, and this engine is JavaScriptCore — JSC has its own debugger interface, not that one';
+        return {
+          url: function() { return undefined; },
+          open: function() { throw Object.assign(new Error(inspectorReason), { code: 'ERR_METHOD_NOT_IMPLEMENTED' }); },
+          close: function() {},
+          waitForDebugger: function() { throw Object.assign(new Error(inspectorReason), { code: 'ERR_METHOD_NOT_IMPLEMENTED' }); },
+          Session: class Session { connect() { throw Object.assign(new Error(inspectorReason), { code: 'ERR_METHOD_NOT_IMPLEMENTED' }); } },
+          console: {},
+        };
       };
       coreFactories.dgram = function() {
-        return { createSocket: function() { throw new Error('UDP sockets are not available yet'); } };
+        // "not available yet" said nothing useful. UDP is genuinely reachable — the socket
+        // layer is POSIX, and SOCK_DGRAM is a flag away — but it is a datagram API of its own
+        // (bind, send-to, receive-from, multicast joins), not a mode of the stream table.
+        return {
+          createSocket: function() {
+            throw Object.assign(new Error('dgram.createSocket is not available: the socket layer is stream-only (SOCK_STREAM). UDP needs a datagram table of its own — bind, send-to, receive-from, multicast — which is reachable here, just not built'),
+                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          },
+          Socket: function(){ throw new Error('dgram.Socket is not available: see dgram.createSocket'); },
+        };
       };
       coreFactories.diagnostics_channel = function() {
         const channels = {};
@@ -7203,7 +7231,19 @@ final class NodeEngine: @unchecked Sendable {
         return { create: function() { return new Domain(); }, Domain: Domain };
       };
       coreFactories.cluster = function() {
-        return { isPrimary: true, isMaster: true, isWorker: false, fork: function() { throw new Error('cluster is not available (single process)'); }, workers: {} };
+        // "single process" stopped being true when live node children landed. What cluster
+        // actually needs beyond them is HANDLE SHARING: a primary that accepts on one listening
+        // socket and passes the connection to a worker over IPC. Our channel carries JSON, not
+        // descriptors — so this names that, and points at what does work.
+        return {
+          isPrimary: true, isMaster: true, isWorker: false, workers: {},
+          fork: function() {
+            throw Object.assign(new Error('cluster.fork is not available: cluster shares a listening socket by passing DESCRIPTORS over IPC, and this channel carries JSON. child_process.fork gives real worker processes with a message channel; give each one its own port, or accept on one and forward'),
+                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          },
+          setupPrimary: function(){}, setupMaster: function(){},
+          settings: {}, schedulingPolicy: 2,
+        };
       };
       // tls: like net — imported for types/feature checks; URLSession owns real TLS here.
       coreFactories.tls = function() {
@@ -8168,10 +8208,10 @@ final class NodeEngine: @unchecked Sendable {
           const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
           let host = 'localhost', port = 0;
           if (args[0] && typeof args[0] === 'object') {
-            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available'), { code: 'ERR_INVALID_ARG_VALUE' });
+            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available: the socket table binds and connects TCP (AF_INET/AF_INET6). AF_UNIX is reachable on this platform, just not built — a TCP port on 127.0.0.1 is the working substitute'), { code: 'ERR_INVALID_ARG_VALUE' });
             port = args[0].port; host = args[0].host || 'localhost';
           } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
-            throw Object.assign(new Error('unix domain sockets are not available'), { code: 'ERR_INVALID_ARG_VALUE' });
+            throw Object.assign(new Error('unix domain sockets are not available: the socket table binds and connects TCP (AF_INET/AF_INET6). AF_UNIX is reachable on this platform, just not built — a TCP port on 127.0.0.1 is the working substitute'), { code: 'ERR_INVALID_ARG_VALUE' });
           } else {
             port = Number(args[0]);
             if (typeof args[1] === 'string') host = args[1];
@@ -8263,7 +8303,7 @@ final class NodeEngine: @unchecked Sendable {
           const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
           let port = 0, host = '0.0.0.0', backlog = 511;
           if (args[0] && typeof args[0] === 'object') {
-            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available'), { code: 'ERR_INVALID_ARG_VALUE' });
+            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available: the socket table binds and connects TCP (AF_INET/AF_INET6). AF_UNIX is reachable on this platform, just not built — a TCP port on 127.0.0.1 is the working substitute'), { code: 'ERR_INVALID_ARG_VALUE' });
             port = args[0].port || 0;
             host = args[0].host || '0.0.0.0';
             backlog = args[0].backlog || backlog;

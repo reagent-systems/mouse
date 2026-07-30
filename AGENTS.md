@@ -176,6 +176,13 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**A refusal must NAME A REASON and stay true; audit them when capabilities grow.**
+A fixture pins the shape — every refusal has a reason, and none matches a stale
+pattern ("single process", "on the roadmap", "not available yet", a bare "X is not
+available"). Refusals rot silently as the engine gains abilities: `cluster` claimed
+"single process" after live children landed, and http2 blamed missing HTTP support
+after HTTP/1.1 was real in both directions. When you add a capability, grep the
+refusals for what it makes false.
 **A refusal must be TRUE, and re-checked when the surrounding capabilities grow.**
 `createECDH` refused for weeks claiming it needed SecKey; CryptoKit had done ECDH
 all along, and node's uncompressed-point encoding IS `x963Representation`, so

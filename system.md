@@ -108,6 +108,7 @@ so a TUI navigates and edits.
 | **Phase G — `fork` has a real channel** | `process.send`/`child.send` with `message` events both ways, an open channel that holds the child's loop open (as node's does), `disconnect` that gives the handle back, and `process.send` left UNDEFINED without a channel — which is how every worker library asks whether it was forked. Plus `node -e` in a child. Verified against real node on a two-way job exchange, including that a plain `spawn` correctly has NO channel |
 | **Phase G — `worker_threads`** | `Worker`, `workerData`, `parentPort`, `postMessage` both ways, `terminate`, worker stdio, and an in-thread `MessageChannel` — on the child-engine machinery, matching node's transcript exactly. What cannot work is SHARED MEMORY between two JSContexts, so `receiveMessageOnPort`, the environment-data pair and `BroadcastChannel` refuse BY NAME rather than deadlocking an Atomics wait that never wakes |
 | **Phase G — real ECDH** | `createECDH` for P-256/384/521 and X25519 on CryptoKit's key agreement. It had been refusing with "needs SecKey", which was simply wrong — and node's public-key encoding (the uncompressed point `0x04‖X‖Y`) IS CryptoKit's `x963Representation`, so the wire format needed no conversion at all. Verified the only way a key agreement can be: **both engines derive the same shared secret** from each other's public keys, on every curve |
+| **Phase G — audit the refusals for truth** | Every "not available" message in the engine re-read against what the engine can now do. One had gone stale into a FALSEHOOD (`cluster`: "single process" — we have live children), two blamed capabilities that have since shipped (http2 blamed missing HTTP support and "the dev-server engine is on the roadmap"), and five gave no reason at all. All corrected, and a fixture now asserts the SHAPE: every refusal names a reason, and none claims something the engine can do |
 
 ### Verification performed
 
@@ -1045,6 +1046,29 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
+- **Auditing the refusals, since one had just proved wrong.** If a refusal can rot,
+  they all can — so every "not available" in the engine got re-read against today's
+  capabilities. Findings:
+  - **`cluster.fork` claimed "single process".** False since live children landed.
+    What cluster actually needs beyond them is HANDLE SHARING — a primary that
+    accepts on one listening socket and passes the descriptor to a worker over IPC,
+    where our channel carries JSON. It says that now, and points at
+    `child_process.fork`, which is real.
+  - **http2's two refusals blamed things that shipped**: "fetch/https cover HTTP on
+    this device" and "the dev-server engine is on the roadmap". HTTP/1.1 is real in
+    both directions now, so the truth is narrower and specific: HTTP/2 is a
+    different protocol — binary framing, HPACK, multiplexed streams — plus ALPN over
+    TLS we cannot negotiate on a raw socket.
+  - **`dgram` said "not available yet"**, which promised nothing. UDP is genuinely
+    reachable (the socket layer is POSIX; `SOCK_DGRAM` is a flag away) but needs a
+    datagram table of its own. Now stated that way, including that it is reachable.
+  - **`inspector` and unix domain sockets gave no reason at all.** A refusal with no
+    reason is not honest, just terse. The inspector speaks the V8 Inspector
+    Protocol and this engine is JavaScriptCore; AF_UNIX is reachable but unbuilt,
+    and a TCP port on loopback is the working substitute.
+  A fixture now pins the SHAPE rather than the prose: every refusal must name a
+  reason, and none may match the stale patterns ("single process", "on the
+  roadmap", "not available yet", a bare "X is not available").
 - **ECDH was never blocked; the refusal was wrong.** `createECDH` had been throwing
   "ECDH needs SecKey key exchange plumbing" — but CryptoKit does ECDH over
   P-256/384/521 and X25519, and node's public-key encoding is the uncompressed
