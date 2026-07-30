@@ -59,6 +59,11 @@ final class NodeEngine: @unchecked Sendable {
     private var err = ""
     private var exitCode: Int32? = nil
     private var moduleCache: [String: JSValue] = [:]
+    /// Modules mid-evaluation, keyed to their MODULE object (not exports): a circular
+    /// require must read `module.exports` LIVE — semver's range/comparator cycle assigns
+    /// `module.exports = Class` before requiring its partner, and the partner must see the
+    /// class, not a stale snapshot of the original empty object.
+    private var modulesInProgress: [String: JSValue] = [:]
     private var packageTypeCache: [String: String] = [:]
 
     private struct Timer {
@@ -801,6 +806,9 @@ final class NodeEngine: @unchecked Sendable {
             return value
 
         case .file(let id):
+            // A circular require during evaluation reads exports LIVE off the module object —
+            // `module.exports = Class` before the cycle closes must be visible to the partner.
+            if let inProgress = modulesInProgress[id] { return inProgress.forProperty("exports")! }
             if let cached = moduleCache[id] { return cached }
             guard let data = try? Data(contentsOf: realURL(id)),
                   var source = String(data: data, encoding: .utf8) else {
@@ -817,7 +825,8 @@ final class NodeEngine: @unchecked Sendable {
                 return throwInJS("Cannot parse '\(id)'")
             }
             let module = context.evaluateScript("({exports: {}})")!
-            moduleCache[id] = module.forProperty("exports")
+            modulesInProgress[id] = module
+            defer { modulesInProgress.removeValue(forKey: id) }
             let require = makeRequire(fromDir: virtualDirname(id))
             if esm {
                 // Three sync-inspectable outcomes: done (body never suspended — exports are
@@ -2103,6 +2112,31 @@ final class NodeEngine: @unchecked Sendable {
               fn.apply(this, args).then(value => callback(null, value), error => callback(error));
             };
           },
+          styleText: function(format, text) {
+            // Node semantics: unstyled unless the stream is a TTY (or FORCE_COLOR says so).
+            const env = process.env;
+            const colorize = env.FORCE_COLOR !== undefined ? env.FORCE_COLOR !== '0'
+              : (!env.NO_COLOR && process.stdout && process.stdout.isTTY);
+            if (!colorize) return String(text);
+            const codes = {
+              reset: [0, 0], bold: [1, 22], dim: [2, 22], italic: [3, 23], underline: [4, 24],
+              blink: [5, 25], inverse: [7, 27], hidden: [8, 28], strikethrough: [9, 29],
+              black: [30, 39], red: [31, 39], green: [32, 39], yellow: [33, 39], blue: [34, 39],
+              magenta: [35, 39], cyan: [36, 39], white: [37, 39], gray: [90, 39], grey: [90, 39],
+              redBright: [91, 39], greenBright: [92, 39], yellowBright: [93, 39], blueBright: [94, 39],
+              magentaBright: [95, 39], cyanBright: [96, 39], whiteBright: [97, 39],
+              bgBlack: [40, 49], bgRed: [41, 49], bgGreen: [42, 49], bgYellow: [43, 49],
+              bgBlue: [44, 49], bgMagenta: [45, 49], bgCyan: [46, 49], bgWhite: [47, 49],
+            };
+            let out = String(text);
+            const formats = Array.isArray(format) ? format : [format];
+            for (const name of formats) {
+              const pair = codes[name];
+              if (!pair) throw new Error('Unknown format: ' + name);
+              out = '\u001b[' + pair[0] + 'm' + out + '\u001b[' + pair[1] + 'm';
+            }
+            return out;
+          },
           stripVTControlCharacters: function(text) {
             return String(text).replace(/\u001b\[[0-9;?]*[0-9A-Za-z]|\u001b\][^\u0007]*(\u0007|\u001b\\)|\u001b[^[\]]/g, '');
           },
@@ -2433,7 +2467,24 @@ final class NodeEngine: @unchecked Sendable {
 
       coreFactories.stream = function() {
         const EventEmitter = coreRequire('events');
-        class Stream extends EventEmitter {}
+        // The legacy Stream base carries the classic `pipe` — packages that extend Stream
+        // directly (mute-stream under inquirer) call `super.pipe`.
+        class Stream extends EventEmitter {
+          pipe(dest, options) {
+            const source = this;
+            function onData(chunk) {
+              if (dest.write && dest.write(chunk) === false && source.pause) source.pause();
+            }
+            source.on('data', onData);
+            function onDrain() { if (source.resume) source.resume(); }
+            if (dest.on) dest.on('drain', onDrain);
+            if (!options || options.end !== false) {
+              source.on('end', function(){ if (dest.end) dest.end(); });
+            }
+            if (dest.emit) dest.emit('pipe', source);
+            return dest;
+          }
+        }
 
         // Real Readable semantics: an internal buffer, paused vs flowing modes, 'readable'
         // in paused mode, _read pull, async iteration, and pipe with backpressure.
@@ -3011,7 +3062,20 @@ final class NodeEngine: @unchecked Sendable {
           run(store, fn, ...args) {
             const previous = this._store;
             this._store = store;
-            try { return fn(...args); } finally { this._store = previous; }
+            let result;
+            try { result = fn(...args); }
+            catch (e) { this._store = previous; throw e; }
+            // An async body keeps its store until it settles — inquirer's hook context lives
+            // across awaits. Correct for non-interleaved flows (one prompt at a time);
+            // interleaved async contexts would still share, the single-thread honest limit.
+            if (result && typeof result.then === 'function') {
+              const self = this;
+              return result.then(
+                function(value){ self._store = previous; return value; },
+                function(error){ self._store = previous; throw error; });
+            }
+            this._store = previous;
+            return result;
           }
           getStore() { return this._store; }
           enterWith(store) { this._store = store; }
@@ -3142,6 +3206,9 @@ final class NodeEngine: @unchecked Sendable {
             this.input.on('data', this._onData);
             if (this.input.once) this.input.once('end', this._onEnd);
             if (this.terminal && this.input.setRawMode) this.input.setRawMode(true);
+            // Real node wires keypress decoding automatically for terminal interfaces —
+            // inquirer listens for 'keypress' without ever calling emitKeypressEvents.
+            if (this.terminal) wireKeypress(this.input);
             if (this.input.resume) this.input.resume();
           }
           _echo(text) { if (this.terminal && this.output) this.output.write(text); }
@@ -3177,6 +3244,13 @@ final class NodeEngine: @unchecked Sendable {
           prompt() { if (this.output) this.output.write(this._prompt); }
           setPrompt(prompt) { this._prompt = prompt; return this; }
           getPrompt() { return this._prompt; }
+          get line() { return this._line; }
+          get cursor() { return this._line.length; }
+          getCursorPos() {
+            const columns = (this.output && this.output.columns) || 80;
+            const total = this._prompt.length + this._line.length;
+            return { rows: Math.floor(total / columns), cols: total % columns };
+          }
           write(data) { if (data) this._feed(String(data)); }
           pause() { if (this.input.pause) this.input.pause(); return this; }
           resume() { if (this.input.resume) this.input.resume(); return this; }

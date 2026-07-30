@@ -140,7 +140,23 @@ enum PackageManager {
                 }
                 return comparators
             }
-            let tokens = text.split(separator: " ").map(String.init)
+            var tokens = text.split(separator: " ").map(String.init)
+            // The spec allows whitespace between an operator and its version (">= 2.1.2
+            // < 3.0.0", safer-buffer's published range): rejoin bare-operator tokens with
+            // the version that follows.
+            var joined: [String] = []
+            var index = 0
+            while index < tokens.count {
+                let token = tokens[index]
+                if ["<", "<=", ">", ">=", "=", "~", "^"].contains(token), index + 1 < tokens.count {
+                    joined.append(token + tokens[index + 1])
+                    index += 2
+                } else {
+                    joined.append(token)
+                    index += 1
+                }
+            }
+            tokens = joined
             if tokens.isEmpty { return [Comparator(op: .ge, version: Semver(major: 0, minor: 0, patch: 0))] }
             for token in tokens {
                 guard let parsed = parseComparator(token, anchors: &anchors) else { return nil }

@@ -357,6 +357,34 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   isFile/isDirectory/… methods). glob finds files correctly. Regression
   fixtures `readdir-dirent` and `realpath-webcrypto`, both byte-identical
   to real node v22 — 41 node fixtures total; full battery green
+- **Batch 3: inquirer, axios, semver, js-yaml — 7 more fixes, incl. a
+  phase-F bug and a module-system semantics bug.** js-yaml and axios
+  passed. semver wouldn't even INSTALL: the PackageManager range parser
+  choked on `>= 2.1.2 < 3.0.0` (space between operator and version —
+  safer-buffer's published range); fixed by rejoining bare-operator
+  tokens, with 4 new semver-corpus cases. Then semver-the-package exposed
+  **circular-require semantics**: it assigns `module.exports = Class`
+  BEFORE requiring its cyclic partner, and real node's cycle-hit reads
+  `module.exports` LIVE — ours returned a stale pre-evaluation snapshot,
+  so `instanceof Comparator` saw an empty object. Fixed with a
+  modules-in-progress map that reads exports off the live module object
+  (fixture `circular-live-exports`). inquirer (the ecosystem's biggest
+  prompt library) took five: `util.styleText` (with node's TTY/NO_COLOR/
+  FORCE_COLOR gating — the fixture caught ours coloring unconditionally);
+  legacy `Stream.prototype.pipe` (mute-stream calls `super.pipe`);
+  readline `getCursorPos`/`line`/`cursor`; AsyncLocalStorage keeping its
+  store across awaits (promise-aware `run` — correct for non-interleaved
+  flows, the honest single-thread limit); and terminal readline
+  interfaces AUTO-WIRING keypress decoding (real node does it inside
+  `createInterface({terminal:true})`; inquirer never calls
+  emitKeypressEvents itself). inquirer now prompts, echoes, and answers
+  end-to-end (`ANSWER=bob`). Also fixed the pkg harness's pnpm
+  comparison: pnpm 11's default `minimumReleaseAge` supply-chain gate
+  skips versions <24h old and lost us a publish race
+  (brace-expansion@1.1.17 landed mid-session); the harness now passes
+  `--config.minimum-release-age=0` to compare pure resolution. (That gate
+  is worth considering for OUR installer someday — noted, not built.)
+  43 node fixtures + PHASE F ALL PASS + full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
