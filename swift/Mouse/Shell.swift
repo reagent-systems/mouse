@@ -1236,15 +1236,17 @@ final class MouseShell {
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
-            return IO(err: "\(name): nothing is listening (the dev-server engine is on the roadmap)", status: 1)
+            // This claim used to be "nothing is listening", which stopped being true when
+            // `net` became real sockets: a node server started here DOES listen. What is
+            // still true is that the kernel's socket table belongs to the process, and a
+            // listening server only exists while its program runs in this terminal.
+            return IO(err: "\(name): sockets belong to the running program, not the shell — a `node` server listens only while it runs here (its port is printed by the program; `ifconfig` has the LAN address)", status: 1)
         case "systemctl", "service":
             return IO(err: "\(name): no systemd on iOS", status: 1)
         case "chown":
             return IO(err: "chown: single-user sandbox, ownership is fixed", status: 1)
         case "passwd":
             return IO(err: "passwd: no user accounts on iOS", status: 1)
-        case "npm", "pnpm", "node", "npx":
-            return IO(err: "\(name): not built yet", status: 127)
         default:
             if let manifest = PackageManager.readManifest(root: context.root), let binPath = manifest.bins[name] {
                 return await runInstalledBin(binPath, args: args, stdin: stdin, context: context,
