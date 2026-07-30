@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `fs.createReadStream({start, end})` reads the byte range it was given
+  instead of the whole file, and honours `highWaterMark`. Also fixed:
+  `events.once(..., {signal})` (an ignored signal never settled the promise),
+  `util.inspect(value, {depth})` in its options form, `querystring.parse` `maxKeys`, and
+  `createCipheriv` `authTagLength`.
 - Node layer: `http.request`/`get` honour an `AbortSignal`. It was accepted and ignored,
   so a caller's only way to cancel became a permanent wait — an unabortable request.
 - Node layer: `spawnSync` honours `encoding` and `cwd`; `input`, `timeout`, `maxBuffer`

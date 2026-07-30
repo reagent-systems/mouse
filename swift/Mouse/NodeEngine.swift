@@ -4043,7 +4043,39 @@ final class NodeEngine: @unchecked Sendable {
         };
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.default = EventEmitter;
-        EventEmitter.once = function(emitter, name) {
+        EventEmitter.once = function(emitter, name, options) {
+          // An AbortSignal here has to reject the promise; ignored, `once` waits for an event
+          // that may never come and the caller's cancellation does nothing.
+          const signal = options && options.signal;
+          if (signal) {
+            return new Promise(function(resolve, reject) {
+              const abortError = function() {
+                const error = new Error('The operation was aborted');
+                error.name = 'AbortError';
+                error.code = 'ABORT_ERR';
+                return error;
+              };
+              if (signal.aborted) { reject(abortError()); return; }
+              let done = false;
+              const onEvent = function() {
+                if (done) return;
+                done = true;
+                resolve(Array.prototype.slice.call(arguments));
+              };
+              const onAbort = function() {
+                if (done) return;
+                done = true;
+                if (emitter.off) emitter.off(name, onEvent);
+                reject(abortError());
+              };
+              emitter.once(name, onEvent);
+              if (typeof signal.addEventListener === 'function') signal.addEventListener('abort', onAbort);
+              else if (typeof signal.once === 'function') signal.once('abort', onAbort);
+            });
+          }
+          return EventEmitter._onceNoSignal(emitter, name);
+        };
+        EventEmitter._onceNoSignal = function(emitter, name) {
           return new Promise(function(resolve, reject) {
             emitter.once(name, function(){ resolve(Array.from(arguments)); });
             if (name !== 'error' && emitter.once) emitter.once('error', reject);
@@ -4092,7 +4124,16 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories.util = function() {
         return {
           format: format,
-          inspect: inspect,
+          // node takes an OPTIONS object here; only a positional depth was understood, so
+          // `{depth: 0}` read as depth `undefined` and printed the whole tree.
+          inspect: function(value, options) {
+            if (options !== null && typeof options === 'object') {
+              const depth = options.depth === null ? Infinity
+                          : options.depth === undefined ? 2 : Number(options.depth);
+              return inspect(value, depth);
+            }
+            return inspect(value, options);
+          },
           inherits: function(ctor, superCtor) {
             ctor.super_ = superCtor;
             Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
@@ -5031,7 +5072,13 @@ final class NodeEngine: @unchecked Sendable {
             stream.fd = 3;
             stream.emit('open', 3);
             stream.emit('ready');
-            const CHUNK = 65536;
+            // `start`/`end` select a byte RANGE, inclusive of end — tar readers and HTTP range
+            // responses depend on it, and ignoring them returned the whole file, which is wrong
+            // DATA rather than an error.
+            const from = options && options.start !== undefined ? Number(options.start) : 0;
+            const to = options && options.end !== undefined ? Number(options.end) + 1 : content.length;
+            content = content.slice(Math.max(0, from), Math.min(content.length, to));
+            const CHUNK = options && options.highWaterMark ? Number(options.highWaterMark) : 65536;
             let offset = 0;
             const pushNext = () => {
               if (offset >= content.length) { stream.push(null); return; }
@@ -6114,12 +6161,19 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories.querystring = function() {
         return {
           unescapeBuffer: function(text) { return Buffer.from(decodeURIComponent(String(text))); },
-          parse: function(text) {
+          parse: function(text, sep, eq, options) {
             const result = {};
-            for (const pair of String(text).split('&')) {
+            const separator = sep || '&';
+            const equals = eq || '=';
+            // `maxKeys` caps how much of a hostile query string is parsed; 0 means no limit.
+            const maxKeys = options && options.maxKeys !== undefined ? Number(options.maxKeys) : 1000;
+            for (const pair of String(text).split(separator)) {
               if (!pair) continue;
-              const [key, value] = pair.split('=');
-              result[decodeURIComponent(key)] = decodeURIComponent(value || '');
+              if (maxKeys > 0 && Object.keys(result).length >= maxKeys) break;
+              const at = pair.indexOf(equals);
+              const key = at < 0 ? pair : pair.slice(0, at);
+              const value = at < 0 ? '' : pair.slice(at + equals.length);
+              result[decodeURIComponent(key)] = decodeURIComponent(value);
             }
             return result;
           },
@@ -9196,6 +9250,10 @@ final class NodeEngine: @unchecked Sendable {
           this._tag = null;
           this._done = false;
           this._autoPad = true;
+          // GCM tags may be shorter than the full 16 bytes, and a protocol that specifies 12
+          // rejects a 16-byte one. The option was accepted and ignored.
+          this._authTagLength = options && options.authTagLength !== undefined
+            ? Number(options.authTagLength) : undefined;
         }
         Cipher.prototype = Object.create(CryptoTransform.prototype);
         Cipher.prototype.constructor = Cipher;
@@ -9230,7 +9288,12 @@ final class NodeEngine: @unchecked Sendable {
                                            this._aad.toString('base64'));
           if (!result) throw Object.assign(new Error('Cipher failed: check the key and IV lengths for ' + this._algorithm),
                                            { code: 'ERR_CRYPTO_OPERATION_FAILED' });
-          if (result.tag) this._tag = Buffer.from(result.tag, 'base64');
+          if (result.tag) {
+            const full = Buffer.from(result.tag, 'base64');
+            // Truncating from the FRONT is what the GCM spec says a shortened tag is.
+            this._tag = this._authTagLength !== undefined && this._authTagLength < full.length
+              ? full.slice(0, this._authTagLength) : full;
+          }
           const out = Buffer.from(result.data, 'base64');
           return outputEncoding ? out.toString(outputEncoding) : out;
         };

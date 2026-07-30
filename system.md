@@ -1074,6 +1074,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The options detector, third batch — a byte range that was not a range.** Five more
+  accepted-and-ignored options, and the worst returned WRONG DATA rather than an error:
+  **`fs.createReadStream(path, {start, end})` ignored the range and handed back the whole
+  file.** That is what a tar reader and an HTTP range response are built on, so the failure
+  would surface as corrupt output far from its cause. `highWaterMark` was ignored there too.
+  **`events.once(emitter, name, {signal})`** was the other bad shape: an ignored signal
+  means the promise never settles, so a cancellable wait becomes a permanent one — the same
+  defect as http's dropped signal, in a second place, which is the argument for sweeping a
+  whole class rather than fixing instances.
+  Three more, each wrong in a way a caller can see: `util.inspect(value, {depth: 0})` took
+  only a POSITIONAL depth, so the options form read as `undefined` and printed the whole
+  tree; `querystring.parse(…, {maxKeys})` had no cap at all, which is a denial-of-service
+  knob missing rather than a formatting nicety; and `createCipheriv(…, {authTagLength: 12})`
+  always produced a 16-byte GCM tag, which a protocol specifying 12 rejects — truncation is
+  from the front, as the GCM spec defines a shortened tag.
+  Cumulative across the three batches: **fourteen ignored options found, of which four were
+  data-destroying or unrecoverable** (a truncating append, a tree-deleting `rm`, a range
+  read that was not a range, and two unabortable waits). Every previous sweep asked whether
+  a thing EXISTS; this class only shows up when you ask whether it DOES anything, and the
+  hit rate has stayed high enough to justify continuing: 7 of 14, then 2 of 5, then 5 of 9.
+  89 fixtures, and http/express/ws/webpack/esbuild/pkg all still match real node.
 - **The options detector, second batch — and an AbortSignal that never aborted.** Applied
   to `child_process`, `http` and `readline`. Most already worked (`http`'s `timeout`,
   `request.setTimeout`, readline's `crlfDelay`), and two did not:
