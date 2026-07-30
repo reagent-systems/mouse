@@ -465,6 +465,10 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Gate the DOCUMENTATION, not just the code.** A gap list is written once, read often, and
+  nothing fails when it goes stale — which is why the record here was wrong four times while
+  every test stayed green. Probe each API the docs call absent and fail if it works; probe the
+  built ones too, so the claim cannot rot in either direction.
 - **Promote a sweep to a GATE once its findings are settled.** A sweep that found real bugs
   should keep finding them; left as a one-shot it runs once and then sits red forever. Pin the
   differences that are deliberate, with the reason, and let it fail on anything new. Separating

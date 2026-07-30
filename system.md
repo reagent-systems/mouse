@@ -1074,6 +1074,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **A gate on the DOCUMENTATION, after the record was wrong four times.** The failures kept
+  coming from the same place and it was not the code: a caveat reasoned instead of measured,
+  a fixture asserting a capability was still missing, a miscount of absent globals, and a gap
+  list naming something already built. Four instances of one class, which by this session's
+  own rule means stop fixing them one at a time.
+  A gap list rots SILENTLY — it is written once, read often, and nothing fails when it goes
+  stale. So `docclaims` probes every API the docs still claim is absent and fails if one of
+  them WORKS. Thirteen documented gaps, each still a gap: `crypto.subtle`, the bignum family
+  (`createDiffieHellman`, `generatePrime`, `checkPrime`, `getDiffieHellman`),
+  `path.matchesGlob`, `dns.resolveTlsa`, `moveMessagePortToContext`, zstd, a TLS server, DSA
+  and X448 key types, and SharedArrayBuffer across workers. It also checks the four things
+  built this session — `fs.glob`, `privateEncrypt`, `scrypt`, brotli — still work, so the
+  claim in the OTHER direction cannot rot either.
+  The first extraction pass pulled 227 candidate names out of the docs, most of them shell
+  keywords and filenames caught by too loose a pattern; narrowing to actual Node APIs asserted
+  as absent is what made it a gate rather than a list.
+  Full run afterwards: **50 assertions passing, zero failures, six diagnostics.**
 - **`privateEncrypt`/`publicDecrypt` — the seventh refusal whose reason was half true.** It
   said SecKey "encrypts with the public key and decrypts with the private one; the reversed
   legacy forms have no API". True of SecKey's PADDED algorithms and false of its RAW ones:
