@@ -1101,14 +1101,31 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   on three programs — the single-engine registry, cross-worker fan-out through the
   hub, and a late broadcast received while ONLY the channel held the loop — plus the
   environmentData snapshot rules. 22 rounds, identical every time.
-- **A known divergence, named rather than half-fixed:** node's `MessageChannel`,
-  `MessagePort` and `BroadcastChannel` globals ARE the `worker_threads` classes
-  (`===` identical). Ours are two implementations: an EventTarget-based global pair
-  that the wasm/Emscripten glue expects, and worker_threads' EventEmitter-based pair.
-  So `receiveMessageOnPort` accepts the module's ports and not the global ones, where
-  node accepts both. Unifying means giving one class both surfaces (`on` AND
-  `addEventListener`, raw values AND `.data` events) and re-proving the wasm
-  harnesses — a boundary of its own, not a postscript to this one.
+- **One MessagePort with both surfaces, and the globals ARE the module's classes** —
+  the divergence named in the previous boundary, closed. `MessageChannel`,
+  `MessagePort` and `BroadcastChannel` now resolve to the `worker_threads` classes
+  (`===` identical, as node has them) instead of a separate EventTarget-based pair, so
+  `receiveMessageOnPort` accepts a global channel's port too. One message fires all
+  three surfaces exactly as node does: EventEmitter listeners get the raw value,
+  `onmessage` and `addEventListener` get an event carrying `.data`. Assigning
+  `onmessage` starts a port, which is why it had to become an accessor.
+- **Port delivery is its own EVENT LOOP PHASE, because in node it observably is.**
+  Not a microtask and not `nextTick`: a `process.nextTick` queued AFTER a
+  `postMessage` still runs first, which no microtask-based drain can express. Node's
+  order is nextTick → promises → ports → immediates, and the loop now has a port
+  phase between host jobs and immediates that reproduces it in both directions.
+- **`process.nextTick` was only accidentally ordered before promises, and the README
+  claimed otherwise.** It is scheduled AS a microtask
+  (`Promise.resolve().then(drainTicks)`) because JS has no other way to schedule, so
+  it won only when it happened to be registered before the promise. Node's rule is
+  absolute: the whole nextTick queue drains before ANY promise reaction. Every
+  host-invoked callback (timer, immediate, port delivery) now runs through a `__invoke`
+  trampoline that drains ticks BEFORE the stack unwinds — JSC drains microtasks only
+  when the outermost JS frame returns, so ticks queued inside a callback now win
+  either way round. Found by a test written for something else entirely, which is the
+  second time this window that a new fixture caught a pre-existing bug in a claim I
+  had already written down. Still not trampolined: I/O-event callbacks, which arrive
+  as host jobs through per-bridge closures rather than one call site.
 - **`options.env` now actually reaches a spawned child.** It was silently dropped
   before: every child inherited the parent's environment. node REPLACES the
   environment when `env` is given (the caller spreads `process.env` in if it wants

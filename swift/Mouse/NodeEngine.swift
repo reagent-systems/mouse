@@ -85,6 +85,11 @@ final class NodeEngine: @unchecked Sendable {
     private let jobsLock = NSLock()
     private var jobs: [() -> Void] = []
     private var outstanding = 0
+    /// MessagePort deliveries. Node runs these in their OWN loop phase: after nextTick and the
+    /// microtask queue, before immediates — verified against real node, including the case where
+    /// the nextTick is queued AFTER the postMessage and still runs first. A microtask-based drain
+    /// cannot express that, which is why this is a phase rather than a promise.
+    private var portDeliveries: [JSValue] = []
     /// Open TCP handles (`net`, and `http` servers above it). Counted separately from
     /// `outstanding` because they are opened and closed from the socket queue, not the JS
     /// thread — hence the lock, which the loop's quiescence check reads through.
@@ -383,12 +388,22 @@ final class NodeEngine: @unchecked Sendable {
                 continue
             }
 
+            if !portDeliveries.isEmpty {
+                let batch = portDeliveries
+                portDeliveries = []
+                for callback in batch {
+                    guard exitCode == nil else { break }
+                    invoke(callback, [])
+                }
+                continue
+            }
+
             if !immediates.isEmpty {
                 let batch = immediates
                 immediates = []
                 for (callback, arguments) in batch {
                     guard exitCode == nil else { break }
-                    callback.call(withArguments: arguments)
+                    invoke(callback, arguments)
                 }
                 continue
             }
@@ -412,13 +427,25 @@ final class NodeEngine: @unchecked Sendable {
                     repeated.due = Date().addingTimeInterval(interval)
                     timers.append(repeated)
                 }
-                next.callback.call(withArguments: next.arguments)
+                invoke(next.callback, next.arguments)
             } else {
                 // Only in-flight I/O remains: sleep until a completion signals.
                 _ = wakeup.wait(timeout: .now() + 60)
             }
         }
         drainTicks()
+    }
+
+    /// Call a JS callback the way node does: with the tick queue drained before any promise
+    /// reaction the callback queues. Falls back to a direct call if the trampoline is missing
+    /// (it cannot be, after the bootstrap, but a direct call is the safe degradation).
+    private func invoke(_ callback: JSValue, _ arguments: [Any]) {
+        guard let trampoline = context.objectForKeyedSubscript("__invoke"),
+              !trampoline.isUndefined else {
+            callback.call(withArguments: arguments)
+            return
+        }
+        trampoline.call(withArguments: [callback, arguments])
     }
 
     private func drainTicks() {
@@ -716,6 +743,11 @@ final class NodeEngine: @unchecked Sendable {
             self?.children[Int(id)]?.deliverMessage(json)
         }
         expose("spawnMessage", spawnMessage)
+        // A port delivery: its own phase in the loop, which is where node runs them.
+        let portDeliver: @convention(block) (JSValue) -> Void = { [weak self] callback in
+            self?.portDeliveries.append(callback)
+        }
+        expose("portDeliver", portDeliver)
         // A handle JavaScript itself owns. node's BroadcastChannel keeps the loop alive until it
         // is closed or unref'd, and there was no way to express that from the bootstrap: every
         // other handle here is owned by the host side (a socket, a child, a timer).
@@ -2750,39 +2782,16 @@ final class NodeEngine: @unchecked Sendable {
           return !event.defaultPrevented;
         }
       };
-      globalThis.MessageChannel = class MessageChannel {
-        constructor() {
-          const makePort = function() {
-            const port = new EventTarget();
-            port.onmessage = null;
-            port.postMessage = function(data) {
-              const twin = port._twin;
-              setImmediate(function() {
-                const event = new Event('message');
-                event.data = data;
-                if (twin.onmessage) twin.onmessage(event);
-                twin.dispatchEvent(event);
-              });
-            };
-            port.start = function(){};
-            port.close = function(){};
-            port.unref = function(){ return port; };
-            port.ref = function(){ return port; };
-            return port;
-          };
-          this.port1 = makePort();
-          this.port2 = makePort();
-          this.port1._twin = this.port2;
-          this.port2._twin = this.port1;
-        }
-      };
-      // node exposes BroadcastChannel as a GLOBAL, not only through worker_threads. Lazily, so
-      // requiring the module stays the thing that builds the hub — the getter reads as the class
-      // to everything that matters (`new`, `typeof`, `instanceof`).
-      Object.defineProperty(globalThis, 'BroadcastChannel', {
-        configurable: true,
-        get: function(){ return coreRequire('worker_threads').BroadcastChannel; },
-      });
+      // In node these globals ARE the worker_threads classes — `===` identical — and there is
+      // one MessagePort with both surfaces rather than a web port and a module port that behave
+      // differently. There were two here, so `receiveMessageOnPort` accepted the module's ports
+      // and not the global ones. Lazily resolved, so requiring the module still builds them.
+      for (const name of ['MessageChannel', 'MessagePort', 'BroadcastChannel']) {
+        Object.defineProperty(globalThis, name, {
+          configurable: true,
+          get: function(){ return coreRequire('worker_threads')[name]; },
+        });
+      }
       globalThis.AbortSignal = class AbortSignal {
         constructor() { this.aborted = false; this.reason = undefined; this._listeners = []; this.onabort = null; }
         addEventListener(type, listener) { if (type === 'abort') this._listeners.push(listener); }
@@ -3050,6 +3059,16 @@ final class NodeEngine: @unchecked Sendable {
           const [fn, args] = tickQueue.shift();
           fn.apply(null, args);
         }
+      };
+      // Every host-invoked callback goes through here, and the reason is subtle: nextTick rides
+      // the microtask queue below (there is no other way to schedule from JS), so it only beat a
+      // promise when it happened to be registered first. Node's rule is absolute — the whole
+      // nextTick queue drains before ANY promise reaction. Draining here, before the stack
+      // unwinds to the host, is what makes that true: JSC only drains microtasks once the
+      // outermost JS frame returns, so ticks queued inside a callback run first either way round.
+      globalThis.__invoke = function(fn, args) {
+        try { return fn.apply(null, args || []); }
+        finally { globalThis.__drainTicks(); }
       };
       // ---- stdio streams (real TTY semantics when the host attached one) ----
       const signalHandlers = { SIGINT: [], SIGTERM: [], SIGWINCH: [] };
@@ -7199,25 +7218,77 @@ final class NodeEngine: @unchecked Sendable {
           // which is what makes receiveMessageOnPort able to drain them synchronously later.
           peer._queue = peer._queue || [];
           peer._queue.push(copy);
-          process.nextTick(function(){ peer._drain(); });
+          peer._schedule();
         };
-        /// Deliver queued messages as events, but only once somebody is listening — otherwise
-        /// they stay queued for receiveMessageOnPort.
+        /// One delivery per port per loop turn, in the PORT PHASE. Not nextTick and not a
+        /// microtask: node runs port deliveries after both, which is observable — a nextTick
+        /// queued after a postMessage still runs first.
+        MessagePort.prototype._schedule = function() {
+          if (this._scheduled) return;
+          this._scheduled = true;
+          const self = this;
+          bridge.portDeliver(function(){ self._scheduled = false; self._drain(); });
+        };
+        /// Is anyone listening, on EITHER surface? If not the messages stay queued, which is
+        /// what receiveMessageOnPort drains.
+        MessagePort.prototype._listening = function() {
+          return this._started || this.listenerCount('message') > 0 ||
+                 typeof this._onmessage === 'function' ||
+                 (this._webListeners && this._webListeners.length > 0);
+        };
         MessagePort.prototype._drain = function() {
           if (!this._queue || !this._queue.length) return;
-          if (!this._started && this.listenerCount('message') === 0) return;
+          if (!this._listening()) return;
           const pending = this._queue;
           this._queue = [];
-          for (let i = 0; i < pending.length; i++) this.emit('message', pending[i]);
+          for (const value of pending) {
+            // All three surfaces fire for one message, which is what node does: EventEmitter
+            // listeners get the raw value, web-style listeners get an event carrying `.data`.
+            this.emit('message', value);
+            if (typeof this._onmessage === 'function' || (this._webListeners && this._webListeners.length)) {
+              const event = { data: value, type: 'message', target: this };
+              if (typeof this._onmessage === 'function') this._onmessage(event);
+              for (const listener of (this._webListeners || []).slice()) {
+                if (listener.type === 'message') listener.fn.call(this, event);
+              }
+            }
+          }
         };
-        // Adding the listener is what starts a port in node; anything already queued arrives then.
+        // Adding a listener is what starts a port in node; anything already queued arrives then.
         const portOn = MessagePort.prototype.on;
         MessagePort.prototype.on = MessagePort.prototype.addListener = function(type, listener) {
           const result = portOn.call(this, type, listener);
-          if (type === 'message') { const self = this; process.nextTick(function(){ self._drain(); }); }
+          if (type === 'message') this._schedule();
           return result;
         };
-        MessagePort.prototype.start = function(){ this._started = true; this._drain(); };
+        // The web surface, so ONE class can be both the worker_threads MessagePort and the
+        // global one — which is what node has (they are `===` identical).
+        MessagePort.prototype.addEventListener = function(type, fn) {
+          this._webListeners = this._webListeners || [];
+          this._webListeners.push({ type: String(type), fn: fn });
+          if (String(type) === 'message') this._schedule();
+        };
+        MessagePort.prototype.removeEventListener = function(type, fn) {
+          if (!this._webListeners) return;
+          const at = this._webListeners.findIndex(function(l){ return l.type === String(type) && l.fn === fn; });
+          if (at >= 0) this._webListeners.splice(at, 1);
+        };
+        MessagePort.prototype.dispatchEvent = function(event) {
+          if (!event) return false;
+          if (typeof this['_on' + event.type] === 'function') this['_on' + event.type](event);
+          for (const listener of (this._webListeners || []).slice()) {
+            if (listener.type === event.type) listener.fn.call(this, event);
+          }
+          this.emit(event.type, event);
+          return true;
+        };
+        // Assigning onmessage starts the port in node, so it has to be an accessor.
+        Object.defineProperty(MessagePort.prototype, 'onmessage', {
+          configurable: true,
+          get: function(){ return this._onmessage || null; },
+          set: function(fn) { this._onmessage = fn; if (typeof fn === 'function') this._schedule(); },
+        });
+        MessagePort.prototype.start = function(){ this._started = true; this._schedule(); };
         MessagePort.prototype.close = function(){ this.emit('close'); if (this._peer) this._peer.emit('close'); };
         MessagePort.prototype.ref = function(){ return this; };
         MessagePort.prototype.unref = function(){ return this; };

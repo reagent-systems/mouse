@@ -8,6 +8,14 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: one `MessagePort` with both surfaces — the `MessageChannel`,
+  `MessagePort` and `BroadcastChannel` globals are now the `worker_threads` classes,
+  as node has them, so `receiveMessageOnPort` works on a global channel's port.
+- Node layer: `process.nextTick` now really does run before promise reactions. It is
+  scheduled as a microtask, so it previously won only when registered first; every
+  host-invoked callback now drains the tick queue before the stack unwinds.
+- Node layer: MessagePort deliveries run in their own event loop phase (after
+  nextTick and promises, before immediates), which is where node runs them.
 - Node layer: `BroadcastChannel` (global and via `worker_threads`),
   `receiveMessageOnPort` and `get`/`setEnvironmentData` work. Both had been refused as needing shared memory; a
   broadcast is a name registry with fan-out through the main engine as hub, and the
