@@ -470,6 +470,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A defect has a SHAPE; sweep every site with that shape, not every site with
+  that NAME.** `JSON.stringify` standing in for a structural operation was fixed in
+  `assert.deepStrictEqual`, then found again in `util.isDeepStrictEqual`, then AGAIN
+  in `v8.serialize` two boundaries later — where it hung jest, because a haste map is
+  mostly Maps and Sets and JSON discards those without complaining. The first sweep
+  looked for comparisons and "serialize" did not read as "compare". Grep for the
+  mechanism (`JSON.stringify`, `JSON.parse`), not for the concept.
 - **Gate the DOCUMENTATION, not just the code.** A gap list is written once, read often, and
   nothing fails when it goes stale — which is why the record here was wrong four times while
   every test stayed green. Probe each API the docs call absent and fail if it works; probe the

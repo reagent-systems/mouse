@@ -8,6 +8,14 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `v8.serialize`/`deserialize` are a real structured clone, replacing
+  `JSON.stringify`. Map, Set, Date, RegExp, Buffer and typed arrays survive; `undefined` stays
+  distinct from `null`; BigInt, `NaN`, `Infinity` and `-0` round-trip; cycles and shared
+  references are preserved rather than duplicated or thrown on. Adds `v8.Serializer`/
+  `Deserializer`. The format is this engine's own, not V8's wire format — a process serializes
+  for itself — so a cache written by real node is not readable here, and vice versa.
+- Node layer: **jest runs with its cache enabled**, cold and warm. The cache was what hung it:
+  a haste map is mostly Maps and Sets, and JSON discarded them silently.
 - Node layer: **`vm` contexts are real.** `createContext`, `runInContext`, `runInNewContext`,
   `compileFunction` and `Script.prototype.runInContext` work against a genuine separate global —
   a second `JSContext` in the engine's virtual machine, with the sandbox's keys bound as live
