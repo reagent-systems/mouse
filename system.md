@@ -674,6 +674,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   helpers, and reading the body through `getReader()` — byte-identical to
   real node, and the live-HTTP `fetch-http` fixture still matches. 64 node
   fixtures, full battery green
+- **THE ANTHROPIC SDK RUNS — including token STREAMING.** With the fetch
+  family real, `@anthropic-ai/sdk` (the client an agent CLI is built on)
+  was installed by our own PackageManager and exercised on the engine. It
+  builds a correct `POST https://api.anthropic.com/v1/messages` carrying
+  the `x-api-key` and `anthropic-version` headers, serializes the model and
+  messages, and parses a JSON reply into a typed message with usage counts.
+  Then the part that matters most for a TUI: given an SSE body, the SDK's
+  `stream: true` path **iterates 6 server-sent events through
+  `Response.body` and assembles the text deltas** ("streamed tokens") — the
+  exact mechanism that renders tokens as they arrive. Verified with a
+  deterministic fake `fetch` (no network, no credential): what is under
+  test is OUR fetch/Response/ReadableStream plumbing plus the SDK's use of
+  it. Fixture `anthropic-sdk` matches real node byte-for-byte. Two of my
+  own test bugs, both caught by comparing against real node rather than
+  trusting the engine: the first draft read a Mouse-internal field
+  (`req._bytes`) that throws on node, and the streaming half replaced
+  `globalThis.fetch` AFTER constructing the client — the SDK captures fetch
+  at construction, so the SSE fake was never used and BOTH engines reported
+  zero events. A fixture that agrees on the wrong answer is worse than a
+  failing one; the streaming assertion is now non-trivial (6 events,
+  asserted text) and independently reproduced standalone. 65 node fixtures,
+  full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
