@@ -465,6 +465,15 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Turn a finding method into a tool.** Six refusals were overturned one at a time,
+  each by accident. The sweep that generalises them — call every export with no
+  arguments in both engines, classify the failure, diff — found a false refusal
+  (brotli) on its first run. If you have found the same class of bug three times by
+  hand, stop hunting and build the detector.
+- **Never spend refusal wording on an argument error.** A refusal message is a
+  contract that a capability is absent. `generateKeyPairSync` used "is not available"
+  for a missing argument, which made a healthy function unreadable to the audit tool
+  and would mislead any reader. Argument problems get ERR_INVALID_ARG_TYPE.
 - **"A partial X is worse than none" is a hypothesis with a number attached.** Build
   the thing, run a corpus against the reference, and count. Doing that for glob
   vindicated the refusal for `path.matchesGlob` (17 disagreements in 1824 cases, all of

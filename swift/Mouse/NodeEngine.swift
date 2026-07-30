@@ -1640,6 +1640,31 @@ final class NodeEngine: @unchecked Sendable {
             return output.base64EncodedString()
         }
         expose("zlibPush", zlibPush)
+        // brotli through Apple's Compression framework. The refusal said brotli "is not built
+        // into this device"; COMPRESSION_BROTLI has shipped since iOS 15. A surface sweep found
+        // it, not a package failing.
+        let brotliTransform: @convention(block) (String, String) -> String? = { mode, base64 in
+            guard let data = Data(base64Encoded: base64) else { return nil }
+            return BrotliStream.transform(data, compressing: mode == "compress")?.base64EncodedString()
+        }
+        let brotliOpen: @convention(block) (String) -> Int = { [weak self] mode in
+            guard let self, let stream = BrotliStream(compressing: mode == "compress") else { return 0 }
+            brotliHandle += 1
+            brotliStreams[brotliHandle] = stream
+            return brotliHandle
+        }
+        let brotliPush: @convention(block) (Int, String, Bool) -> String? = { [weak self] handle, base64, finish in
+            guard let self, let stream = brotliStreams[handle] else { return nil }
+            let input = base64.isEmpty ? Data() : (Data(base64Encoded: base64) ?? Data())
+            return stream.push(input, finish: finish)?.base64EncodedString()
+        }
+        let brotliClose: @convention(block) (Int) -> Void = { [weak self] handle in
+            self?.brotliStreams.removeValue(forKey: handle)
+        }
+        expose("brotliTransform", brotliTransform)
+        expose("brotliOpen", brotliOpen)
+        expose("brotliPush", brotliPush)
+        expose("brotliClose", brotliClose)
         let zlibClose: @convention(block) (Int) -> Void = { [weak self] handle in
             guard let self else { return }
             self.zlibStreams.removeValue(forKey: handle)?.close()
@@ -1739,6 +1764,9 @@ final class NodeEngine: @unchecked Sendable {
 
     /// Live coder streams, keyed by the handle JS holds. Touched only on the JS queue.
     private var zlibStreams: [Int: ZlibStream] = [:]
+    /// Live brotli coders, the same shape as the zlib table above.
+    private var brotliStreams: [Int: BrotliStream] = [:]
+    private var brotliHandle = 0
     private var nextZlibHandle = 1
 
     /// One-shot deflate or inflate with explicit windowBits (15=zlib, 15+16=gzip, -15=raw,
@@ -8678,6 +8706,14 @@ final class NodeEngine: @unchecked Sendable {
 
         function generateKeyPairSync(type, options) {
           options = options || {};
+          // node raises ERR_INVALID_ARG_TYPE for a missing type, and refusal language here made a
+          // surface sweep read "no key type given" as "this feature is unavailable".
+          if (typeof type !== 'string') {
+            throw Object.assign(
+              new TypeError('The "type" argument must be of type string. Received ' +
+                            (type === undefined ? 'undefined' : typeof type)),
+              { code: 'ERR_INVALID_ARG_TYPE' });
+          }
           const kind = String(type).toLowerCase();
           if (kind !== 'ec' && kind !== 'ed25519' && kind !== 'x25519' && kind !== 'rsa') {
             throw Object.assign(new Error("Key type '" + type + "' is not available: this device generates RSA through SecKey and EC (P-256/384/521), Ed25519 and X25519 through CryptoKit; DSA, DH and X448 have no system implementation"),
@@ -9657,10 +9693,80 @@ final class NodeEngine: @unchecked Sendable {
           if (!m.codes) m.codes = { Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1,
                                     Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3, Z_MEM_ERROR: -4,
                                     Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6 };
-          // No libbrotli/libzstd on the device: refuse rather than pretend.
-          for (const missing of ['brotliCompress', 'brotliCompressSync', 'brotliDecompress',
-                                 'brotliDecompressSync', 'createBrotliCompress', 'createBrotliDecompress']) {
-            if (!m[missing]) m[missing] = refuse('zlib', missing, 'brotli is not built into this device');
+          // Brotli is real: Compression framework has had COMPRESSION_BROTLI since iOS 15, so the
+          // old refusal ("not built into this device") was simply wrong. zstd still has no system
+          // implementation, so those keep refusing below.
+          const brotliRun = function(compressing, data) {
+            const input = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+            const result = bridge.brotliTransform(compressing ? 'compress' : 'decompress',
+                                                  input.toString('base64'));
+            if (result === null || result === undefined) {
+              const error = new Error('zlib: brotli: invalid input');
+              error.code = 'Z_DATA_ERROR';
+              throw error;
+            }
+            return Buffer.from(result, 'base64');
+          };
+          m.brotliCompressSync = function(data){ return brotliRun(true, data); };
+          m.brotliDecompressSync = function(data){ return brotliRun(false, data); };
+          m.brotliCompress = function(data, options, callback) {
+            if (typeof options === 'function') callback = options;
+            setImmediate(function(){
+              try { callback(null, brotliRun(true, data)); } catch (error) { callback(error); }
+            });
+          };
+          m.brotliDecompress = function(data, options, callback) {
+            if (typeof options === 'function') callback = options;
+            setImmediate(function(){
+              try { callback(null, brotliRun(false, data)); } catch (error) { callback(error); }
+            });
+          };
+          // A LIVE coder per stream, like zlib's: a partial brotli stream is not decodable on its
+          // own, so chunks must feed one encoder rather than being coded independently.
+          const BrotliCoder = function(compressing) {
+            return function(options) {
+              // This patch site is not the zlib factory, so Transform is not in scope here.
+              const Transform = coreRequire('stream').Transform;
+              let handle = bridge.brotliOpen(compressing ? 'compress' : 'decompress');
+              const code = function(chunk, finish) {
+                if (!handle) throw new Error('zlib: cannot open brotli');
+                const input = chunk && chunk.length
+                  ? (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))).toString('base64') : '';
+                const result = bridge.brotliPush(handle, input, !!finish);
+                if (result === null || result === undefined) {
+                  if (finish) { bridge.brotliClose(handle); handle = 0; }
+                  const error = new Error('zlib: brotli: invalid input');
+                  error.code = 'Z_DATA_ERROR';
+                  throw error;
+                }
+                if (finish) { bridge.brotliClose(handle); handle = 0; }
+                return Buffer.from(result, 'base64');
+              };
+              const stream = new Transform({
+                transform(chunk, encoding, callback) {
+                  try {
+                    const out = code(chunk, false);
+                    callback(null, out.length ? out : undefined);
+                  } catch (error) { callback(error); }
+                },
+                flush(callback) {
+                  try {
+                    const out = code(null, true);
+                    callback(null, out.length ? out : undefined);
+                  } catch (error) { callback(error); }
+                },
+              });
+              stream._opts = options || {};
+              return stream;
+            };
+          };
+          m.createBrotliCompress = BrotliCoder(true);
+          m.createBrotliDecompress = BrotliCoder(false);
+          // zstd genuinely has no system implementation — Compression framework has LZFSE, LZ4,
+          // LZMA, zlib and brotli, and no zstd.
+          for (const missing of ['zstdCompress', 'zstdCompressSync', 'zstdDecompress',
+                                 'zstdDecompressSync', 'createZstdCompress', 'createZstdDecompress']) {
+            if (!m[missing]) m[missing] = refuse('zlib', missing, 'zstd is not in the system compression framework (brotli, zlib, LZFSE, LZ4 and LZMA are)');
           }
         } else if (name === 'http' || name === 'https') {
           if (!m.validateHeaderName) m.validateHeaderName = function(header) {

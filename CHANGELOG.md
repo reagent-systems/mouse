@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: brotli is real (`swift/Mouse/NodeBrotli.swift`) — one-shot and streaming,
+  through Apple's Compression framework, which has had COMPRESSION_BROTLI since iOS 15.
+  The refusal claimed brotli was not on the device. zstd genuinely is absent and keeps
+  refusing. Verified by each engine reading what the other writes.
+- Node layer: `crypto.generateKeyPairSync` raises ERR_INVALID_ARG_TYPE for a missing
+  type instead of refusal language, which had made a healthy function read as
+  unavailable to a surface audit.
 - Node layer: `crypto.diffieHellman` works — node's key-object agreement over X25519
   and the EC curves. Its refusal cited the bignum that finite-field DH needs, which is
   a different function; the capability was already present via CryptoKit. Adds X25519

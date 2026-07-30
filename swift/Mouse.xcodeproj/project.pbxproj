@@ -13,6 +13,7 @@
 		2023624DA13C04BD2E402AF1 /* NodeScrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */; };
 		20348E0EC1CA68374BEB45D0 /* NodeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */; };
 		2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */; };
+		2E7F41B7E5FCEFF2ECC7AA09 /* NodeBrotli.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA007916E1B80807354B7C21 /* NodeBrotli.swift */; };
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
 		3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B23A8EB8050D0EFED1198A4 /* Workspace.swift */; };
 		3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */; };
@@ -69,6 +70,7 @@
 		C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeEngine.swift; sourceTree = "<group>"; };
 		CAE14386F75AAF0B835E324C /* GitHubPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubPush.swift; sourceTree = "<group>"; };
 		E2B92464EFB49888F46248A5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EA007916E1B80807354B7C21 /* NodeBrotli.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBrotli.swift; sourceTree = "<group>"; };
 		F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StripPersistence.swift; sourceTree = "<group>"; };
 		F5B299975B30C229DCCCB015 /* GitGraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitGraphView.swift; sourceTree = "<group>"; };
 		FB01C138F6E8F2292E1D3EC4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -94,6 +96,7 @@
 				A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */,
 				FB01C138F6E8F2292E1D3EC4 /* Info.plist */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
+				EA007916E1B80807354B7C21 /* NodeBrotli.swift */,
 				C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */,
 				AA049B76029F618EF94C1571 /* NodeKeys.swift */,
 				18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */,
@@ -219,6 +222,7 @@
 				5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */,
 				13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */,
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
+				2E7F41B7E5FCEFF2ECC7AA09 /* NodeBrotli.swift in Sources */,
 				20348E0EC1CA68374BEB45D0 /* NodeEngine.swift in Sources */,
 				3CBA0D3FCBEAE0055B741849 /* NodeKeys.swift in Sources */,
 				2023624DA13C04BD2E402AF1 /* NodeScrypt.swift in Sources */,

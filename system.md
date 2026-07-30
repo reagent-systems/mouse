@@ -1074,6 +1074,45 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **A SWEEP for reachable gaps, and brotli fell to it immediately.** Six refusals had
+  been overturned one at a time, each found by accident — a package failing, or a
+  reason that looked wrong on a second read. So the finding method became a tool: call
+  every function export with no arguments in BOTH engines, classify the failure
+  ("refused" is distinguishable because every refusal here says "is not available"),
+  and diff. Anything WE refuse and node does not is a candidate reachable gap. It is
+  the instrument that would have caught all six.
+  It reported 32 across 29 modules on its first run, and the first one checked was
+  already false: **brotli**. The refusal said brotli "is not built into this device";
+  Apple's Compression framework has shipped `COMPRESSION_BROTLI` since **iOS 15**,
+  right beside LZFSE/LZ4/LZMA. `NodeBrotli.swift` drives it through
+  `compression_stream` for both the one-shot and incremental forms — decompression
+  needs the streaming shape anyway, since the output size is unknown up front.
+  Note the deliberate asymmetry with `zlib`, which stays on libz: GitCore needs exact
+  zlib-member framing that Compression's zlib mode does not expose. Brotli has no such
+  requirement, so the system framework is right there and wrong nowhere.
+  **zstd's half of that refusal stands** — Compression has zlib, LZFSE, LZ4, LZMA and
+  brotli, and no zstd — so it keeps refusing, now naming the framework it is absent
+  from. One refusal, two halves, opposite verdicts.
+  Verified on the property that actually matters: compressed BYTES need not match
+  node's (different encoder settings), so the proof is that **each engine reads what
+  the other writes**, both directions, plus a stream fed in 7-byte pieces — the case a
+  one-shot-behind-a-stream-API fake fails, because a partial brotli stream is not
+  decodable alone.
+  The sweep also found a bug in ITSELF, which is the useful kind: `generateKeyPairSync`
+  used refusal language ("is not available") for a MISSING ARGUMENT, so a no-argument
+  probe read a healthy function as unavailable. node raises ERR_INVALID_ARG_TYPE there
+  and now so does this. A refusal message is a contract; spending it on an argument
+  error makes the surface unreadable to exactly the tool that audits it.
+  **What the sweep says is left**, with reasons that survive: the bignum family
+  (`generatePrime`, `checkPrime`, `createDiffieHellman` and its group variants),
+  `privateEncrypt`/`publicDecrypt` (SecKey has no reversed forms),
+  `path.matchesGlob` (node contradicts itself), `moveMessagePortToContext` (shared
+  memory), and — the one genuinely reachable item now — the **`dns.resolve*` family**
+  (14 functions: resolve, resolveAny/Cname/Mx/Ns/Ptr/Soa/Srv/Txt/Caa/Naptr/Tlsa,
+  reverse, lookupService). Those were absent because `dns.lookup` uses getaddrinfo
+  while node's resolvers speak to a DNS SERVER through c-ares. **Real UDP exists here
+  now**, so a DNS client over the socket layer is buildable, and `reverse`/
+  `lookupService` need only getnameinfo. That is the next boundary.
 - **`crypto.diffieHellman` — a real constraint attached to the wrong function.** The
   refusal read "finite-field DH needs a bignum implementation", which is true and
   applies to `crypto.createDiffieHellman`. But `crypto.diffieHellman({privateKey,
