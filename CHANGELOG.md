@@ -7,6 +7,13 @@ carry breaking changes.
 
 ## [Unreleased]
 
+### Added
+- Node layer: `util.MIMEType` and `util.MIMEParams` — parsing, parameter get/set/delete,
+  iteration, and a `toString` that re-quotes values containing separators so a reassembled type
+  parses back the same way. Plus `util.parseEnv`, `util.getCallSites`, `util.diff`, and
+  `events.EventEmitterAsyncResource` with `kMaxEventTargetListeners`. All were named by the
+  module-surface audit and are documented API, not the node internals they sat beside.
+
 ### Fixed
 - Node layer: `zlib.BrotliCompress`/`BrotliDecompress` exist as classes, so `new
   zlib.BrotliCompress()` works rather than throwing — brotli had only the factory functions.
