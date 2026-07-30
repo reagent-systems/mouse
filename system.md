@@ -1074,6 +1074,24 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **`privateEncrypt`/`publicDecrypt` — the seventh refusal whose reason was half true.** It
+  said SecKey "encrypts with the public key and decrypts with the private one; the reversed
+  legacy forms have no API". True of SecKey's PADDED algorithms and false of its RAW ones:
+  `.rsaSignatureRaw` is a private-key modular exponentiation over caller-padded data, which is
+  precisely what `privateEncrypt` is, and `.rsaEncryptionRaw` with the public key is the other
+  half. A twenty-line probe settled it before any code was written.
+  What was actually missing was the PKCS#1 v1.5 **type 1 padding** — 0x00 0x01, 0xff filler,
+  0x00, message — which the padded algorithms do for you and the raw ones do not. That is the
+  whole gap. This is the legacy direction where the private key seals and anyone with the
+  public key opens: not secrecy, since the public key is public, but proof of origin, which is
+  what old licence-key and token schemes are built on.
+  Proven CROSS-ENGINE, which is the only proof that means anything here: our engine seals a
+  block and real node opens it, node seals one and our engine opens it. A block only one engine
+  can open would be a private convention rather than the format.
+  One divergence pinned with its reason: node reports garbage input as
+  `ERR_OSSL_RSA_BLOCK_TYPE_IS_NOT_01`, an OpenSSL-internal code with no equivalent here, so
+  ours says `ERR_CRYPTO_OPERATION_FAILED`. It still REFUSES — returning the raw block would
+  hand padding back as if it were data.
 - **Sweeps promoted to GATES — and the first one caught an error in my own record.** The
   sweeps that found this session's biggest bugs were one-shot investigations: they ran once,
   found things, and then sat permanently red in the runner. A sweep that found real bugs

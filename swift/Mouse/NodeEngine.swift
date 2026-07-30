@@ -1494,6 +1494,18 @@ final class NodeEngine: @unchecked Sendable {
         expose("rsaVerify", rsaVerify)
         expose("rsaEncrypt", rsaEncrypt)
         expose("rsaDecrypt", rsaDecrypt)
+        let rsaPrivateEncrypt: @convention(block) (String, String) -> Any = { pem, base64 in
+            guard let data = Data(base64Encoded: base64),
+                  let sealed = NodeKeys.privateEncrypt(pem: pem, data: data) else { return NSNull() }
+            return sealed.base64EncodedString()
+        }
+        let rsaPublicDecrypt: @convention(block) (String, String) -> Any = { pem, base64 in
+            guard let data = Data(base64Encoded: base64),
+                  let opened = NodeKeys.publicDecrypt(pem: pem, data: data) else { return NSNull() }
+            return opened.base64EncodedString()
+        }
+        expose("rsaPrivateEncrypt", rsaPrivateEncrypt)
+        expose("rsaPublicDecrypt", rsaPublicDecrypt)
         expose("rsaGenerate", rsaGenerate)
         // -- ECDH, on CryptoKit's key agreement ------------------------------------------
         // This refused for a while claiming it needed SecKey. It does not: CryptoKit does ECDH
@@ -10378,8 +10390,28 @@ final class NodeEngine: @unchecked Sendable {
           // The signing-with-the-private-key direction of raw RSA. SecKey exposes encryption
           // for the public key and decryption for the private one, which is the useful pair;
           // the reversed forms are legacy and stay honest about their absence.
-          privateEncrypt: refuseCrypto('privateEncrypt', 'SecKey encrypts with the public key and decrypts with the private one — use sign/verify for the private-key direction'),
-          publicDecrypt: refuseCrypto('publicDecrypt', 'SecKey decrypts with the private key only — use verify for the public-key direction'),
+          // The refusal here claimed SecKey has no reversed direction. True of its PADDED
+          // algorithms, false of the RAW ones: `.rsaSignatureRaw` is a private-key exponentiation
+          // over caller-padded data, which is what privateEncrypt is, and `.rsaEncryptionRaw`
+          // with the public key is the other half. Only the PKCS#1 type 1 padding was missing.
+          privateEncrypt: function(key, buffer) {
+            const sealed = bridge.rsaPrivateEncrypt(keyPem(key), __toBytes(buffer).toString('base64'));
+            if (sealed === null || sealed === undefined) {
+              throw Object.assign(new Error('privateEncrypt failed: the key must be RSA and the ' +
+                                            'data at most modulusLength - 11 bytes'),
+                                  { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+            }
+            return Buffer.from(String(sealed), 'base64');
+          },
+          publicDecrypt: function(key, buffer) {
+            const opened = bridge.rsaPublicDecrypt(keyPem(key), __toBytes(buffer).toString('base64'));
+            if (opened === null || opened === undefined) {
+              throw Object.assign(new Error('publicDecrypt failed: this is not a PKCS#1 type 1 ' +
+                                            'block sealed with the matching private key'),
+                                  { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+            }
+            return Buffer.from(String(opened), 'base64');
+          },
           scrypt: function(password, salt, keylen, options, callback) {
             if (typeof options === 'function') { callback = options; options = undefined; }
             // Parameter validation is SYNCHRONOUS in node even in the async form — bad params

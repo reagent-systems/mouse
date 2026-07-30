@@ -8,6 +8,9 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `crypto.privateEncrypt`/`publicDecrypt` work — the legacy direction where the
+  private key seals and the public key opens. SecKey's RAW algorithms do it; only the PKCS#1
+  type 1 padding was missing. Verified cross-engine against real node in both directions.
 - Node layer: `for await (const chunk of process.stdin)` works — stdin had no async
   iterator, so the standard way to read piped input threw. Piped stdin now emits `'end'`
   when there is no more input, as node's does; `process.stdin` gained `push` and the stream

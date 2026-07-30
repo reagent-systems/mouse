@@ -218,6 +218,44 @@ enum NodeKeys {
                 pem(spki(from: publicBody), label: "PUBLIC KEY"))
     }
 
+    /// `crypto.privateEncrypt` — the LEGACY direction, where the private key seals and anyone
+    /// with the public key can open it. Not secrecy (the public key is public); it is how old
+    /// licence-key and token schemes prove origin.
+    ///
+    /// The refusal here said SecKey "encrypts with the public key and decrypts with the private
+    /// one; the reversed legacy forms have no API". The first half is true of the PADDED
+    /// algorithms and false of the RAW ones: `.rsaSignatureRaw` is a private-key modular
+    /// exponentiation over caller-padded data, which is exactly this operation. The padding is
+    /// PKCS#1 v1.5 type 1 — 0x00 0x01, 0xff filler, 0x00, then the message — and doing it here is
+    /// the whole of what was missing.
+    static func privateEncrypt(pem: String, data: Data) -> Data? {
+        guard let key = secKey(pem: pem, isPrivate: true),
+              SecKeyIsAlgorithmSupported(key, .sign, .rsaSignatureRaw) else { return nil }
+        let size = SecKeyGetBlockSize(key)
+        // 11 bytes is the minimum PKCS#1 overhead: two prefix bytes, eight filler, one separator.
+        guard data.count <= size - 11 else { return nil }
+        var padded = Data([0x00, 0x01])
+        padded.append(Data(repeating: 0xff, count: size - data.count - 3))
+        padded.append(0x00)
+        padded.append(data)
+        return SecKeyCreateSignature(key, .rsaSignatureRaw, padded as CFData, nil) as Data?
+    }
+
+    /// `crypto.publicDecrypt` — the other half: a raw public-key exponentiation, then strip the
+    /// type 1 padding back off.
+    static func publicDecrypt(pem: String, data: Data) -> Data? {
+        guard let key = verificationKey(pem: pem),
+              SecKeyIsAlgorithmSupported(key, .encrypt, .rsaEncryptionRaw) else { return nil }
+        guard let opened = SecKeyCreateEncryptedData(key, .rsaEncryptionRaw, data as CFData, nil) as Data?
+        else { return nil }
+        let bytes = [UInt8](opened)
+        // 0x00 0x01, filler, 0x00, message. A missing separator means this was not type 1 —
+        // returning the raw block instead would hand back padding as if it were data.
+        guard bytes.count > 2, bytes[0] == 0x00, bytes[1] == 0x01 else { return nil }
+        guard let separator = bytes.dropFirst(2).firstIndex(of: 0x00) else { return nil }
+        return Data(bytes[(separator + 1)...])
+    }
+
     /// Bits in the modulus, for `asymmetricKeyDetails`.
     static func modulusLength(pem: String) -> Int {
         guard let key = secKey(pem: pem, isPrivate: true) ?? verificationKey(pem: pem) else { return 0 }
