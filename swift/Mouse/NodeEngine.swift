@@ -2549,13 +2549,41 @@ final class NodeEngine: @unchecked Sendable {
       class Buffer extends Uint8Array {
         static from(value, encoding, length) {
           if (typeof value === 'string') {
-            if (encoding === 'base64') return new Buffer(b64Decode(value));
-            if (encoding === 'hex') {
+            const named = encoding === undefined || encoding === null ? undefined
+                                                                     : String(encoding).toLowerCase();
+            if (named === 'base64') return new Buffer(b64Decode(value));
+            // base64url was not supported AT ALL: the string was read as UTF-8, so
+            // Buffer.from(token, 'base64url') silently produced the token's own bytes. JWTs are
+            // made of base64url, which is how quietly wrong this could get.
+            if (named === 'base64url') {
+              return new Buffer(b64Decode(String(value).replace(/-/g, '+').replace(/_/g, '/')));
+            }
+            // utf16le/ucs2 were ignored too, so a UTF-16 encode produced UTF-8 bytes.
+            if (named === 'utf16le' || named === 'utf-16le' || named === 'ucs2' || named === 'ucs-2') {
+              const text = String(value);
+              const bytes = new Uint8Array(text.length * 2);
+              for (let i = 0; i < text.length; i++) {
+                const unit = text.charCodeAt(i);
+                bytes[i * 2] = unit & 0xff;
+                bytes[i * 2 + 1] = (unit >> 8) & 0xff;
+              }
+              return new Buffer(bytes);
+            }
+            // node's `ascii` is ASYMMETRIC, which is easy to get wrong in the tidy direction:
+            // ENCODING masks to 0xff (so it behaves like latin1 — 'é' becomes 0xe9), while
+            // DECODING masks to 0x7f. Verified against node rather than assumed symmetric.
+            if (named === 'ascii') {
+              const text = String(value);
+              const bytes = new Uint8Array(text.length);
+              for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
+              return new Buffer(bytes);
+            }
+            if (named === 'hex') {
               const bytes = [];
               for (let i = 0; i < value.length; i += 2) bytes.push(parseInt(value.substr(i, 2), 16));
               return new Buffer(bytes);
             }
-            if (encoding === 'latin1' || encoding === 'binary') {
+            if (named === 'latin1' || named === 'binary') {
               const bytes = new Uint8Array(value.length);
               for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff;
               return new Buffer(bytes);
@@ -2600,9 +2628,27 @@ final class NodeEngine: @unchecked Sendable {
           const from = start === undefined ? 0 : Math.max(0, start | 0);
           const to = end === undefined ? this.length : Math.min(this.length, end | 0);
           const bytes = Array.prototype.slice.call(this, from, to);
-          if (encoding === 'base64') return b64Encode(bytes);
-          if (encoding === 'hex') return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
-          if (encoding === 'latin1' || encoding === 'binary') {
+          const named = encoding === undefined || encoding === null ? undefined
+                                                                   : String(encoding).toLowerCase();
+          if (named === 'base64') return b64Encode(bytes);
+          // base64url: -_ instead of +/, and no padding.
+          if (named === 'base64url') {
+            return b64Encode(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+          }
+          if (named === 'utf16le' || named === 'utf-16le' || named === 'ucs2' || named === 'ucs-2') {
+            let out = '';
+            for (let i = 0; i + 1 < bytes.length; i += 2) {
+              out += String.fromCharCode(bytes[i] | (bytes[i + 1] << 8));
+            }
+            return out;
+          }
+          if (named === 'ascii') {
+            let out = '';
+            for (const byte of bytes) out += String.fromCharCode(byte & 0x7f);
+            return out;
+          }
+          if (named === 'hex') return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+          if (named === 'latin1' || named === 'binary') {
             let out = '';
             for (let i = 0; i < bytes.length; i += 8192) out += String.fromCharCode.apply(null, bytes.slice(i, i + 8192));
             return out;
@@ -5631,8 +5677,45 @@ final class NodeEngine: @unchecked Sendable {
           }
           this.encoding = name === 'utf-8' ? 'utf8' : name;
         }
-        StringDecoder.prototype.write = function(buffer) { return buffer.toString(this.encoding); };
-        StringDecoder.prototype.end = function(buffer) { return buffer ? buffer.toString(this.encoding) : ''; };
+        // Holding an incomplete character across writes is the ONE thing a StringDecoder is for,
+        // and this had none of it: `write` was a bare toString, so a multi-byte character split
+        // across chunks decoded to replacement characters. Same defect TextDecoder had, in the
+        // module whose entire purpose is to not have it.
+        StringDecoder.prototype.write = function(buffer) {
+          if (!buffer || !buffer.length) return '';
+          let bytes = Buffer.from(buffer);
+          if (this._carry && this._carry.length) {
+            bytes = Buffer.concat([this._carry, bytes]);
+            this._carry = null;
+          }
+          let hold = 0;
+          if (this.encoding === 'utf8') {
+            hold = incompleteTailLength(bytes);
+          } else if (this.encoding === 'utf16le' || this.encoding === 'ucs2' || this.encoding === 'ucs-2') {
+            // An odd trailing byte is half a code unit; a trailing HIGH surrogate is half a
+            // character and has to wait for its pair.
+            hold = bytes.length % 2;
+            const usable = bytes.length - hold;
+            if (usable >= 2) {
+              const lastUnit = bytes[usable - 2] | (bytes[usable - 1] << 8);
+              if (lastUnit >= 0xD800 && lastUnit <= 0xDBFF) hold += 2;
+            }
+          } else if (this.encoding === 'base64' || this.encoding === 'base64url') {
+            hold = bytes.length % 3;         // base64 works in groups of three bytes
+          }
+          if (hold > 0) {
+            this._carry = bytes.slice(bytes.length - hold);
+            bytes = bytes.slice(0, bytes.length - hold);
+          }
+          return bytes.length ? bytes.toString(this.encoding) : '';
+        };
+        StringDecoder.prototype.end = function(buffer) {
+          // Whatever is left is emitted as-is: at the end there is no more input to complete it.
+          let tail = this._carry || Buffer.alloc(0);
+          if (buffer && buffer.length) tail = Buffer.concat([tail, Buffer.from(buffer)]);
+          this._carry = null;
+          return tail.length ? tail.toString(this.encoding) : '';
+        };
         return { StringDecoder };
       };
 

@@ -465,6 +465,12 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A passing real-package proof can hide a missing primitive.** jsonwebtoken worked while
+  `base64url` did not exist, because the library swaps the alphabet itself. A package proof
+  says the package works, not that the API underneath it does — sweep the primitive
+  separately.
+- **Do not tidy an asymmetry you have not measured.** node's `ascii` masks 0xff when encoding
+  and 0x7f when decoding. Making both the same is the plausible-looking mistake.
 - **Audit event SEQUENCES, not just event presence.** Record the ordered list of events for
   each lifecycle and diff it against the reference. A missing event is a hang (a failed read
   stream with no 'close'; a keep-alive request whose 'close' was tied to the socket), and an

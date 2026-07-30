@@ -1074,6 +1074,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The encoding audit — and `base64url` that was never implemented.** A wrong encoding
+  produces wrong bytes or wrong text SILENTLY, which is the same shape as the range read that
+  returned the whole file. Thirty checks: every named encoding across `Buffer.from`,
+  `Buffer.toString`, fs read/write, `StringDecoder` and stream `setEncoding`. Twelve wrong,
+  in four defects:
+  1. **`base64url` was not supported at all.** `Buffer.from(token, 'base64url')` fell through
+     to UTF-8 and returned the TOKEN'S OWN BYTES, and `toString('base64url')` produced
+     replacement characters. JWTs are made of base64url — the jsonwebtoken harness passes
+     because that library does its own alphabet swap, which is exactly how a gap this size
+     stays invisible.
+  2. **`utf16le`/`ucs2` were ignored by `Buffer.from`**, so a UTF-16 encode produced UTF-8
+     bytes. Wrong data, no error.
+  3. **`ascii` was not masked at all**, and node's `ascii` is ASYMMETRIC: encoding masks to
+     0xff (behaving like latin1, so 'é' becomes 0xe9) while decoding masks to 0x7f. Getting
+     this "tidy" — the same mask both ways — is wrong in the direction that looks right.
+  4. **`StringDecoder` held no state**, just a bare `toString` per chunk, so a character split
+     across writes decoded to replacement characters. That is in the module whose ENTIRE
+     PURPOSE is to hold a split character. It now holds an incomplete UTF-8 tail, an odd
+     UTF-16 byte, a lone high surrogate, and a partial base64 group.
+  Buffer encodings are load-bearing for everything, so every harness re-ran: 93 fixtures,
+  pkg, webpack (byte-identical), esbuild-wasm, express, ws, http, jsonwebtoken and tsc --watch.
 - **The event-sequence audit: two events that never fired.** Real code WAITS on events, so
   one that never fires is a hang and one that fires twice is a double-free — and ordering
   matters as much as presence. Nine lifecycles recorded as ordered lists and diffed against

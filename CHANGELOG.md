@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `base64url` works — it was not implemented at all, so
+  `Buffer.from(token, 'base64url')` returned the token's own bytes. Also fixed:
+  `utf16le`/`ucs2` ignored by `Buffer.from`, `ascii` not masked (and asymmetric in node —
+  0xff encoding, 0x7f decoding), and `StringDecoder` holding no state, so a character split
+  across writes became replacement characters.
 - Node layer: two events that never fired now do. A failed `fs.createReadStream` emits
   `'close'` after `'error'`, and a `ClientRequest` emits `'close'` when its response ends —
   it had been tied to the socket closing, which keep-alive outlives.
