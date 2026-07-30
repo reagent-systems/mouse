@@ -465,6 +465,11 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Two paths to the same data will diverge; test both.** `Readable`'s `'data'` path was
+  binary-correct while `read()` corrupted anything non-UTF-8, for as long as no fixture
+  read binary through `read()`. Where an API offers two ways to get the same bytes
+  (events vs pull, sync vs async, stream vs one-shot), a fixture for one proves nothing
+  about the other.
 - **Delete the OUTPUT file too, not just the binary.** A failed build leaves the old
   executable AND the old results file. Reading a stale `s.txt` produced a confident
   "81 fixtures ALL PASS" for a build that had just failed. `rm` both before a run you

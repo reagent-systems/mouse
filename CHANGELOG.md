@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `crypto`'s `Hash`, `Hmac` and `Cipher` are real Transform streams, so
+  `fs.createReadStream(f).pipe(hash)` works. A spent hash now reports
+  ERR_CRYPTO_HASH_FINALIZED instead of digesting twice.
+- Node layer: `Readable.read()` is binary-safe. It decoded each chunk as UTF-8 into a
+  string and re-encoded — lossy for any non-text data — and ignored which encoding
+  `setEncoding` requested. The 'data' path was always correct, so only `read()` callers
+  were affected.
 - Node layer: Buffer gained 35 missing documented methods — `writeFloatBE/LE` and
   `writeInt16BE/LE` (whose readers were already present), signed `BigInt64`, the
   variable-width integer family over 1..6 bytes, `swap16/32/64`, node's lowercase

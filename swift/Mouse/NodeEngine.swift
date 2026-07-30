@@ -5518,10 +5518,20 @@ final class NodeEngine: @unchecked Sendable {
           read: function(size) {
             if (!this._buf.length) { if (!this._sawEOF) this._read(size || 16384); if (!this._buf.length) { this._maybeEnd(); return null; } }
             if (this._objectMode) return this._buf.shift();
-            let out = this._buf.map(c => typeof c === 'string' ? c : Buffer.from(c).toString()).join('');
+            // Concatenate as BYTES. This used to decode each chunk as UTF-8 into a string, join,
+            // and re-encode — which corrupts anything that is not UTF-8 text (a digest, a gzip
+            // member, an image) and ignored WHICH encoding setEncoding had asked for, so
+            // setEncoding('hex') returned mojibake. The 'data' path was always correct via
+            // _coerce; only read() was wrong, which is why it survived until a hash was piped.
+            const joined = Buffer.concat(this._buf.map(function(chunk) {
+              return typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk);
+            }));
             this._buf = [];
             this._maybeEnd();
-            return this._readableEncoding ? out : Buffer.from(out);
+            if (this._readableEncoding && this._readableEncoding !== 'buffer') {
+              return joined.toString(this._readableEncoding);
+            }
+            return joined;
           },
           resume: function() { if (!this._flowing) { this._flowing = true; this._everFlowed = true; this._drain(); } return this; },
           pause: function() { this._flowing = false; return this; },
@@ -8728,24 +8738,78 @@ final class NodeEngine: @unchecked Sendable {
           const buffer = Buffer.from(base64, 'base64');
           return encoding ? buffer.toString(encoding) : buffer;
         }
-        class Hash {
-          constructor(algorithm) { this._algorithm = String(algorithm).toLowerCase().replace('-', ''); this._chunks = []; }
-          update(data, encoding) { this._chunks.push(toBuf(data, encoding)); return this; }
-          copy() { const twin = new Hash(this._algorithm); twin._chunks = this._chunks.slice(); return twin; }
+        // A Hash IS a Transform in node, and that is not decoration: `fs.createReadStream(f)
+        // .pipe(hash)` is the ordinary way to hash a file, and it could not work while these were
+        // plain objects. Write side accumulates, flush pushes the digest — so both APIs, the
+        // classic update()/digest() and the stream, work on the same object as node's do.
+        const CryptoTransform = coreRequire('stream').Transform;
+
+        function finalizedError() {
+          return Object.assign(new Error('Digest already called'),
+                               { code: 'ERR_CRYPTO_HASH_FINALIZED' });
+        }
+
+        class Hash extends CryptoTransform {
+          constructor(algorithm, options) {
+            super(options);
+            this._algorithm = String(algorithm).toLowerCase().replace('-', '');
+            this._chunks = [];
+            this._finalized = false;
+          }
+          update(data, encoding) {
+            // node reports a reused hash rather than quietly producing a second digest.
+            if (this._finalized) throw finalizedError();
+            this._chunks.push(toBuf(data, encoding));
+            return this;
+          }
+          copy() {
+            const twin = new Hash(this._algorithm);
+            twin._chunks = this._chunks.slice();
+            return twin;
+          }
           digest(encoding) {
-            return finishDigest(bridge.cryptoHash(this._algorithm, Buffer.concat(this._chunks).toString('base64')), encoding);
+            if (this._finalized) throw finalizedError();
+            this._finalized = true;
+            return finishDigest(bridge.cryptoHash(this._algorithm,
+                                                  Buffer.concat(this._chunks).toString('base64')),
+                                encoding);
+          }
+          _transform(chunk, encoding, callback) {
+            try { this._chunks.push(toBuf(chunk, encoding)); callback(); }
+            catch (error) { callback(error); }
+          }
+          _flush(callback) {
+            try { this.push(this.digest()); callback(); }
+            catch (error) { callback(error); }
           }
         }
-        class Hmac {
-          constructor(algorithm, key) {
+        class Hmac extends CryptoTransform {
+          constructor(algorithm, key, options) {
+            super(options);
             this._algorithm = String(algorithm).toLowerCase().replace('-', '');
             this._key = toBuf(key);
             this._chunks = [];
+            this._finalized = false;
           }
-          update(data, encoding) { this._chunks.push(toBuf(data, encoding)); return this; }
+          update(data, encoding) {
+            if (this._finalized) throw finalizedError();
+            this._chunks.push(toBuf(data, encoding));
+            return this;
+          }
           digest(encoding) {
+            if (this._finalized) throw finalizedError();
+            this._finalized = true;
             return finishDigest(bridge.cryptoHmac(this._algorithm, this._key.toString('base64'),
-                                                  Buffer.concat(this._chunks).toString('base64')), encoding);
+                                                  Buffer.concat(this._chunks).toString('base64')),
+                                encoding);
+          }
+          _transform(chunk, encoding, callback) {
+            try { this._chunks.push(toBuf(chunk, encoding)); callback(); }
+            catch (error) { callback(error); }
+          }
+          _flush(callback) {
+            try { this.push(this.digest()); callback(); }
+            catch (error) { callback(error); }
           }
         }
         // ---- ciphers, KDFs and key objects ----------------------------------------------
@@ -8776,6 +8840,10 @@ final class NodeEngine: @unchecked Sendable {
         }
 
         function Cipher(algorithm, key, iv, options) {
+          // A Cipher is a Transform in node, so `readable.pipe(cipher).pipe(file)` works. The
+          // bytes still appear at final() rather than per chunk, which is the honest shape for an
+          // AEAD (the tag does not exist until the last byte is in) and produces the same output.
+          CryptoTransform.call(this, options);
           this._algorithm = String(algorithm).toLowerCase();
           if (cipherNames.indexOf(this._algorithm) < 0) throw unsupportedCipher(algorithm);
           this._key = keyBytes(key);
@@ -8786,6 +8854,19 @@ final class NodeEngine: @unchecked Sendable {
           this._done = false;
           this._autoPad = true;
         }
+        Cipher.prototype = Object.create(CryptoTransform.prototype);
+        Cipher.prototype.constructor = Cipher;
+        Cipher.prototype._transform = function(chunk, encoding, callback) {
+          try { this.update(chunk, encoding); callback(); }
+          catch (error) { callback(error); }
+        };
+        Cipher.prototype._flush = function(callback) {
+          try {
+            const out = this.final();
+            if (out && out.length) this.push(out);
+            callback();
+          } catch (error) { callback(error); }
+        };
         Cipher.prototype.setAAD = function(aad) {
           this._aad = keyBytes(aad);
           return this;

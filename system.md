@@ -1074,6 +1074,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **Hash/Hmac/Cipher are streams now — and making them streams uncovered a worse bug
+  underneath.** Top of the shape sweep's list: in node these are Transforms, so
+  `fs.createReadStream(f).pipe(hash)` is the ordinary way to hash a file, and it could
+  not work while they were plain objects. Both APIs live on the same object as node's
+  do: the classic `update()`/`digest()`, and the stream. A spent hash now reports
+  `ERR_CRYPTO_HASH_FINALIZED` instead of quietly digesting twice. A Cipher is a
+  Transform too, so `readable.pipe(cipher)` works; its bytes still appear at `final()`
+  rather than per chunk, which is the honest shape for an AEAD and yields the same output.
+  Then piping a digest through failed, and the cause was not in crypto:
+  **`Readable.read()` decoded every chunk as UTF-8 into a string, joined them, and
+  re-encoded.** That is lossy for anything which is not UTF-8 text — a digest, a gzip
+  member, an image — and it ignored WHICH encoding `setEncoding` had asked for, so
+  `setEncoding('hex')` returned mojibake. `read()` now concatenates as bytes and applies
+  the requested encoding at the end.
+  The reason it survived this long is worth recording: the `'data'` path was always
+  correct (it goes through `_coerce`), so only code calling `read()` was affected, and
+  nothing in the suite called `read()` on binary data until a hash went through it. A
+  fixture now pins it directly — all 256 byte values pushed in two chunks and read back
+  intact, plus `setEncoding('hex')` on a raw buffer.
+  Because `read()` is load-bearing for everything, every stream-dependent harness was
+  re-run: the suite, http, express, ws, webpack (still byte-identical), esbuild-wasm,
+  spawn, fork and tsc --watch. All still match real node.
 - **A second sweep, over instance SHAPES — and Buffer was missing documented methods.**
   The export sweep called functions; it cannot see an object. That blind spot is where
   two of this engine's worst bugs lived: Buffer's statics were non-enumerable (express
