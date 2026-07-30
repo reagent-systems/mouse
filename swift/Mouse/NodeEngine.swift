@@ -877,6 +877,9 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [id, "connection", ["id": socket, "local": plain(local), "remote": plain(remote)]])
                 case let .data(bytes):
                     carried.value.call(withArguments: [id, "data", bytes.base64EncodedString()])
+                case let .datagram(bytes, from):
+                    carried.value.call(withArguments: [id, "datagram", ["data": bytes.base64EncodedString(),
+                                                                        "from": plain(from)]])
                 case .end:
                     carried.value.call(withArguments: [id, "end", NSNull()])
                 case .drain:
@@ -925,6 +928,26 @@ final class NodeEngine: @unchecked Sendable {
                 carried.value.call(withArguments: [list, code ?? ""])
             }
         }
+        // -- UDP ---------------------------------------------------------------------------
+        // The refusal here used to say "not available yet", which promised nothing. The socket
+        // layer is POSIX, so a datagram table is the same machinery with SOCK_DGRAM and
+        // recvfrom — every packet whole, with its sender.
+        let dgramBind: @convention(block) (String, Int32, Bool, JSValue) -> Int32 = { [weak self] host, port, broadcast, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.bindDatagram(host: host, port: Int(port), broadcast: broadcast,
+                                              handler: dispatcher(callback)))
+        }
+        let dgramSend: @convention(block) (Int32, String, String, Int32, JSValue) -> Void = {
+            [weak self] id, base64, host, port, callback in
+            guard let self, let data = Data(base64Encoded: base64) else { return }
+            let carried = Carried(callback)
+            sockets.sendDatagram(id: Int(id), data: data, host: host, port: Int(port)) { code in
+                carried.value.call(withArguments: [code ?? ""])
+            }
+        }
+        expose("dgramBind", dgramBind)
+        expose("dgramSend", dgramSend)
         expose("netResolve", netResolve)
 
         // -- fs.watch: kqueue through WatchTable -------------------------------------------
@@ -7179,15 +7202,117 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.dgram = function() {
-        // "not available yet" said nothing useful. UDP is genuinely reachable — the socket
-        // layer is POSIX, and SOCK_DGRAM is a flag away — but it is a datagram API of its own
-        // (bind, send-to, receive-from, multicast joins), not a mode of the stream table.
+        // UDP, on the datagram table the socket layer grew. The refusal here used to say
+        // "not available yet"; it is available now, and a datagram is genuinely simpler than a
+        // stream — every packet arrives whole, with its sender, and nothing needs reassembling.
+        const EventEmitter = coreRequire('events');
+        function Socket(options) {
+          EventEmitter.call(this);
+          options = options || {};
+          this._type = typeof options === 'string' ? options : (options.type || 'udp4');
+          this._broadcast = false;
+          this._id = 0;
+          this._bound = null;
+        }
+        Socket.prototype = Object.create(EventEmitter.prototype);
+        Socket.prototype.constructor = Socket;
+        Socket.prototype.bind = function(port, address, callback) {
+          if (typeof port === 'function') { callback = port; port = 0; address = undefined; }
+          else if (typeof port === 'object' && port !== null) {
+            const options = port;
+            callback = typeof address === 'function' ? address : callback;
+            address = options.address;
+            port = options.port || 0;
+          }
+          if (typeof address === 'function') { callback = address; address = undefined; }
+          const self = this;
+          if (callback) this.once('listening', callback);
+          this._id = bridge.dgramBind(String(address || (this._type === 'udp6' ? '::' : '0.0.0.0')),
+                                      Number(port) || 0, this._broadcast, function(id, event, payload) {
+            if (event === 'listening') {
+              self._bound = { address: payload.address, family: payload.family, port: payload.port };
+              self.emit('listening');
+              return;
+            }
+            if (event === 'datagram') {
+              const bytes = Buffer.from(payload.data, 'base64');
+              // node's rinfo: where it came from and how big it was.
+              self.emit('message', bytes, { address: payload.from.address, family: payload.from.family,
+                                            port: payload.from.port, size: bytes.length });
+              return;
+            }
+            if (event === 'error') {
+              self.emit('error', Object.assign(new Error(payload.message), { code: payload.code }));
+              return;
+            }
+            if (event === 'close') self.emit('close');
+          });
+          return this;
+        };
+        Socket.prototype.send = function(message, offset, length, port, address, callback) {
+          // node's overloads: (msg, port[, address][, cb]) and (msg, offset, length, port[, address][, cb]).
+          let bytes;
+          if (typeof offset === 'number' && typeof length === 'number') {
+            bytes = __toBytes(message).slice(offset, offset + length);
+          } else {
+            bytes = Array.isArray(message)
+              ? Buffer.concat(message.map(function(part){ return __toBytes(part); }))
+              : __toBytes(message);
+            callback = typeof address === 'function' ? address : (typeof port === 'function' ? port : callback);
+            address = typeof length === 'string' ? length : undefined;
+            port = offset;
+          }
+          if (typeof address === 'function') { callback = address; address = undefined; }
+          const self = this;
+          const deliver = function() {
+            bridge.dgramSend(self._id, bytes.toString('base64'),
+                             String(address || '127.0.0.1'), Number(port) || 0, function(code) {
+              if (code) {
+                const error = Object.assign(new Error('send ' + code), { code: code });
+                if (callback) callback(error); else self.emit('error', error);
+                return;
+              }
+              if (callback) callback(null, bytes.length);
+            });
+          };
+          // node binds implicitly on the first send; so does this.
+          if (!this._id) this.bind(0, undefined, deliver); else deliver();
+          return this;
+        };
+        Socket.prototype.address = function() {
+          if (!this._bound) {
+            throw Object.assign(new Error('bind() first: an unbound socket has no address'), { code: 'ERR_SOCKET_DGRAM_NOT_RUNNING' });
+          }
+          return this._bound;
+        };
+        Socket.prototype.close = function(callback) {
+          if (callback) this.once('close', callback);
+          if (this._id) { bridge.netDestroy(this._id); this._id = 0; }
+          const self = this;
+          process.nextTick(function(){ self.emit('close'); });
+          return this;
+        };
+        Socket.prototype.setBroadcast = function(on) { this._broadcast = !!on; return this; };
+        Socket.prototype.ref = function(){ if (this._id) bridge.netRef(this._id, true); return this; };
+        Socket.prototype.unref = function(){ if (this._id) bridge.netRef(this._id, false); return this; };
+        Socket.prototype.setTTL = function(){ return this; };
+        Socket.prototype.setMulticastTTL = function(){ return this; };
+        Socket.prototype.setMulticastLoopback = function(){ return this; };
+        // Multicast needs IP_ADD_MEMBERSHIP on the fd, which the datagram table does not expose
+        // yet — unicast UDP is what is real.
+        Socket.prototype.addMembership = function() {
+          throw Object.assign(new Error('dgram.addMembership is not available: multicast needs IP_ADD_MEMBERSHIP on the socket, which the datagram table does not expose — unicast UDP works'),
+                              { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+        };
+        Socket.prototype.dropMembership = Socket.prototype.addMembership;
         return {
-          createSocket: function() {
-            throw Object.assign(new Error('dgram.createSocket is not available: the socket layer is stream-only (SOCK_STREAM). UDP needs a datagram table of its own — bind, send-to, receive-from, multicast — which is reachable here, just not built'),
-                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          createSocket: function(options, listener) {
+            const socket = new Socket(options);
+            if (typeof options === 'object' && options && typeof options.recvBufferSize === 'number') { /* advisory */ }
+            if (typeof listener === 'function') socket.on('message', listener);
+            return socket;
           },
-          Socket: function(){ throw new Error('dgram.Socket is not available: see dgram.createSocket'); },
+          Socket: Socket,
         };
       };
       coreFactories.diagnostics_channel = function() {

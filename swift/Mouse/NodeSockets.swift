@@ -35,6 +35,8 @@ final class SocketTable: @unchecked Sendable {
         /// A server accepted someone: the connection is already a live socket in the table.
         case connection(id: Int, local: Address, remote: Address)
         case data(Data)
+        /// A datagram and where it came from — UDP has no connection to hang it on.
+        case datagram(Data, from: Address)
         /// The peer half-closed (FIN): no more data will arrive, we may still write.
         case end
         /// The write queue emptied after a `write` reported backpressure.
@@ -87,6 +89,8 @@ final class SocketTable: @unchecked Sendable {
         /// We sent FIN. Together with `readEOF` this is what retires the fd.
         var writeShutdown = false
         var paused = false
+        /// UDP: no connection, no half-close, and `destroy` is the only way it ends.
+        var isDatagram = false
         /// The handshake hasn't settled: `write()` may queue bytes, but sending them now
         /// would be ENOTCONN. `finishConnect` flushes whatever accumulated.
         var connecting = false
@@ -313,6 +317,117 @@ final class SocketTable: @unchecked Sendable {
             emit(entry, .listening(entry.local))
         }
         return id
+    }
+
+    // MARK: - Datagrams
+
+    /// Bind a UDP socket. Port 0 means "any", and the assigned one comes back in `.listening`,
+    /// exactly as for a listener — that is how a program learns its own port.
+    func bindDatagram(host: String, port: Int, broadcast: Bool, handler: @escaping Handler) -> Int {
+        let id = claimID()
+        retain()
+        queue.sync { [self] in
+            var hints = addrinfo(ai_flags: AI_PASSIVE, ai_family: AF_UNSPEC, ai_socktype: SOCK_DGRAM,
+                                 ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
+                                 ai_addr: nil, ai_next: nil)
+            var list: UnsafeMutablePointer<addrinfo>?
+            let name = host.isEmpty ? "0.0.0.0" : host
+            guard getaddrinfo(name, String(port), &hints, &list) == 0, let first = list else {
+                fail(id: id, handler: handler, message: "getaddrinfo \(name)", code: "EADDRNOTAVAIL")
+                return
+            }
+            defer { freeaddrinfo(list) }
+            let fd = socket(first.pointee.ai_family, SOCK_DGRAM, 0)
+            guard fd >= 0 else {
+                fail(id: id, handler: handler, message: "socket failed", code: errnoCode())
+                return
+            }
+            var one: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+            if broadcast {
+                setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, socklen_t(MemoryLayout<Int32>.size))
+            }
+            guard bind(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0 else {
+                let code = errnoCode()
+                close(fd)
+                fail(id: id, handler: handler, message: "bind \(code) \(name):\(port)", code: code)
+                return
+            }
+            setNonBlocking(fd)
+            let entry = Entry(id: id, fd: fd, handler: handler)
+            entry.isDatagram = true
+            entry.local = localAddress(fd)
+            entries[id] = entry
+            startReceiving(entry)
+            emit(entry, .listening(entry.local))
+        }
+        return id
+    }
+
+    /// Send one datagram. Resolution happens on the resolver queue like every other name.
+    func sendDatagram(id: Int, data: Data, host: String, port: Int,
+                      completion: @escaping @Sendable (String?) -> Void) {
+        resolvers.async { [self] in
+            var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_DGRAM,
+                                 ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
+                                 ai_addr: nil, ai_next: nil)
+            var list: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(host, String(port), &hints, &list) == 0, let first = list else {
+                deliver { completion("ENOTFOUND") }
+                return
+            }
+            var target = sockaddr_storage()
+            memcpy(&target, first.pointee.ai_addr, Int(first.pointee.ai_addrlen))
+            let length = first.pointee.ai_addrlen
+            freeaddrinfo(list)
+            let resolved = target      // a value for the hop, not a mutable var
+            queue.async {
+                guard let entry = self.entries[id], !entry.closed else {
+                    self.deliver { completion("EBADF") }
+                    return
+                }
+                var address = resolved
+                let sent = data.withUnsafeBytes { raw -> Int in
+                    withUnsafePointer(to: &address) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { destination in
+                            sendto(entry.fd, raw.baseAddress, raw.count, 0, destination, length)
+                        }
+                    }
+                }
+                let code = sent < 0 ? self.errnoCode() : nil
+                self.deliver { completion(code) }
+            }
+        }
+    }
+
+    private func startReceiving(_ entry: Entry) {
+        let source = DispatchSource.makeReadSource(fileDescriptor: entry.fd, queue: queue)
+        source.setEventHandler { [weak self, weak entry] in
+            guard let self, let entry, !entry.closed else { return }
+            var buffer = [UInt8](repeating: 0, count: 65536)
+            while true {
+                var storage = sockaddr_storage()
+                var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                let count = withUnsafeMutablePointer(to: &storage) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { from in
+                        recvfrom(entry.fd, &buffer, buffer.count, 0, from, &length)
+                    }
+                }
+                if count > 0 {
+                    // A datagram is delivered whole, with its sender: there is no stream to
+                    // reassemble and no partial read to buffer.
+                    self.emit(entry, .datagram(Data(buffer[0..<count]), from: self.describe(storage)))
+                    continue
+                }
+                if count < 0, errno == EAGAIN || errno == EWOULDBLOCK { return }
+                if count < 0, errno == EINTR { continue }
+                let code = self.errnoCode()
+                self.emit(entry, .error(message: "recvfrom \(code)", code: code))
+                return
+            }
+        }
+        entry.readSource = source
+        source.resume()
     }
 
     // MARK: - Write side

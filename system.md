@@ -109,6 +109,7 @@ so a TUI navigates and edits.
 | **Phase G — `worker_threads`** | `Worker`, `workerData`, `parentPort`, `postMessage` both ways, `terminate`, worker stdio, and an in-thread `MessageChannel` — on the child-engine machinery, matching node's transcript exactly. What cannot work is SHARED MEMORY between two JSContexts, so `receiveMessageOnPort`, the environment-data pair and `BroadcastChannel` refuse BY NAME rather than deadlocking an Atomics wait that never wakes |
 | **Phase G — real ECDH** | `createECDH` for P-256/384/521 and X25519 on CryptoKit's key agreement. It had been refusing with "needs SecKey", which was simply wrong — and node's public-key encoding (the uncompressed point `0x04‖X‖Y`) IS CryptoKit's `x963Representation`, so the wire format needed no conversion at all. Verified the only way a key agreement can be: **both engines derive the same shared secret** from each other's public keys, on every curve |
 | **Phase G — audit the refusals for truth** | Every "not available" message in the engine re-read against what the engine can now do. One had gone stale into a FALSEHOOD (`cluster`: "single process" — we have live children), two blamed capabilities that have since shipped (http2 blamed missing HTTP support and "the dev-server engine is on the roadmap"), and five gave no reason at all. All corrected, and a fixture now asserts the SHAPE: every refusal names a reason, and none claims something the engine can do |
+| **Phase G — UDP** | `dgram` is real: a datagram table in the socket layer (`SOCK_DGRAM`, `recvfrom`, `sendto`), and node's socket API on top — bind with an assigned port, `message` with a full `rinfo`, implicit bind on first send, broadcast. Datagrams flow both ways with real node, sender addresses intact. Multicast still refuses (it needs `IP_ADD_MEMBERSHIP` on the fd). Written because last boundary's audit called this "reachable, just not built" — so building it was the follow-through |
 
 ### Verification performed
 
@@ -1046,6 +1047,24 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
+- **UDP, because the audit said it was reachable.** The previous boundary rewrote
+  `dgram`'s refusal from "not available yet" to "the socket layer is stream-only;
+  UDP needs a datagram table of its own, which is reachable here, just not built".
+  Building it was the honest follow-through, and it was as small as that sentence
+  implied: `SOCK_DGRAM`, `recvfrom`, `sendto`, and one new event that carries the
+  sender — because a datagram arrives whole and there is no connection to hang it
+  on. node's API sits on top: bind with an assigned port, `message` with a full
+  `rinfo`, implicit bind on the first send, broadcast. Verified cross-engine both
+  ways with real node, sender addresses intact. Multicast still refuses, naming
+  `IP_ADD_MEMBERSHIP` as what is missing.
+  One UDP-specific race showed up: node binds implicitly on the first `send`, so
+  the send can reach the socket queue before an ASYNC bind has created the entry —
+  there is no connect step to order them. Binding synchronously removes it (it is
+  cheap and non-blocking).
+  And the refusal-truth fixture from last boundary immediately failed, because
+  `dgram` was no longer refused. That is the fixture doing its job: it caught a
+  stale expectation the same day it went stale, which is exactly what it was
+  written for.
 - **Auditing the refusals, since one had just proved wrong.** If a refusal can rot,
   they all can — so every "not available" in the engine got re-read against today's
   capabilities. Findings:
