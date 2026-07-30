@@ -509,6 +509,30 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   (guarded in minipass, so elsewhere in its bundle) — the fs gap it
   revealed is fixed and independently valuable. 53 node fixtures, PHASE F,
   TTY, e2e, Swift 6 build — green
+- **Stack traces name their files now — and that unblocked the diagnosis.**
+  tar's failure was untraceable because every JSC frame read as a bare
+  `fn@`: we evaluated modules with no sourceURL. Modules are now evaluated
+  `withSourceURL:` (`mouse:///node_modules/…`), so stacks read
+  `write@mouse:///node_modules/tar/…/index.min.js:2:24054`. That is a
+  PRODUCT fix, not just a debugging one — the terminal is the app's one
+  honest error surface and its stacks were unreadable. Fixture
+  `stack-has-source`. With real line numbers the failure resolved in one
+  step: minizlib reaches into node's INTERNAL `_handle` on a zlib stream
+  (`let r = this.#t._handle; let n = r.close; r.close = () => {}`) and
+  calls the internal `_processChunk(chunk, flushFlag)` — both now provided
+  as documented stand-ins. **tar CREATES gzip archives successfully**
+  (`tgz bytes > 0`). Extract then hit the honest architectural wall: our
+  zlib is ONE-SHOT (a single libz deflate/inflate per call), while minizlib
+  feeds compressed data incrementally and expects output per chunk — so a
+  partial stream reaches our decoder and fails "invalid input". **The next
+  concrete engine feature is INCREMENTAL zlib**: keep a `z_stream` alive
+  across calls behind a handle so inflate/deflate can stream. Named, not
+  hand-waved. Also fixed en route, a real correctness bug with wide reach:
+  `utf8Decode` called `String.fromCodePoint` on unvalidated values, so
+  decoding BINARY as utf8 (`buf.toString()` on a gzip block — what tar
+  does) THREW instead of yielding U+FFFD; the decoder is now lenient like
+  node's (fixture `utf8-lenient-decode`). 55 node fixtures, full battery
+  green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

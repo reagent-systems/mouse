@@ -187,7 +187,7 @@ final class NodeEngine: @unchecked Sendable {
         } else if source.contains("import") {
             source = Self.rewriteDynamicImport(source)
         }
-        if let function = wrapModule(source, async: entryIsESM) {
+        if let function = wrapModule(source, async: entryIsESM, sourceURL: path) {
             let module = context.evaluateScript("({exports: {}})")!
             let require = makeRequire(fromDir: dir)
             if entryIsESM {
@@ -242,7 +242,10 @@ final class NodeEngine: @unchecked Sendable {
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
 
-    private func wrapModule(_ source: String, async: Bool = false) -> JSValue? {
+    /// `sourceURL` names the module in stack traces. Without it JSC reports every frame as a
+    /// bare `functionName@` — unreadable for anyone debugging a real error in the terminal,
+    /// which is the app's one honest error surface.
+    private func wrapModule(_ source: String, async: Bool = false, sourceURL: String? = nil) -> JSValue? {
         var body = source
         if body.hasPrefix("#!") {
             body = String(body.drop(while: { $0 != "\n" }))
@@ -254,7 +257,12 @@ final class NodeEngine: @unchecked Sendable {
         // above that line in TDZ; `__mouseRequire` is untouched by that shadow.
         let keyword = async ? "async function" : "function"
         let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){\n" + body + "\n})"
-        let function = context.evaluateScript(wrapped)
+        let function: JSValue?
+        if let sourceURL, let url = URL(string: "mouse://" + sourceURL.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!) {
+            function = context.evaluateScript(wrapped, withSourceURL: url)
+        } else {
+            function = context.evaluateScript(wrapped)
+        }
         guard let function, function.isObject else { return nil }
         return function
     }
@@ -836,7 +844,7 @@ final class NodeEngine: @unchecked Sendable {
             }
             // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
             // dependency); CJS stays a plain sync function.
-            guard let function = wrapModule(source, async: esm) else {
+            guard let function = wrapModule(source, async: esm, sourceURL: id) else {
                 return throwInJS("Cannot parse '\(id)'")
             }
             let module = context.evaluateScript("({exports: {}})")!
@@ -1132,17 +1140,27 @@ final class NodeEngine: @unchecked Sendable {
         }
         return bytes;
       }
+      // LENIENT, like node's utf8 decoder: invalid bytes become U+FFFD instead of throwing.
+      // (The strict version called String.fromCodePoint on unvalidated values, so decoding
+      // BINARY data as utf8 — `buf.toString()` on a gzip block, which tar does — threw
+      // "out of range of code points" instead of returning replacement characters.)
       function utf8Decode(bytes) {
         let out = '';
         for (let i = 0; i < bytes.length;) {
           const b = bytes[i];
           let c, extra;
-          if (b < 0x80) { c = b; extra = 0; }
-          else if (b >= 0xf0) { c = b & 7; extra = 3; }
+          if (b < 0x80) { out += String.fromCharCode(b); i++; continue; }
+          if (b < 0xc2 || b > 0xf4) { out += '�'; i++; continue; }   // stray/overlong/too-big lead
+          if (b >= 0xf0) { c = b & 7; extra = 3; }
           else if (b >= 0xe0) { c = b & 15; extra = 2; }
           else { c = b & 31; extra = 1; }
           i++;
-          while (extra-- > 0 && i < bytes.length) { c = (c << 6) | (bytes[i++] & 63); }
+          let valid = true;
+          for (let k = 0; k < extra; k++) {
+            if (i >= bytes.length || (bytes[i] & 0xc0) !== 0x80) { valid = false; break; }
+            c = (c << 6) | (bytes[i++] & 63);
+          }
+          if (!valid || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) { out += '�'; continue; }
           out += String.fromCodePoint(c);
         }
         return out;
@@ -3705,6 +3723,28 @@ final class NodeEngine: @unchecked Sendable {
               },
             });
             stream._opts = options || {};
+            // `_handle` is node's internal binding object. minizlib (under tar) reaches for
+            // it and temporarily swaps out `_handle.close` to control flush timing:
+            //   let r = this.#t._handle; let n = r.close; r.close = () => {}
+            // With no _handle that read throws. A benign stand-in lets it do its dance; our
+            // coding happens once at flush either way.
+            stream._handle = {
+              close: function(){}, params: function(){}, reset: function(){},
+              write: function(){}, writeSync: function(){}, buffer: null,
+            };
+            // `_processChunk(chunk, flushFlag)` is node's internal SYNCHRONOUS coder entry —
+            // minizlib calls it directly and expects the coded bytes back. Ours is one-shot,
+            // so data accumulates and codes at Z_FINISH (4); intermediate flushes return
+            // empty, which minizlib concatenates harmlessly.
+            stream._processChunk = function(chunk, flushFlag) {
+              if (chunk && chunk.length) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+              if (flushFlag === 4 || flushFlag === undefined) {
+                const coded = run(mode, Buffer.concat(chunks));
+                chunks.length = 0;
+                return coded;
+              }
+              return Buffer.alloc(0);
+            };
             // Coder streams answer flush() and params() calls; ours codes once at end.
             stream.flush = function(kind, cb) { const done = typeof kind === 'function' ? kind : cb; if (done) done(); };
             stream.params = function(level, strategy, cb) { if (cb) cb(); };
