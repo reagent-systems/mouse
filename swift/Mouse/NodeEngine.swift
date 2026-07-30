@@ -7422,7 +7422,14 @@ final class NodeEngine: @unchecked Sendable {
         return {
           isPrimary: true, isMaster: true, isWorker: false, workers: {},
           fork: function() {
-            throw Object.assign(new Error('cluster.fork is not available: cluster shares a listening socket by passing DESCRIPTORS over IPC, and this channel carries JSON. child_process.fork gives real worker processes with a message channel; give each one its own port, or accept on one and forward'),
+            // Corrected once already, and corrected again: the first version blamed "single
+            // process", the second blamed passing DESCRIPTORS over a JSON channel. Both were
+            // wrong. A worker here is a second ENGINE inside one OS process, so a listening
+            // descriptor is already valid in both and only its NUMBER needs to travel — which
+            // JSON carries fine. What is genuinely missing is smaller and nameable: a socket
+            // table cannot yet ADOPT an existing fd as a listener, and cluster's own machinery
+            // (round-robin handoff, worker lifecycle, respawn) is unbuilt on top of that.
+            throw Object.assign(new Error('cluster.fork is not available: a worker cannot yet adopt the primary\'s listening descriptor (the socket table has no adopt-an-fd path), and cluster\'s distribution and lifecycle sit on top of that. child_process.fork gives real workers with a message channel today'),
                                 { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
           },
           setupPrimary: function(){}, setupMaster: function(){},

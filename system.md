@@ -1049,6 +1049,20 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
+- **`cluster`'s refusal was wrong twice, and the second reason was subtler than the
+  first.** Version one blamed "single process" — false once live children landed.
+  Version two blamed passing DESCRIPTORS over a JSON channel. That is also wrong,
+  and for an interesting reason: a worker here is a second ENGINE inside ONE OS
+  process, so a listening descriptor is already valid in both, and only its NUMBER
+  has to travel — which JSON carries perfectly. Nothing needs passing at all.
+  What is actually missing is smaller and now named: **the socket table has no
+  adopt-an-fd path**, so a worker cannot take over the primary's listener, and
+  cluster's own machinery (round-robin handoff, worker lifecycle, respawn) sits on
+  top of that. That is the next reachable item, and it is reachable precisely
+  because being one process removes the hard part rather than adding it.
+  Deliberately NOT started here: adopting an fd into a second engine's table is
+  concurrency work, and this layer's own history says a green run on a concurrent
+  path is not evidence. Better to leave it named and verifiable than half-built.
 - **Multicast, the last item on the audit's reachable list.** `addMembership` and
   `dropMembership` plus the three knobs that go with a group (TTL, loopback,
   interface) — the `IP_ADD_MEMBERSHIP` the refusal named. Both engines join
