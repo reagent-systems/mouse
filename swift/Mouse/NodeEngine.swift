@@ -2250,7 +2250,18 @@ final class NodeEngine: @unchecked Sendable {
 
       coreFactories.fs = function() {
         const path = coreRequire('path');
+        // Open file descriptors, declared before the API so every path-taking function can
+        // accept an FD — node's `fs.writeFileSync(fd, data)` / `readFileSync(fd)` forms.
+        // claude-code writes its config exactly that way (openSync 'w' → writeFileSync(fd));
+        // treating the number as a path silently truncated the file and dropped the data.
+        const fileDescriptors = {};
+        let nextFd = 3;
         function resolvePath(p) {
+          if (typeof p === 'number') {
+            const entry = fileDescriptors[p];
+            if (!entry) { const e = new Error('EBADF: bad file descriptor'); e.code = 'EBADF'; throw e; }
+            return entry.path;
+          }
           // fs accepts file:// URLs (strings or URL objects) like real node.
           let text = String(p && p.href ? p.href : p);
           if (text.startsWith('file://')) text = text.slice(7);
@@ -2271,11 +2282,10 @@ final class NodeEngine: @unchecked Sendable {
             mtime: new Date(raw.mtimeMs),
           };
         }
-        // The fd-based calls come later in this factory; forward references resolve at
-        // call time. A NUMBER as the file argument means an open fd (node semantics).
+        // A NUMBER as the file argument means an open fd — resolvePath maps it to the
+        // path (node semantics: fs.writeFileSync(fd, data) is legal and common).
         const fs = {
           readFileSync: function(file, options) {
-            if (typeof file === 'number') file = fdPath(file);
             const base64 = bridge.readFile(resolvePath(file));
             if (base64 === null || base64 === undefined) {
               const error = new Error("ENOENT: no such file or directory, open '" + file + "'");
@@ -2287,14 +2297,12 @@ final class NodeEngine: @unchecked Sendable {
             return encoding ? buffer.toString(encoding) : buffer;
           },
           writeFileSync: function(file, data, options) {
-            if (typeof file === 'number') file = fdPath(file);
             const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
             if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), false)) {
               throw new Error("EACCES: cannot write '" + file + "'");
             }
           },
           appendFileSync: function(file, data) {
-            if (typeof file === 'number') file = fdPath(file);
             const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
             if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), true)) {
               throw new Error("EACCES: cannot append '" + file + "'");
@@ -2384,8 +2392,7 @@ final class NodeEngine: @unchecked Sendable {
         fs.realpath.native = fs.realpath;
         fs.realpathSync.native = fs.realpathSync;
         // The fd-based sync subset (log files, position reads). fd 1/2 write to the stdio.
-        const fileDescriptors = {};
-        let nextFd = 3;
+        // (fileDescriptors/nextFd are declared above resolvePath so it can map fd → path.)
         function descriptor(fd) {
           const entry = fileDescriptors[fd];
           if (!entry) { const e = new Error('EBADF: bad file descriptor'); e.code = 'EBADF'; throw e; }

@@ -431,6 +431,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   prototype (real node assigns them; `Object.assign` mixins depend on
   it — class methods are non-enumerable by default). Fixture
   `events-lazy-mixin`. 49 node fixtures, full battery green
+- **SILENT DATA LOSS FIXED: an FD may stand in for a path.** Driving
+  claude-code's interactive startup with a valid config showed the config
+  going 135 bytes → **0** during the run — it was WIPING its own settings.
+  Traced by instrumenting every fs write from JS: claude-code saves with
+  `openSync(path,'w')` → `writeFileSync(FD, data)` → `fsyncSync` →
+  `closeSync` (no `writeSync` anywhere in the bundle). Node lets a NUMBER
+  stand in for a path in `writeFileSync`/`readFileSync`/`appendFileSync`;
+  ours ran `resolvePath` on the number, so the open truncated the file and
+  the data went nowhere. Fixed at the single choke point — `resolvePath`
+  now maps fd → path (the descriptor table moved above it) — which also
+  removed three stale `fdPath(…)` calls to a function that never existed
+  (latent, unreachable until now). claude-code's config now persists and
+  GROWS as it should (135 → 626 bytes, its enriched settings). Fixture
+  `fs-fd-as-path` pins write/read/append through an fd against real node.
+  50 node fixtures, PHASE F, TTY, e2e, screen+pyte, Swift 6 build — green.
+  This is the worst bug class the real-package method has found: not a
+  crash, silent destruction of user data
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
