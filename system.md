@@ -92,6 +92,7 @@ so a TUI navigates and edits.
 | **Phase G — real TCP** | `NodeSockets.swift`: `net` is no longer a stub that refuses. POSIX sockets on `DispatchSource` (not a thread each), non-blocking connect, name resolution off the I/O queue, honest backpressure at a 64 KB high-water mark, `ref`/`unref` feeding the event loop's quiescence test. `net.Socket` is a real Duplex over an fd and `net.Server` turns `accept()` into `'connection'`. Verified BOTH directions against real node: a real node client cannot tell our server from node's, and a real node server cannot tell our client from node's. This is what `http.createServer` — the dev-server story — stands on |
 | **Phase G — `http.createServer`** | A real HTTP/1.1 server on top of `net`: an incremental request parser (Content-Length and chunked bodies, pipelined requests, duplicate-header rules), `IncomingMessage` as a Readable, `ServerResponse` as a Writable, keep-alive, `Expect: 100-continue`, and `'upgrade'` for a WebSocket handshake. Framing matches node's on the WIRE, measured rather than assumed. **Real express runs on it** — installed by our own package manager, answering real node's client identically, JSON body parsing and 404 page included. `https.createServer` refuses, honestly: TLS needs a handshake we cannot put on a raw socket |
 | **Phase G — WebSockets, and the HTTP client on raw sockets** | `http.request` left URLSession for `net`, which is what makes three things possible: response bodies arrive INCREMENTALLY, request bodies can stream, and a 101 hands the socket over. Request bytes match node's per request. On top of that, **the real `ws` package works in both directions** — a real node ws client cannot tell our server from node's, and a real node ws server cannot tell our client from node's, closing handshake included. `https` stays on URLSession, where the system owns the TLS handshake |
+| **Phase G — `fs.watch`** | Real file watching (`NodeWatch.swift`) on kqueue via `DispatchSource`: files, directories, recursive trees, `watchFile`/`unwatchFile`, and the async-iterator form. A directory watch also watches the files inside it, which is the only way kqueue can NAME a modification. **chokidar works** — the watcher under webpack, vite, nodemon and `jest --watch` reports the same events on our engine as on node's. `Stats` grew its real fields in the process (see below) |
 
 ### Verification performed
 
@@ -981,6 +982,36 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
      They are now LIVE VIEWS over the fields we already keep — every
      property a getter, with the few libraries write to mapped back — rather
      than a second copy of the truth to drift.
+- **`fs.watch`, and the bug it found in `fs.stat`.** Watching is real now — the
+  surface that `tsc --watch`, HMR and `nodemon` need — on kqueue through
+  `DispatchSource`, with a watch per subdirectory for recursive mode (kqueue has
+  no recursive option) and a watch per FILE inside a watched directory, because
+  kqueue reports only "this directory changed" and the per-file watch is what
+  lets a modification be reported with its name. Descriptors are capped at 1024
+  per watcher so a recursive watch over `node_modules` cannot eat them all.
+  Then the real-package proof: **chokidar** — the watcher under webpack, vite,
+  nodemon and `jest --watch` — saw the DIRECTORIES in a tree but not a single
+  file. The cause was not in the watcher at all: chokidar gates every entry on
+  `_hasReadPermissions`, which does `4 & parseInt(stats.mode, 10)`. Our `Stats`
+  had no `mode`, so that read `NaN`, which means "not readable", so every file
+  was filtered out silently — while directories, which skip that check, came
+  through. `Stats` now carries what node's does, straight from `lstat(2)`:
+  mode, uid, gid, ino, dev, nlink, rdev, blocks, blksize and all four
+  timestamps in both Ms and Date form — and `lstat` finally differs from `stat`
+  (it does not follow the link, and `isSymbolicLink()` can be true). chokidar
+  now reports the same adds, changes, unlinks and nested paths as real node.
+  Same lesson as the Buffer bug, in a different module: **a missing field is
+  not a missing feature, it is a wrong answer delivered quietly.**
+- **Watch events are the most platform-dependent surface in node, and the
+  fixtures say so.** macOS drives them from FSEvents, Linux from inotify, and
+  they disagree on the event TYPE for a write inside a watched directory
+  ('rename' vs 'change') and on duplicate delivery. So the directory fixture
+  compares which PATHS are reported and in what order, normalizing types and
+  collapsing consecutive duplicates ON BOTH SIDES — real node emits them too.
+  A root FILE watch is compared strictly, where both engines agree exactly.
+  One thing deliberately not matched: node's first directory event reports
+  activity from just BEFORE the watch existed (an FSEvents coalescing window);
+  the fixture settles first rather than having us invent an event.
 - **Two divergences from node's HTTP client, both deliberate.** We open one
   connection per request; node's agent pools sockets and sends several down
   one connection. Per-request bytes are identical (that is what the wire
@@ -1397,7 +1428,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP, http client+server, WebSockets — express and ws run; gaps: TLS server, socket pooling, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP, http client+server, WebSockets, fs.watch — express, ws and chokidar run; gaps: TLS server, socket pooling, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

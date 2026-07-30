@@ -153,6 +153,27 @@ construction — IP literals and hosts-file names — because node's `resolve4`
 queries a DNS server through c-ares and never reads the hosts file. Record
 types getaddrinfo cannot answer must keep saying so rather than returning an
 empty list.
+`fs.watch` (`NodeWatch.swift`) is kqueue through `DispatchSource`: a watch per
+subdirectory for recursive mode, and a watch per FILE inside a watched
+directory — that per-file watch is the only way kqueue can NAME a modification
+(it reports that a directory changed, never which entry), so do not "optimize"
+it away. Descriptors are capped per watcher; past the cap a directory reports
+its own change instead. Verification is deliberately shaped around the fact
+that watch events are the most platform-dependent surface in node (macOS =
+FSEvents, Linux = inotify): compare which PATHS are reported and in what order
+for a DIRECTORY watch, normalizing event types and collapsing consecutive
+duplicates ON BOTH SIDES (real node emits duplicates too); compare a root FILE
+watch strictly. Do not try to match node's first directory event — on macOS it
+reports activity from before the watch existed, and faking that would mean
+inventing an event. Keep the real-package proof green: chokidar must report the
+same adds/changes/unlinks/nested paths as under real node.
+**`fs.Stats` must carry node's full field set**, from `lstat(2)`: mode, uid,
+gid, ino, dev, nlink, rdev, blocks, blksize and all four timestamps in Ms and
+Date form. This is not cosmetic — chokidar gates every entry on
+`4 & parseInt(stats.mode, 10)`, so a missing `mode` read as NaN, meaning "not
+readable", and silently hid every FILE in a watched tree while directories came
+through. `lstat` must not follow links (and `isSymbolicLink()` must be able to
+return true).
 The HTTP CLIENT is TWO transports and the split is deliberate: plaintext
 `http.request` rides `net` (so response bodies arrive incrementally, request
 bodies can stream, and a 101 hands the socket over — the WebSocket path),

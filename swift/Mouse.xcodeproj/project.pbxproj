@@ -18,6 +18,7 @@
 		3C060871009B04B75DD57460 /* MouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F529B8B560B4DB034F9698 /* MouseApp.swift */; };
 		4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */; };
 		43DE04D20436A9255595520C /* GitHubAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7281C456E2B06017F80854A /* GitHubAuth.swift */; };
+		4AE107D17AAB32363E162AA3 /* NodeWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */; };
 		4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A88D15C6B606882BE9F472E /* PackageManager.swift */; };
 		5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 525AB48D09A783EF07137189 /* TerminalScreen.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
@@ -40,6 +41,7 @@
 		03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeSockets.swift; sourceTree = "<group>"; };
 		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellLanguage.swift; sourceTree = "<group>"; };
+		0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeWatch.swift; sourceTree = "<group>"; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
 		179217813E4A44F9859669C5 /* GitCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCore.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
@@ -90,6 +92,7 @@
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
 				C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */,
 				03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */,
+				0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */,
 				3A88D15C6B606882BE9F472E /* PackageManager.swift */,
 				5A7FDD7DE14447F992EB32D3 /* Shell.swift */,
 				080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */,
@@ -212,6 +215,7 @@
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
 				20348E0EC1CA68374BEB45D0 /* NodeEngine.swift in Sources */,
 				B12D6FC121DECB1E6754DA64 /* NodeSockets.swift in Sources */,
+				4AE107D17AAB32363E162AA3 /* NodeWatch.swift in Sources */,
 				4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */,
 				A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */,
 				95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */,

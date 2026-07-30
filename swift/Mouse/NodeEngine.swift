@@ -100,6 +100,18 @@ final class NodeEngine: @unchecked Sendable {
             handlesLock.lock(); openHandles -= 1; handlesLock.unlock()
             wakeup.signal()   // the last handle closing is what lets the loop notice and exit
         })
+    private lazy var watchers: WatchTable = WatchTable(
+        deliver: { [weak self] job in self?.enqueueJob(job) },
+        retain: { [weak self] in
+            guard let self else { return }
+            handlesLock.lock(); openHandles += 1; handlesLock.unlock()
+        },
+        release: { [weak self] in
+            guard let self else { return }
+            handlesLock.lock(); openHandles -= 1; handlesLock.unlock()
+            wakeup.signal()
+        })
+    private var watchersUsed = false
     private var socketsUsed = false
     private var hasOpenHandles: Bool {
         handlesLock.lock()
@@ -264,6 +276,7 @@ final class NodeEngine: @unchecked Sendable {
         // A program that exits with a server still listening must not leave the port held —
         // there is no process teardown here to do it for us.
         if socketsUsed { sockets.closeAll() }
+        if watchersUsed { watchers.closeAll() }
 
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
@@ -406,15 +419,40 @@ final class NodeEngine: @unchecked Sendable {
             }
             return (try? data.write(to: url)) != nil
         }
-        let statFile: @convention(block) (String) -> Any = { [weak self] path in
+        // The FULL stat, straight from lstat(2). `mode` is not a luxury: chokidar decides
+        // whether it may read an entry with `4 & parseInt(stats.mode…)`, so a Stats without a
+        // mode silently filtered out EVERY FILE while directories (no such check) passed.
+        // The rest are here for the same reason — a library reading a missing field gets
+        // undefined and draws a wrong conclusion quietly.
+        let statFile: @convention(block) (String, Bool) -> Any = { [weak self] path, followLinks in
             guard let self else { return NSNull() }
             let url = self.realURL(path)
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return NSNull() }
-            let attributes = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
-            let size = (attributes[.size] as? NSNumber)?.doubleValue ?? 0
-            let mtime = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            return ["dir": isDirectory.boolValue, "size": size, "mtimeMs": mtime * 1000] as [String: Any]
+            var info = stat()
+            let result = followLinks ? stat(url.path, &info) : lstat(url.path, &info)
+            guard result == 0 else { return NSNull() }
+            let kind = info.st_mode & S_IFMT
+            func milliseconds(_ time: timespec) -> Double {
+                Double(time.tv_sec) * 1000 + Double(time.tv_nsec) / 1_000_000
+            }
+            return [
+                "dir": kind == S_IFDIR,
+                "link": kind == S_IFLNK,
+                "file": kind == S_IFREG,
+                "size": Double(info.st_size),
+                "mode": Int(info.st_mode),
+                "uid": Int(info.st_uid),
+                "gid": Int(info.st_gid),
+                "ino": Double(info.st_ino),
+                "dev": Int(info.st_dev),
+                "nlink": Int(info.st_nlink),
+                "rdev": Int(info.st_rdev),
+                "blocks": Double(info.st_blocks),
+                "blksize": Int(info.st_blksize),
+                "mtimeMs": milliseconds(info.st_mtimespec),
+                "atimeMs": milliseconds(info.st_atimespec),
+                "ctimeMs": milliseconds(info.st_ctimespec),
+                "birthtimeMs": milliseconds(info.st_birthtimespec),
+            ] as [String: Any]
         }
         let readdir: @convention(block) (String) -> Any = { [weak self] path in
             guard let self,
@@ -597,6 +635,24 @@ final class NodeEngine: @unchecked Sendable {
             }
         }
         expose("netResolve", netResolve)
+
+        // -- fs.watch: kqueue through WatchTable -------------------------------------------
+        let fsWatch: @convention(block) (String, Bool, JSValue) -> Int32 = { [weak self] path, recursive, callback in
+            guard let self else { return 0 }
+            watchersUsed = true
+            guard let id = watchers.watch(path: realURL(path).path, recursive: recursive, handler: { event in
+                switch event {
+                case let .rename(name): callback.call(withArguments: ["rename", name])
+                case let .change(name): callback.call(withArguments: ["change", name])
+                }
+            }) else { return 0 }
+            return Int32(id)
+        }
+        let fsUnwatch: @convention(block) (Int32) -> Void = { [weak self] id in
+            self?.watchers.close(id: Int(id))
+        }
+        expose("fsWatch", fsWatch)
+        expose("fsUnwatch", fsUnwatch)
         expose("netConnect", netConnect)
         expose("netListen", netListen)
         expose("netWrite", netWrite)
@@ -2604,6 +2660,7 @@ final class NodeEngine: @unchecked Sendable {
 
       coreFactories.fs = function() {
         const path = coreRequire('path');
+        const EventEmitter = coreRequire('events');   // FSWatcher is one
         // Open file descriptors, declared before the API so every path-taking function can
         // accept an FD — node's `fs.writeFileSync(fd, data)` / `readFileSync(fd)` forms.
         // claude-code writes its config exactly that way (openSync 'w' → writeFileSync(fd));
@@ -2627,14 +2684,143 @@ final class NodeEngine: @unchecked Sendable {
         }
         function statsFrom(raw) {
           if (!raw) return null;
+          // node's full Stats. Libraries read these fields and draw conclusions from
+          // undefined without complaining — chokidar gates every file on
+          // `4 & parseInt(stats.mode)`, so a missing `mode` looked like "no read permission"
+          // and silently hid every file in a watched directory.
           return {
-            isDirectory: function(){ return raw.dir; },
-            isFile: function(){ return !raw.dir; },
-            isSymbolicLink: function(){ return false; },
-            size: raw.size,
-            mtimeMs: raw.mtimeMs,
-            mtime: new Date(raw.mtimeMs),
+            isFile: function(){ return !!raw.file; },
+            isDirectory: function(){ return !!raw.dir; },
+            isSymbolicLink: function(){ return !!raw.link; },
+            isBlockDevice: function(){ return false; },
+            isCharacterDevice: function(){ return false; },
+            isFIFO: function(){ return false; },
+            isSocket: function(){ return false; },
+            dev: raw.dev, ino: raw.ino, mode: raw.mode, nlink: raw.nlink,
+            uid: raw.uid, gid: raw.gid, rdev: raw.rdev,
+            size: raw.size, blksize: raw.blksize, blocks: raw.blocks,
+            atimeMs: raw.atimeMs, mtimeMs: raw.mtimeMs,
+            ctimeMs: raw.ctimeMs, birthtimeMs: raw.birthtimeMs,
+            atime: new Date(raw.atimeMs), mtime: new Date(raw.mtimeMs),
+            ctime: new Date(raw.ctimeMs), birthtime: new Date(raw.birthtimeMs),
           };
+        }
+        // fs.watch: real, on kqueue (NodeWatch.swift). Every watching tool an IDE runs needs
+        // it — `tsc --watch`, a dev server's HMR, nodemon — and a watcher is a ref'd handle,
+        // so an open FSWatcher keeps the event loop alive exactly as in node.
+        function FSWatcher(path, options, listener) {
+          EventEmitter.call(this);
+          options = options || {};
+          this._closed = false;
+          const self = this;
+          this._id = bridge.fsWatch(resolvePath(path), !!options.recursive, function(event, name) {
+            if (self._closed) return;
+            // `encoding: 'buffer'` asks for the filename as bytes, which chokidar and friends
+            // pass through unchanged.
+            self.emit('change', event, options.encoding === 'buffer' ? Buffer.from(name) : name);
+          });
+          if (!this._id) {
+            const error = Object.assign(new Error("ENOENT: no such file or directory, watch '" + path + "'"),
+                                        { code: 'ENOENT', errno: -2, syscall: 'watch', path: path });
+            // node throws synchronously for a missing path.
+            throw error;
+          }
+          if (listener) this.on('change', listener);
+        }
+        FSWatcher.prototype = Object.create(EventEmitter.prototype);
+        FSWatcher.prototype.constructor = FSWatcher;
+        FSWatcher.prototype.close = function() {
+          if (this._closed) return;
+          this._closed = true;
+          bridge.fsUnwatch(this._id);
+          this.emit('close');
+        };
+        FSWatcher.prototype.ref = function() { return this; };
+        FSWatcher.prototype.unref = function() { return this; };
+        // node's async-iterator form: `for await (const event of fs.promises.watch(dir))`.
+        FSWatcher.prototype[Symbol.asyncIterator] = function() {
+          const queue = [];
+          let waiting = null;
+          let done = false;
+          this.on('change', function(eventType, filename) {
+            const value = { eventType: eventType, filename: filename };
+            if (waiting) { const resolve = waiting; waiting = null; resolve({ value: value, done: false }); }
+            else queue.push(value);
+          });
+          this.on('close', function() {
+            done = true;
+            if (waiting) { const resolve = waiting; waiting = null; resolve({ value: undefined, done: true }); }
+          });
+          const watcher = this;
+          return {
+            next: function() {
+              if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+              if (done) return Promise.resolve({ value: undefined, done: true });
+              return new Promise(function(resolve){ waiting = resolve; });
+            },
+            return: function() { watcher.close(); return Promise.resolve({ value: undefined, done: true }); },
+            [Symbol.asyncIterator]: function() { return this; },
+          };
+        };
+
+        function watch(path, options, listener) {
+          if (typeof options === 'function') { listener = options; options = {}; }
+          if (typeof options === 'string') options = { encoding: options };
+          return new FSWatcher(path, options, listener);
+        }
+
+        // watchFile is node's OLDER, polling API, and it is polling in node too: an interval
+        // that stats the file and reports previous/current Stats when they differ.
+        const watchedFiles = new Map();
+        function watchFile(path, options, listener) {
+          if (typeof options === 'function') { listener = options; options = {}; }
+          options = options || {};
+          const interval = Number(options.interval) || 5007;   // node's default
+          const key = resolvePath(path);
+          let entry = watchedFiles.get(key);
+          if (!entry) {
+            entry = { listeners: [], previous: statSafely(key), timer: null, watcher: null };
+            entry.timer = setInterval(function() {
+              const current = statSafely(key);
+              const changed = current.mtimeMs !== entry.previous.mtimeMs || current.size !== entry.previous.size;
+              if (changed) {
+                const previous = entry.previous;
+                entry.previous = current;
+                for (const fn of entry.listeners.slice()) fn(current, previous);
+              }
+            }, interval);
+            if (entry.timer && entry.timer.unref && options.persistent === false) entry.timer.unref();
+            watchedFiles.set(key, entry);
+          }
+          if (listener) entry.listeners.push(listener);
+          // node returns a StatWatcher (measured: an object, and NOT the Stats — reading
+          // `.mtimeMs` off it gives undefined). The Stats arrive through the listener's
+          // (current, previous) pair.
+          if (!entry.watcher) {
+            entry.watcher = Object.assign(new EventEmitter(), {
+              stop: function(){ unwatchFile(path); },
+              ref: function(){ return this; },
+              unref: function(){ return this; },
+            });
+          }
+          return entry.watcher;
+        }
+        function unwatchFile(path, listener) {
+          const key = resolvePath(path);
+          const entry = watchedFiles.get(key);
+          if (!entry) return;
+          if (listener) {
+            const at = entry.listeners.indexOf(listener);
+            if (at >= 0) entry.listeners.splice(at, 1);
+            if (entry.listeners.length) return;
+          }
+          clearInterval(entry.timer);
+          watchedFiles.delete(key);
+        }
+        function statSafely(target) {
+          const raw = bridge.stat(target, true);
+          if (!raw) return { mtimeMs: 0, size: 0, isFile: function(){ return false; }, isDirectory: function(){ return false; } };
+          return statsFrom(raw);
         }
         // A NUMBER as the file argument means an open fd — resolvePath maps it to the
         // path (node semantics: fs.writeFileSync(fd, data) is legal and common).
@@ -2662,9 +2848,11 @@ final class NodeEngine: @unchecked Sendable {
               throw new Error("EACCES: cannot append '" + file + "'");
             }
           },
-          existsSync: function(file) { return bridge.stat(resolvePath(file)) !== null && bridge.stat(resolvePath(file)) !== undefined; },
+          existsSync: function(file) {
+            try { return !!bridge.stat(resolvePath(file), true); } catch (error) { return false; }
+          },
           statSync: function(file, options) {
-            const raw = bridge.stat(resolvePath(file));
+            const raw = bridge.stat(resolvePath(file), true);
             if (!raw) {
               if (options && options.throwIfNoEntry === false) return undefined;
               const error = new Error("ENOENT: no such file or directory, stat '" + file + "'");
@@ -2673,7 +2861,16 @@ final class NodeEngine: @unchecked Sendable {
             }
             return statsFrom(raw);
           },
-          lstatSync: function(file, options) { return fs.statSync(file, options); },
+          lstatSync: function(file, options) {
+            const raw = bridge.stat(resolvePath(file), false);   // does NOT follow the link
+            if (!raw) {
+              if (options && options.throwIfNoEntry === false) return undefined;
+              const error = new Error("ENOENT: no such file or directory, lstat '" + file + "'");
+              error.code = 'ENOENT';
+              throw error;
+            }
+            return statsFrom(raw);
+          },
           readdirSync: function(dir, options) {
             const parent = resolvePath(dir);
             const entries = bridge.readdir(parent);
@@ -2686,7 +2883,7 @@ final class NodeEngine: @unchecked Sendable {
             // Dirent objects — glob's path-scurry walks these; strings would silently match
             // nothing (isDirectory() undefined reads as "not a directory, not a file").
             return entries.map(function(name) {
-              const raw = bridge.stat(parent + '/' + name);
+              const raw = bridge.stat(parent + '/' + name, false);
               const isDir = !!(raw && raw.dir);
               return {
                 name: name,
@@ -2945,7 +3142,14 @@ final class NodeEngine: @unchecked Sendable {
           });
           return stream;
         };
+        fs.watch = watch;
+        fs.watchFile = watchFile;
+        fs.unwatchFile = unwatchFile;
+        // Deliberately NOT exporting FSWatcher: real node 22 does not (measured), and a
+        // surface we invent is a surface that diverges.
         fs.promises = {};
+        // fs.promises.watch is the async-iterator form, not a promise of a watcher.
+        fs.promises.watch = function(target, options) { return watch(target, options); };
         for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'readdir', 'mkdir', 'unlink', 'rename', 'copyFile', 'access', 'rm']) {
           fs.promises[name] = function(...args) {
             return new Promise((resolve, reject) => {
