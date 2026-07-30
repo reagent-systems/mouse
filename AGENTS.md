@@ -465,6 +465,10 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Promote a sweep to a GATE once its findings are settled.** A sweep that found real bugs
+  should keep finding them; left as a one-shot it runs once and then sits red forever. Pin the
+  differences that are deliberate, with the reason, and let it fail on anything new. Separating
+  diagnostics is for shrinking that set, not for licensing it.
 - **Separate assertions from investigations.** A harness collection accumulates both: tests
   that must pass, and sweeps that list differences by design. Counting them together means a
   real regression hides among the expected failures. Mark the diagnostics and report them

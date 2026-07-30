@@ -1074,6 +1074,25 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **Sweeps promoted to GATES — and the first one caught an error in my own record.** The
+  sweeps that found this session's biggest bugs were one-shot investigations: they ran once,
+  found things, and then sat permanently red in the runner. A sweep that found real bugs
+  should keep finding them, so three became assertions.
+  `streamkinds` (the stream contract across fourteen objects) had two settled differences —
+  node LACKS `setDefaultEncoding` on ServerResponse and ClientRequest while we have it, and an
+  extra method cannot break a caller — so they are pinned and it now gates the whole contract.
+  `sse` asserted NOTHING; it printed its output for a human to read, which several boundaries
+  ago I noticed and left. It now checks the property that makes streaming meaningful: three
+  chunks arriving SEPARATELY rather than in one lump.
+  `globals` became a gate on the global surface, and **its first run failed** — 19 absent
+  where I had recorded 18. Not a regression: the original sweep found 21, and adding
+  `TextDecoderStream`/`TextEncoderStream` left nineteen. The arithmetic in my own write-up was
+  wrong, and system.md has been corrected. A gate whose first act is to catch a false number in
+  the documentation has already justified itself, because the alternative was that number
+  sitting there unchallenged.
+  Full run: **48 assertions passing, zero failures**, diagnostics down from ten to six. What
+  remains diagnostic is genuinely exploratory — the corpus documenting why `path.matchesGlob`
+  is refused, the reachable-gap and shape sweeps whose output changes as things get built.
 - **fs sync/async/promise parity — checking my own strictness propagated.** Several
   boundaries ago the sync fs functions became much stricter (ENOENT for a missing parent,
   EEXIST, ENOTDIR, refusing to delete a tree unasked), and whether the CALLBACK and PROMISE
@@ -1390,7 +1409,9 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Module exports and instance shapes had been swept; nothing had looked at `globalThis`,
   where the web-standard surface modern packages reach for directly lives. 49 of node's
   67 were present and **not one differed in KIND**, which is a good result for a hand-
-  built global surface. The 18 absent were all constructor NAMES.
+  built global surface. The absent ones were all constructor NAMES — 21 at the time, 19 after
+  `TextDecoderStream` and `TextEncoderStream` were added below. (This paragraph first said 18,
+  which was wrong; the gate built later caught the arithmetic.)
   The useful one: **`TextDecoderStream`/`TextEncoderStream`**, because
   `response.body.pipeThrough(new TextDecoderStream())` is how a fetch body is read as
   text without buffering it all. Building it exposed the real defect underneath — our
