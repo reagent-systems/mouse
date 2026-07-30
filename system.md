@@ -1060,9 +1060,35 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   cluster's own machinery (round-robin handoff, worker lifecycle, respawn) sits on
   top of that. That is the next reachable item, and it is reachable precisely
   because being one process removes the hard part rather than adding it.
-  Deliberately NOT started here: adopting an fd into a second engine's table is
-  concurrency work, and this layer's own history says a green run on a concurrent
-  path is not evidence. Better to leave it named and verifiable than half-built.
+  Deliberately NOT started in that boundary: adopting an fd into a second engine's
+  table is concurrency work, and this layer's own history says a green run on a
+  concurrent path is not evidence. Better named and verifiable than half-built.
+- **cluster, built.** The primary binds ONE listening socket in handoff mode; each
+  accepted descriptor is round-robined to a worker, which adopts it as an ordinary
+  connected socket. Below the fd it is indistinguishable from a locally accepted
+  connection, so http's parser, keep-alive and half-close are the same code. New
+  seams: `SocketTable.listen(handoff:)`, `.handoff` events carrying a raw fd,
+  `adopt(fd:)`, `discard(fd:)`, and a `__clusterListen` hook in `net.Server.listen`
+  that mirrors node's `cluster._getServer`. Worker lifecycle, `worker.disconnect()`,
+  respawn-after-exit and the `'online'`/`'listening'`/`'exit'` events are all real.
+  Verified against real node on a shared-port program: 3 workers, 12 concurrent
+  requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
+  byte-identical every time**.
+- **`options.env` now actually reaches a spawned child.** It was silently dropped
+  before: every child inherited the parent's environment. node REPLACES the
+  environment when `env` is given (the caller spreads `process.env` in if it wants
+  inheritance), and that is what this does. cluster needs it for `NODE_UNIQUE_ID`,
+  but the gap was general — any tool passing `NODE_ENV` or a modified `PATH` to a
+  child was being ignored.
+- **Two http faults that cluster's test exposed, both worth more than cluster.**
+  Killing a worker left its connections in the primary's keep-alive pool, and the
+  next request hung forever. (a) The pool handed out a socket whose peer had hung
+  up — it now leaves the pool on `end`/`error`, as node's agent does. (b) A request
+  whose socket closed before answering emitted neither `'response'` nor `'error'`,
+  which is a HANG — the one network failure a caller cannot recover from. Node
+  turns that into `ECONNRESET` ('socket hang up') and now so does this. Both are
+  regression-locked by the `http-hangup` fixture, validated line-for-line against
+  real node.
 - **Multicast, the last item on the audit's reachable list.** `addMembership` and
   `dropMembership` plus the three knobs that go with a group (TTL, loopback,
   interface) — the `IP_ADD_MEMBERSHIP` the refusal named. Both engines join
@@ -1481,6 +1507,13 @@ why not**. Recording it, with the facts measured rather than guessed:
   native tar/gzip for workspaces. Re-implementing them is effort, not a
   design problem, and the pyte cross-check plus the pnpm/semver corpora
   transfer as the Android verification harness too.
+- **`cluster` is the sharpest example of that split.** It is ~200 lines of pure
+  bootstrap JavaScript over three tiny bridge blocks (`netListenHandoff`,
+  `netAdopt`, `netDiscard`), so the logic ports verbatim. What would NOT port is
+  its premise: cluster works here because a worker is a second ENGINE in the same
+  OS process, which makes a descriptor valid in both. On Android that means
+  multiple WebViews sharing one process — plausible, but the fd would have to
+  cross a `@JavascriptInterface` boundary per worker rather than a JSC context.
 - **G needs a JS engine decision, and the code splits favourably.**
   `NodeEngine.swift` is **72 % JS bootstrap** (165 KB of JavaScript that is
   engine-agnostic and ports VERBATIM) and only **28 % host bridge** (65 KB of

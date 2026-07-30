@@ -8,6 +8,17 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `cluster` works. The primary binds one listening socket and hands
+  each accepted descriptor to a worker, which adopts it as an ordinary connected
+  socket; worker lifecycle, `disconnect()` and the `online`/`listening`/`exit`
+  events are real. Verified byte-identical to real node over 25 rounds of a
+  shared-port program that kills a worker mid-flight.
+- Node layer: `options.env` now reaches spawned children. It was silently dropped,
+  so every child inherited the parent's environment regardless of what was passed.
+- Node layer: two http failures that used to HANG now error the way node's do — a
+  keep-alive socket whose peer hung up leaves the pool, and a request whose socket
+  closes before answering emits `ECONNRESET` ('socket hang up') instead of waiting
+  forever.
 - **Android app** (`kotlin/`) at feature parity with iOS, native Kotlin +
   Compose: the gesture shell, onboarding with idle "motion is the arrow"
   animations, GitHub sign-in, workspaces (native tar/gzip), Files/Viewer/

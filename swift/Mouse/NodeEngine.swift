@@ -644,15 +644,24 @@ final class NodeEngine: @unchecked Sendable {
         // output at all.
         // `mode` is "" | "ipc" | "eval" | "eval-ipc": the eval forms mean `script` IS the source
         // rather than a path to it, which is how `node -e` reaches a child.
-        let spawnNode: @convention(block) (String, [String], String, String, String, JSValue) -> Int32 = {
-            [weak self] script, argv, cwd, mode, workerData, callback in
+        let spawnNode: @convention(block) (String, [String], String, String, String, String, JSValue) -> Int32 = {
+            [weak self] script, argv, cwd, mode, workerData, envJSON, callback in
             guard let self else { return 0 }
             let wantsIPC = mode.contains("ipc")
             let isEval = mode.hasPrefix("eval")
             let carried = Carried(callback)
             let id = sockets.claimExternalID()
             outstanding += 1
-            let child = NodeEngine(root: root, env: env, shell: shell)
+            // `options.env` finally reaches the child. A caller that passes env expects exactly
+            // it (node REPLACES the environment rather than merging), and the JS side is what
+            // decides whether to inherit — same as node, where `{...process.env}` is the caller's
+            // job. An empty string means "say nothing", which inherits.
+            var childEnv = env
+            if !envJSON.isEmpty, let data = envJSON.data(using: .utf8),
+               let overrides = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                childEnv = overrides
+            }
+            let child = NodeEngine(root: root, env: childEnv, shell: shell)
             // Output crosses back as event-loop jobs on OUR thread, like every other event.
             child.attachTTY(TTY(
                 write: { [weak self] text in
@@ -875,6 +884,9 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [id, "listening", plain(address)])
                 case let .connection(socket, local, remote):
                     carried.value.call(withArguments: [id, "connection", ["id": socket, "local": plain(local), "remote": plain(remote)]])
+                case let .handoff(fd, local, remote):
+                    carried.value.call(withArguments: [id, "handoff", ["fd": Int(fd), "local": plain(local),
+                                                                      "remote": plain(remote)]])
                 case let .data(bytes):
                     carried.value.call(withArguments: [id, "data", bytes.base64EncodedString()])
                 case let .datagram(bytes, from):
@@ -901,6 +913,22 @@ final class NodeEngine: @unchecked Sendable {
             socketsUsed = true
             return Int32(sockets.listen(host: host, port: Int(port),
                                         backlog: Int(backlog), handler: dispatcher(callback)))
+        }
+        // cluster's primary: accept here, run the connection somewhere else. Same OS process, so
+        // the descriptor is valid in the worker engine and only the number crosses the channel.
+        let netListenHandoff: @convention(block) (String, Int32, Int32, JSValue) -> Int32 = { [weak self] host, port, backlog, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.listen(host: host, port: Int(port), backlog: Int(backlog),
+                                        handoff: true, handler: dispatcher(callback)))
+        }
+        let netAdopt: @convention(block) (Int32, JSValue) -> Int32 = { [weak self] fd, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.adopt(fd: fd, handler: dispatcher(callback)))
+        }
+        let netDiscard: @convention(block) (Int32) -> Void = { [weak self] fd in
+            self?.sockets.discard(fd: fd)
         }
         let netWrite: @convention(block) (Int32, String) -> Bool = { [weak self] id, base64 in
             guard let self, let data = Data(base64Encoded: base64) else { return true }
@@ -999,6 +1027,9 @@ final class NodeEngine: @unchecked Sendable {
         expose("netListenUnix", netListenUnix)
         expose("netConnect", netConnect)
         expose("netListen", netListen)
+        expose("netListenHandoff", netListenHandoff)
+        expose("netAdopt", netAdopt)
+        expose("netDiscard", netDiscard)
         expose("netWrite", netWrite)
         expose("netEnd", netEnd)
         expose("netDestroy", netDestroy)
@@ -5479,6 +5510,9 @@ final class NodeEngine: @unchecked Sendable {
                        (wantsWorker ? '-worker' : '');
           const id = bridge.spawnNode(script, rest, String((options && options.cwd) || '/'),
                                       mode, String((options && options.workerData) || ''),
+                                      // node REPLACES the environment when `env` is given; the
+                                      // caller spreads process.env in if it wants inheritance.
+                                      options && options.env ? JSON.stringify(options.env) : '',
                                       function(event, payload) {
             // latin1 both ways: the child wrote bytes, and these are those bytes.
             if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload), 'latin1')); return; }
@@ -6002,7 +6036,11 @@ final class NodeEngine: @unchecked Sendable {
           while (free.length) {
             // 'lifo' — node's default, and the warm socket is the most likely to still be up.
             const socket = this.scheduling === 'fifo' ? free.shift() : free.pop();
-            if (socket && !socket.destroyed && socket.writable) {
+            if (socket && !socket.destroyed && socket.writable && !socket._sawEOF) {
+              // The idle watchers below belong to the POOL, not to the request about to run.
+              socket.removeAllListeners('end');
+              socket.removeAllListeners('error');
+              socket.removeAllListeners('close');
               socket.ref();
               (this.sockets[name] = this.sockets[name] || []).push(socket);
               return socket;
@@ -6032,11 +6070,19 @@ final class NodeEngine: @unchecked Sendable {
           socket.removeAllListeners('error');
           socket.removeAllListeners('close');
           const self = this;
-          socket.once('close', function() {
+          const evict = function() {
             const list = self.freeSockets[name] || [];
             const index = list.indexOf(socket);
             if (index >= 0) list.splice(index, 1);
-          });
+          };
+          socket.once('close', evict);
+          // A server that closes an idle keep-alive connection is ordinary — the peer may also
+          // simply be gone. Either way the socket must leave the pool: handing out a socket
+          // whose peer has hung up turns the next request into a wait for a reply that cannot
+          // come. Found by cluster's test, where killing a worker left its connections in the
+          // primary's pool and the next request hung until the watchdog fired.
+          socket.once('end', function(){ socket._sawEOF = true; evict(); socket.destroy(); });
+          socket.once('error', function(){ socket._sawEOF = true; evict(); socket.destroy(); });
           // Idle sockets must not hold the event loop open — node unrefs them too.
           socket.unref();
           free.push(socket);
@@ -6530,6 +6576,13 @@ final class NodeEngine: @unchecked Sendable {
           this.socket.on('close', function() {
             // A response framed by EOF ends here; anything else already ended.
             if (self._parser) self._parser.finish();
+            // Node turns "connection went away before it answered" into ECONNRESET rather than
+            // leaving the caller waiting. Without this the request emits neither 'response' nor
+            // 'error' and simply never finishes — a hang, which is the worst possible shape for
+            // a network failure and impossible for a caller to recover from.
+            if (!self._responded && !self.destroyed) {
+              self.emit('error', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+            }
             if (!self._closeEmitted) { self._closeEmitted = true; self.emit('close'); }
           });
           this._parser = makeResponseParser(this);
@@ -7414,27 +7467,208 @@ final class NodeEngine: @unchecked Sendable {
         }
         return { create: function() { return new Domain(); }, Domain: Domain };
       };
+      // cluster: workers that share one listening socket. The refusal here was wrong twice —
+      // first "single process", then "a JSON channel cannot pass descriptors" — and the second
+      // mistake is the instructive one. It borrowed real node's constraint without checking
+      // whether it applies: a worker here is another ENGINE inside ONE OS process, so an
+      // accepted descriptor is already valid in the worker and only its NUMBER has to travel.
+      // JSON carries a number perfectly. Being one process removes cluster's hard part.
+      //
+      // So the primary owns the listening socket in handoff mode, accepts, and round-robins the
+      // raw descriptor to a worker, which adopts it as an ordinary connected socket. That is
+      // node's default SCHED_RR, and it is the honest shape here rather than an imitation of it.
       coreFactories.cluster = function() {
-        // "single process" stopped being true when live node children landed. What cluster
-        // actually needs beyond them is HANDLE SHARING: a primary that accepts on one listening
-        // socket and passes the connection to a worker over IPC. Our channel carries JSON, not
-        // descriptors — so this names that, and points at what does work.
-        return {
-          isPrimary: true, isMaster: true, isWorker: false, workers: {},
-          fork: function() {
-            // Corrected once already, and corrected again: the first version blamed "single
-            // process", the second blamed passing DESCRIPTORS over a JSON channel. Both were
-            // wrong. A worker here is a second ENGINE inside one OS process, so a listening
-            // descriptor is already valid in both and only its NUMBER needs to travel — which
-            // JSON carries fine. What is genuinely missing is smaller and nameable: a socket
-            // table cannot yet ADOPT an existing fd as a listener, and cluster's own machinery
-            // (round-robin handoff, worker lifecycle, respawn) is unbuilt on top of that.
-            throw Object.assign(new Error('cluster.fork is not available: a worker cannot yet adopt the primary\'s listening descriptor (the socket table has no adopt-an-fd path), and cluster\'s distribution and lifecycle sit on top of that. child_process.fork gives real workers with a message channel today'),
-                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
-          },
-          setupPrimary: function(){}, setupMaster: function(){},
-          settings: {}, schedulingPolicy: 2,
+        const EventEmitter = coreRequire('events');
+        const cluster = new EventEmitter();
+        const workerID = process.env.NODE_UNIQUE_ID;
+        cluster.isWorker = !!workerID;
+        cluster.isPrimary = cluster.isMaster = !workerID;
+        cluster.workers = {};
+        cluster.SCHED_NONE = 1;
+        cluster.SCHED_RR = 2;
+        cluster.schedulingPolicy = 2;
+        cluster.settings = { exec: process.argv[1], args: process.argv.slice(2), silent: false,
+                             execArgv: [], cwd: process.cwd() };
+
+        // Internal traffic rides the same channel as user messages, under one reserved key so a
+        // user's own {cmd:...} object can never be mistaken for cluster's.
+        const WIRE = '__mouseCluster';
+        function wire(body) { const m = {}; m[WIRE] = body; return m; }
+        function unwire(message) {
+          return (message && typeof message === 'object' && message[WIRE]) || null;
+        }
+
+        if (cluster.isWorker) {
+          const self = { id: Number(workerID), process: process, exitedAfterDisconnect: false };
+          const worker = new EventEmitter();
+          Object.assign(worker, self);
+          worker.isDead = function(){ return false; };
+          worker.isConnected = function(){ return !!process.connected; };
+          worker.send = function(message, cb){ return process.send(message, cb); };
+          worker.disconnect = function(){ process.disconnect(); return worker; };
+          worker.kill = worker.destroy = function(signal){ process.exit(0); };
+          cluster.worker = worker;
+
+          // Servers waiting on the primary, and the ones it has answered, keyed by address.
+          const claimed = {};
+
+          globalThis.__clusterListen = function(server, host, port, backlog) {
+            const key = String(host) + ':' + String(port);
+            claimed[key] = server;
+            server._clusterKey = key;
+            process.send(wire({ cmd: 'queryServer', key: key, host: String(host),
+                                port: Number(port), backlog: Number(backlog) }));
+            return true;
+          };
+
+          process.on('message', function(message) {
+            const body = unwire(message);
+            if (!body) { worker.emit('message', message); cluster.emit('message', worker, message); return; }
+            if (body.cmd === 'served') {
+              const server = claimed[body.key];
+              if (!server) return;
+              server.listening = true;
+              server._address = body.address;
+              server.emit('listening');
+              return;
+            }
+            if (body.cmd === 'connection') {
+              const server = claimed[body.key];
+              // No server for this key means it closed between the primary's accept and now;
+              // the descriptor must still be closed or it leaks for the life of the process.
+              if (!server || server._closing) { bridge.netDiscard(Number(body.fd)); return; }
+              server._adoptConnection(Number(body.fd));
+              return;
+            }
+            if (body.cmd === 'disconnect') { process.disconnect(); return; }
+          });
+
+          process.send(wire({ cmd: 'online' }));
+          cluster.fork = function() {
+            throw Object.assign(new Error('cluster.fork is not available in a worker'),
+                                { code: 'ERR_INVALID_ARG_TYPE' });
+          };
+          cluster.disconnect = function(cb){ process.disconnect(); if (cb) cb(); };
+          cluster.setupPrimary = cluster.setupMaster = function(){};
+          return cluster;
+        }
+
+        // ---- primary ----
+        const childProcess = coreRequire('child_process');
+        let nextID = 0;
+        // One listening socket per address, shared by every worker that asked for it.
+        const listeners = {};
+
+        function distribute(key, fd) {
+          const listener = listeners[key];
+          const live = listener ? listener.workers.filter(function(id) {
+            const w = cluster.workers[id];
+            return w && !w._dead && w.isConnected();
+          }) : [];
+          if (!live.length) { bridge.netDiscard(fd); return; }
+          listener.next = (listener.next + 1) % live.length;
+          const worker = cluster.workers[live[listener.next]];
+          worker.send(wire({ cmd: 'connection', key: key, fd: fd }));
+        }
+
+        function ensureListener(key, body, worker) {
+          let listener = listeners[key];
+          if (!listener) {
+            listener = { workers: [], next: -1, address: null, pending: [], sid: 0 };
+            listeners[key] = listener;
+            listener.sid = bridge.netListenHandoff(body.host, body.port, body.backlog,
+                                                   function(id, event, payload) {
+              if (event === 'listening') {
+                listener.address = { address: payload.address, family: payload.family, port: payload.port };
+                const waiting = listener.pending;
+                listener.pending = [];
+                waiting.forEach(function(w) { answer(key, w); });
+                return;
+              }
+              if (event === 'handoff') { distribute(key, Number(payload.fd)); return; }
+              if (event === 'error') {
+                const error = Object.assign(new Error(payload.message), { code: payload.code });
+                // A bind failure is the primary's to report: no worker can recover from it.
+                if (!cluster.emit('error', error)) throw error;
+              }
+            });
+          }
+          if (listener.workers.indexOf(worker.id) < 0) listener.workers.push(worker.id);
+          if (listener.address) answer(key, worker);
+          else listener.pending.push(worker);
+        }
+
+        function answer(key, worker) {
+          if (!worker.isConnected()) return;
+          worker.send(wire({ cmd: 'served', key: key, address: listeners[key].address }));
+          worker.emit('listening', listeners[key].address);
+          cluster.emit('listening', worker, listeners[key].address);
+        }
+
+        cluster.fork = function(env) {
+          const id = ++nextID;
+          const childEnv = Object.assign({}, process.env, env || {}, { NODE_UNIQUE_ID: String(id) });
+          const child = childProcess.fork(cluster.settings.exec, cluster.settings.args,
+                                          { env: childEnv, cwd: cluster.settings.cwd,
+                                            silent: cluster.settings.silent });
+          const worker = new EventEmitter();
+          worker.id = id;
+          worker.process = child;
+          worker.exitedAfterDisconnect = false;
+          worker._dead = false;
+          worker.isDead = function(){ return worker._dead; };
+          worker.isConnected = function(){ return !worker._dead && child.connected !== false; };
+          worker.send = function(message, cb){ return child.send(message, cb); };
+          worker.disconnect = function() {
+            worker.exitedAfterDisconnect = true;
+            if (child.connected !== false) child.send(wire({ cmd: 'disconnect' }));
+            return worker;
+          };
+          worker.kill = worker.destroy = function(signal) {
+            worker.exitedAfterDisconnect = true;
+            child.kill(signal);
+            return worker;
+          };
+          cluster.workers[id] = worker;
+
+          child.on('message', function(message) {
+            const body = unwire(message);
+            if (!body) { worker.emit('message', message); cluster.emit('message', worker, message); return; }
+            if (body.cmd === 'online') { worker.emit('online'); cluster.emit('online', worker); return; }
+            if (body.cmd === 'queryServer') { ensureListener(body.key, body, worker); return; }
+          });
+          child.on('disconnect', function(){ worker.emit('disconnect'); cluster.emit('disconnect', worker); });
+          child.on('exit', function(code, signal) {
+            worker._dead = true;
+            delete cluster.workers[id];
+            // Drop it from every listener, or round-robin keeps dealing connections to a corpse.
+            Object.keys(listeners).forEach(function(key) {
+              const at = listeners[key].workers.indexOf(id);
+              if (at >= 0) listeners[key].workers.splice(at, 1);
+            });
+            worker.emit('exit', code, signal);
+            cluster.emit('exit', worker, code, signal);
+          });
+          cluster.emit('fork', worker);
+          return worker;
         };
+
+        cluster.disconnect = function(callback) {
+          const ids = Object.keys(cluster.workers);
+          let left = ids.length;
+          if (!left) { if (callback) process.nextTick(callback); return; }
+          ids.forEach(function(id) {
+            const worker = cluster.workers[id];
+            worker.once('exit', function(){ if (--left === 0 && callback) callback(); });
+            worker.disconnect();
+          });
+        };
+
+        cluster.setupPrimary = cluster.setupMaster = function(settings) {
+          Object.assign(cluster.settings, settings || {});
+          cluster.emit('setup', cluster.settings);
+        };
+        return cluster;
       };
       // tls: like net — imported for types/feature checks; URLSession owns real TLS here.
       coreFactories.tls = function() {
@@ -8524,6 +8758,11 @@ final class NodeEngine: @unchecked Sendable {
             else if (typeof args[1] === 'number') backlog = args[1];
           }
           if (callback) this.once('listening', callback);
+          // In a cluster worker the LISTENING socket belongs to the primary; this server gets
+          // connections handed to it and never binds. Same seam as node's cluster._getServer.
+          if (globalThis.__clusterListen && globalThis.__clusterListen(this, host, port, backlog)) {
+            return this;
+          }
           const self = this;
           // The listening socket's handler receives its accepted sockets' events too, tagged
           // with the socket id: 'connection' is always the first event for a new id, so the
@@ -8533,6 +8772,31 @@ final class NodeEngine: @unchecked Sendable {
             else if (self._sockets[id]) self._sockets[id]._hostEvent(event, payload);
           });
           return this;
+        };
+
+        // A descriptor accepted by ANOTHER engine (cluster's primary) becomes a Socket here.
+        // Below the fd this is an ordinary connected socket, so everything downstream — http's
+        // parser, keep-alive, half-close — is the same code as a locally accepted connection.
+        Server.prototype._adoptConnection = function(fd) {
+          const socket = new Socket({ allowHalfOpen: this.allowHalfOpen });
+          const self = this;
+          socket.connecting = false;
+          socket.pending = false;
+          socket._server = this;
+          socket._sid = bridge.netAdopt(Number(fd), function(id, event, payload) {
+            socket._hostEvent(event, payload);
+          });
+          this._sockets[socket._sid] = socket;
+          this._connections.push(socket);
+          socket.once('close', function(){
+            delete self._sockets[socket._sid];
+            const at = self._connections.indexOf(socket);
+            if (at >= 0) self._connections.splice(at, 1);
+            self._maybeClosed();
+          });
+          if (this._connections.length > this.maxConnections) { socket.destroy(); return socket; }
+          this.emit('connection', socket);
+          return socket;
         };
 
         Server.prototype._hostEvent = function(event, payload) {

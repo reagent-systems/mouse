@@ -450,6 +450,25 @@ trigger; don't fix it in passing.
    `cursor`, `n8n`, … — see ROADMAP.md), and slices merge to `main` when
    feel-tested.
 
+### Verifying anything concurrent
+
+- **One green run is not evidence.** Run it 20+ times. cluster passed 4 rounds and
+  failed the 5th; the underlying http bug reproduced 3 times in 20. Every
+  socket-teardown bug in this layer has had a failure rate near one in three.
+- **Instrumentation moves the bug.** Adding `process.stderr.write` to the worker
+  turned a 3-in-20 failure into 12-for-12 green. A green run *under added logging*
+  is worth nothing — it changed the timing you were trying to measure. Localize by
+  A/B instead: run the same binary with one behaviour switched off (kill vs no
+  kill, pooled vs `agent: false`) and compare failure RATES.
+- **Never chain a build and its test in one background command and then read only
+  the test's output.** A failed `swiftc` leaves the previous binary in place, the
+  stale binary passes, and the suite reports ALL PASS while your new fixture never
+  ran. Check the build's own output, or that the fixture's name appears in the
+  results. This bit once already, the same shape as the `cd x && python` trap.
+- **A hang is a worse bug than an error.** When a network path can fail, check that
+  it produces an event a caller can act on. Two of this layer's http defects were
+  silent waits, and both were invisible to fixtures that only asserted happy paths.
+
 ## Landmines — do not "fix" these
 
 - `ForegroundView` measures with **`containerRelativeFrame`**. Replacing it

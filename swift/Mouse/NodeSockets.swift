@@ -34,6 +34,12 @@ final class SocketTable: @unchecked Sendable {
         case listening(Address)
         /// A server accepted someone: the connection is already a live socket in the table.
         case connection(id: Int, local: Address, remote: Address)
+        /// A HANDOFF server accepted someone and is NOT keeping it: the raw descriptor is
+        /// reported instead of a socket id, and nothing in this table owns it any more. This is
+        /// what makes `cluster` possible here — a worker is another engine in the SAME OS
+        /// process, so the descriptor is already valid there and only its NUMBER has to travel.
+        /// Whoever receives it must `adopt` or `discard` it, or the descriptor leaks.
+        case handoff(fd: Int32, local: Address, remote: Address)
         case data(Data)
         /// A datagram and where it came from — UDP has no connection to hang it on.
         case datagram(Data, from: Address)
@@ -91,6 +97,8 @@ final class SocketTable: @unchecked Sendable {
         var paused = false
         /// UDP: no connection, no half-close, and `destroy` is the only way it ends.
         var isDatagram = false
+        /// Accepted connections are reported as raw descriptors and not retained here.
+        var handoff = false
         /// A listening unix socket owns a FILE, which has to be removed when it closes —
         /// otherwise the next bind to the same path fails with the socket nobody is using.
         var unixPath: String?
@@ -274,7 +282,8 @@ final class SocketTable: @unchecked Sendable {
 
     /// Bind and listen. Port 0 means "any" — the assigned port comes back in `.listening`,
     /// which is how a dev server on an ephemeral port learns its own URL.
-    func listen(host: String, port: Int, backlog: Int, handler: @escaping Handler) -> Int {
+    func listen(host: String, port: Int, backlog: Int, handoff: Bool = false,
+                handler: @escaping Handler) -> Int {
         let id = claimID()
         retain()
         queue.async { [self] in
@@ -314,6 +323,7 @@ final class SocketTable: @unchecked Sendable {
 
             let entry = Entry(id: id, fd: fd, handler: handler)
             entry.isServer = true
+            entry.handoff = handoff
             entry.local = localAddress(fd)
             entries[id] = entry
             startAccepting(entry)
@@ -682,6 +692,32 @@ final class SocketTable: @unchecked Sendable {
     /// global's tasks live in the engine but must not collide with socket ids).
     func claimExternalID() -> Int { claimID() }
 
+    /// Take over a descriptor this table did not create — the other half of `handoff`. The
+    /// socket is already connected, so this reports `.connect` immediately, exactly as a
+    /// completed `connect()` would, and JavaScript cannot tell the two apart.
+    func adopt(fd: Int32, handler: @escaping Handler) -> Int {
+        let id = claimID()
+        retain()
+        queue.async { [self] in
+            setNonBlocking(fd)
+            var one: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            let entry = Entry(id: id, fd: fd, handler: handler)
+            entry.local = localAddress(fd)
+            entry.remote = peerAddress(fd)
+            entries[id] = entry
+            startReading(entry)
+            emit(entry, .connect(local: entry.local, remote: entry.remote))
+        }
+        return id
+    }
+
+    /// Close a handed-off descriptor nobody adopted. Without this a primary with no live worker
+    /// would leak one descriptor per connection.
+    func discard(fd: Int32) {
+        queue.async { close(fd) }
+    }
+
     private func claimID() -> Int {
         idLock.lock()
         defer { idLock.unlock() }
@@ -759,6 +795,15 @@ final class SocketTable: @unchecked Sendable {
             setNonBlocking(fd)
             var one: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+
+            if server.handoff {
+                // Nothing here takes ownership: the receiver adopts this descriptor (possibly
+                // in another engine) or discards it. Deliberately no read source in between —
+                // unread bytes wait in the kernel's buffer, which is exactly what makes the
+                // gap between accept and adopt harmless.
+                emit(server, .handoff(fd: fd, local: localAddress(fd), remote: peerAddress(fd)))
+                continue
+            }
 
             let id = claimID()
             retain()
