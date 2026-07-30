@@ -968,6 +968,21 @@ final class NodeEngine: @unchecked Sendable {
         }
         expose("fsWatch", fsWatch)
         expose("fsUnwatch", fsUnwatch)
+        // A socket FILE instead of a host and port. The audit called this reachable but
+        // unbuilt; it is the same stream machinery with a different address family.
+        let netConnectUnix: @convention(block) (String, JSValue) -> Int32 = { [weak self] path, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.connectUnix(path: realURL(path).path, handler: dispatcher(callback)))
+        }
+        let netListenUnix: @convention(block) (String, Int32, JSValue) -> Int32 = { [weak self] path, backlog, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.listenUnix(path: realURL(path).path, backlog: Int(backlog),
+                                            handler: dispatcher(callback)))
+        }
+        expose("netConnectUnix", netConnectUnix)
+        expose("netListenUnix", netListenUnix)
         expose("netConnect", netConnect)
         expose("netListen", netListen)
         expose("netWrite", netWrite)
@@ -8332,11 +8347,20 @@ final class NodeEngine: @unchecked Sendable {
           const args = Array.prototype.slice.call(arguments);
           const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
           let host = 'localhost', port = 0;
+          // A path instead of a port is a unix domain socket, which is real now.
+          const unixPath = (args[0] && typeof args[0] === 'object' && args[0].path) ? String(args[0].path)
+            : (typeof args[0] === 'string' && !/^\d+$/.test(args[0]) ? args[0] : null);
+          if (unixPath) {
+            this.connecting = true;
+            if (callback) this.once('connect', callback);
+            const self = this;
+            this._sid = bridge.netConnectUnix(unixPath, function(id, event, payload) {
+              self._hostEvent(event, payload);
+            });
+            return this;
+          }
           if (args[0] && typeof args[0] === 'object') {
-            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available: the socket table binds and connects TCP (AF_INET/AF_INET6). AF_UNIX is reachable on this platform, just not built — a TCP port on 127.0.0.1 is the working substitute'), { code: 'ERR_INVALID_ARG_VALUE' });
             port = args[0].port; host = args[0].host || 'localhost';
-          } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
-            throw Object.assign(new Error('unix domain sockets are not available: the socket table binds and connects TCP (AF_INET/AF_INET6). AF_UNIX is reachable on this platform, just not built — a TCP port on 127.0.0.1 is the working substitute'), { code: 'ERR_INVALID_ARG_VALUE' });
           } else {
             port = Number(args[0]);
             if (typeof args[1] === 'string') host = args[1];
@@ -8427,8 +8451,19 @@ final class NodeEngine: @unchecked Sendable {
           const args = Array.prototype.slice.call(arguments);
           const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
           let port = 0, host = '0.0.0.0', backlog = 511;
+          // A path listens on a socket FILE.
+          const unixPath = (args[0] && typeof args[0] === 'object' && args[0].path) ? String(args[0].path)
+            : (typeof args[0] === 'string' && !/^\d+$/.test(args[0]) ? args[0] : null);
+          if (unixPath) {
+            if (callback) this.once('listening', callback);
+            const self = this;
+            this._sid = bridge.netListenUnix(unixPath, 511, function(id, event, payload) {
+              if (id === self._sid) self._hostEvent(event, payload);
+              else if (self._sockets[id]) self._sockets[id]._hostEvent(event, payload);
+            });
+            return this;
+          }
           if (args[0] && typeof args[0] === 'object') {
-            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available: the socket table binds and connects TCP (AF_INET/AF_INET6). AF_UNIX is reachable on this platform, just not built — a TCP port on 127.0.0.1 is the working substitute'), { code: 'ERR_INVALID_ARG_VALUE' });
             port = args[0].port || 0;
             host = args[0].host || '0.0.0.0';
             backlog = args[0].backlog || backlog;

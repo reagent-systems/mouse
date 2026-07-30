@@ -91,6 +91,9 @@ final class SocketTable: @unchecked Sendable {
         var paused = false
         /// UDP: no connection, no half-close, and `destroy` is the only way it ends.
         var isDatagram = false
+        /// A listening unix socket owns a FILE, which has to be removed when it closes —
+        /// otherwise the next bind to the same path fails with the socket nobody is using.
+        var unixPath: String?
         /// The handshake hasn't settled: `write()` may queue bytes, but sending them now
         /// would be ENOTCONN. `finishConnect` flushes whatever accumulated.
         var connecting = false
@@ -312,6 +315,103 @@ final class SocketTable: @unchecked Sendable {
             let entry = Entry(id: id, fd: fd, handler: handler)
             entry.isServer = true
             entry.local = localAddress(fd)
+            entries[id] = entry
+            startAccepting(entry)
+            emit(entry, .listening(entry.local))
+        }
+        return id
+    }
+
+    // MARK: - Unix domain sockets
+
+    /// A `sockaddr_un` for a filesystem path. The path is length-limited by the struct (104
+    /// bytes on Darwin), and a longer one must fail here rather than be silently truncated into
+    /// a different socket.
+    private static func unixAddress(_ path: String) -> sockaddr_un? {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        let capacity = MemoryLayout.size(ofValue: address.sun_path) - 1
+        guard bytes.count <= capacity else { return nil }
+        withUnsafeMutableBytes(of: &address.sun_path) { raw in
+            raw.copyBytes(from: bytes)
+        }
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        return address
+    }
+
+    /// Connect to a socket FILE. Everything after the handshake is the stream path — the same
+    /// Entry, reads, writes and teardown a TCP socket uses.
+    func connectUnix(path: String, handler: @escaping Handler) -> Int {
+        let id = claimID()
+        retain()
+        queue.async { [self] in
+            guard var address = Self.unixAddress(path) else {
+                fail(id: id, handler: handler,
+                     message: "connect ENAMETOOLONG \(path)", code: "ENAMETOOLONG")
+                return
+            }
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                fail(id: id, handler: handler, message: "socket failed", code: errnoCode())
+                return
+            }
+            var one: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            let connected = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard connected == 0 else {
+                let code = errnoCode()
+                close(fd)
+                fail(id: id, handler: handler, message: "connect \(code) \(path)", code: code)
+                return
+            }
+            setNonBlocking(fd)
+            let entry = Entry(id: id, fd: fd, handler: handler)
+            entries[id] = entry
+            startReading(entry)
+            emit(entry, .connect(local: Address(address: path, port: 0, family: "unix"),
+                                 remote: Address(address: path, port: 0, family: "unix")))
+        }
+        return id
+    }
+
+    /// Listen on a socket FILE. A stale file from a previous run must be removed first, which is
+    /// what node does too — bind fails with EADDRINUSE on an existing path even when nobody is
+    /// listening.
+    func listenUnix(path: String, backlog: Int, handler: @escaping Handler) -> Int {
+        let id = claimID()
+        retain()
+        queue.async { [self] in
+            guard var address = Self.unixAddress(path) else {
+                fail(id: id, handler: handler, message: "listen ENAMETOOLONG \(path)", code: "ENAMETOOLONG")
+                return
+            }
+            unlink(path)
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                fail(id: id, handler: handler, message: "socket failed", code: errnoCode())
+                return
+            }
+            let bound = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard bound == 0, Darwin.listen(fd, Int32(backlog)) == 0 else {
+                let code = errnoCode()
+                close(fd)
+                fail(id: id, handler: handler, message: "listen \(code) \(path)", code: code)
+                return
+            }
+            setNonBlocking(fd)
+            let entry = Entry(id: id, fd: fd, handler: handler)
+            entry.isServer = true
+            entry.unixPath = path
+            entry.local = Address(address: path, port: 0, family: "unix")
             entries[id] = entry
             startAccepting(entry)
             emit(entry, .listening(entry.local))
@@ -694,6 +794,7 @@ final class SocketTable: @unchecked Sendable {
         entry.readSource = nil
         entry.writeSource = nil
         close(entry.fd)
+        if let path = entry.unixPath { unlink(path) }
         entries[entry.id] = nil
         if entry.refed { release() }
         if emitClose { emit(entry, .close) }

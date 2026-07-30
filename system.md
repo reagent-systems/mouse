@@ -110,6 +110,7 @@ so a TUI navigates and edits.
 | **Phase G — real ECDH** | `createECDH` for P-256/384/521 and X25519 on CryptoKit's key agreement. It had been refusing with "needs SecKey", which was simply wrong — and node's public-key encoding (the uncompressed point `0x04‖X‖Y`) IS CryptoKit's `x963Representation`, so the wire format needed no conversion at all. Verified the only way a key agreement can be: **both engines derive the same shared secret** from each other's public keys, on every curve |
 | **Phase G — audit the refusals for truth** | Every "not available" message in the engine re-read against what the engine can now do. One had gone stale into a FALSEHOOD (`cluster`: "single process" — we have live children), two blamed capabilities that have since shipped (http2 blamed missing HTTP support and "the dev-server engine is on the roadmap"), and five gave no reason at all. All corrected, and a fixture now asserts the SHAPE: every refusal names a reason, and none claims something the engine can do |
 | **Phase G — UDP** | `dgram` is real: a datagram table in the socket layer (`SOCK_DGRAM`, `recvfrom`, `sendto`), and node's socket API on top — bind with an assigned port, `message` with a full `rinfo`, implicit bind on first send, broadcast. Datagrams flow both ways with real node, sender addresses intact. Multicast still refuses (it needs `IP_ADD_MEMBERSHIP` on the fd). Written because last boundary's audit called this "reachable, just not built" — so building it was the follow-through |
+| **Phase G — unix domain sockets** | `net.connect({ path })` and `server.listen(path)` work on a real socket FILE, in both directions with real node — the same stream machinery with a different address family, plus the two things a socket file adds: a stale file removed before bind, and the file unlinked when the listener closes. A path longer than `sockaddr_un` fails loudly rather than being truncated into a different socket |
 
 ### Verification performed
 
@@ -1047,6 +1048,19 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
+- **Unix domain sockets, the other thing the audit called reachable.** `net.connect({
+  path })` and `server.listen(path)` now work on a real socket file, verified both
+  ways against real node. Almost all of it was already built — the Entry, reads,
+  writes, teardown — so what remained was the address family and the two things a
+  socket FILE adds that a port does not: a stale file from a previous run has to be
+  removed before bind (node fails EADDRINUSE on an existing path even when nobody
+  listens), and the file has to be unlinked when the listener closes, or the next
+  bind inherits a socket nobody is on. A path longer than `sockaddr_un`'s room fails
+  loudly instead of being silently truncated into a DIFFERENT socket.
+  The refusal-truth fixture caught this change too, and then caught a mistake in my
+  own check: I had listed a too-long path as a synchronous refusal, but node reports
+  connect failures asynchronously as an `'error'` event — so the row did not belong
+  in a list about synchronous throws at all.
 - **UDP, because the audit said it was reachable.** The previous boundary rewrote
   `dgram`'s refusal from "not available yet" to "the socket layer is stream-only;
   UDP needs a datagram table of its own, which is reachable here, just not built".
