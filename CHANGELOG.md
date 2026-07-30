@@ -21,7 +21,8 @@ carry breaking changes.
   `<bin>` works: the CommonJS *and* ES-module systems, a real event loop,
   `fs` (sync, callback and fd forms), `stream` (with streaming
   compression), `crypto` (CryptoKit — including real AES-GCM/CBC/CTR and
-  ChaCha20-Poly1305 ciphers, `pbkdf2` and `hkdf`, interoperable with node's), `zlib` (libz), `readline`,
+  ChaCha20-Poly1305 ciphers, `pbkdf2`, `hkdf`, and EC/Ed25519 signing, all interoperable with
+  node's — `jsonwebtoken` issues ES256 tokens real node accepts), `zlib` (libz), `readline`,
   `child_process` bridged into `msh`, the **fetch API** with streaming
   response bodies, and **real TCP** (`net`): outbound connections, servers
   that listen and accept, honest backpressure and half-close — verified in

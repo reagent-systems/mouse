@@ -31,6 +31,14 @@ honored (incremental pack smaller than the full closure); and the merge
 engine must match `git merge-file` on the line merge (clean + conflict
 cases) and a real repo on the FF/three-way outcomes (`fsck` clean, both
 parents present, byte-identical content).
+`NodeSockets.swift` and `NodeWatch.swift` hand closures across queues by design.
+That is stated in the types rather than warned about: `@Sendable` handler types,
+`@unchecked Sendable` on the queue-confined `Entry`/`Watcher` classes (the
+confinement to one serial queue is what makes it true), values handed to closures
+instead of mutable vars, and a single `Carried` box for the one crossing that can
+never be checked — a JSValue travelling to the JS thread, where it is only ever
+called. Keep the build WARNING-FREE; these are errors under the Swift 6 language
+mode.
 Pack inflate uses **libz** (`-lz` in project.yml), not the Compression
 framework, which can't delimit concatenated zlib members.
 `TerminalScreen.swift` and `TerminalPrograms.swift` are also
@@ -160,6 +168,25 @@ watch mode must compile, detect an edit through our watcher, recompile, and
 report the same diagnostics as real node. That last one is the phase-D loop
 (edit → recompile → diagnostics) and the heaviest consumer of `fs.watch` there
 is; if it breaks, suspect the watcher or `Stats` before suspecting tsc.
+SIGNING (ECDSA P-256/384/521 and Ed25519, via CryptoKit) cannot be verified by
+comparing bytes — signatures are randomized. The test is CROSS-ENGINE: real node
+must verify our signatures and we must verify node's, for every key type, with a
+tampered message rejected. Keep `jsonwebtoken` green too (ES256 and HS256, signed
+in one engine and verified in the other) — it exercised three faults no fixture
+did. Ed25519 signs the MESSAGE (a digest name is an error, code
+`ERR_OSSL_INVALID_DIGEST`), and `dsaEncoding: 'ieee-p1363'` selects JOSE's raw
+r||s over the DER default. RSA refuses: node generates a key where we cannot, so
+assert that on OUR side alone, never as a twin fixture.
+**Digest names arrive in OpenSSL's legacy forms** — `jwa` signs ES256 by asking
+for `RSA-SHA256`, certificates use `ecdsa-with-SHA256`. Normalize the prefix;
+node accepts them for any key type.
+**Buffer's base64 decoder must accept the base64URL alphabet** (`-` and `_`
+translated, not stripped). node's is lenient and real code depends on it: `jwa`
+hands a base64url signature straight to `Buffer.from(s, 'base64')`. Stripping
+those characters drops bytes SILENTLY, and the symptom appears far away.
+**KeyObjects are legal wherever key material is** — `createHmac`, `createCipheriv`
+and the signers must all accept one. `jsonwebtoken` wraps its secret with
+`createSecretKey`, so a plain `String(data)` coercion hashes `"[object Object]"`.
 CIPHERS verify two ways, and the second is the one that matters: with a FIXED
 key and IV the ciphertext, auth tag and derived keys must be byte-identical to
 real node's (a much stronger check than "it round-trips"), and cross-engine —

@@ -375,6 +375,14 @@ final class NodeEngine: @unchecked Sendable {
     private func installNativeBridge(argv: [String], cwd: String, stdin: String) {
         let bridge = JSValue(newObjectIn: context)!
 
+        // A JSValue is not Sendable and never will be, yet these callbacks deliberately travel
+        // to the JS thread — where they are only ever CALLED, on that thread. `Carried` records
+        // the crossing in one place instead of leaving a warning at every bridge.
+        struct Carried<Value>: @unchecked Sendable {
+            let value: Value
+            init(_ value: Value) { self.value = value }
+        }
+
         func expose(_ name: String, _ block: Any) {
             bridge.setObject(block, forKeyedSubscript: name as NSString)
         }
@@ -557,7 +565,8 @@ final class NodeEngine: @unchecked Sendable {
         let httpRequest: @convention(block) (String, String, [String: String], String, JSValue) -> Void = { [weak self] urlText, method, headers, bodyBase64, callback in
             guard let self else { return }
             guard let url = URL(string: urlText) else {
-                self.enqueueJob { callback.call(withArguments: [["error": "invalid URL: \(urlText)"]]) }
+                let carried = Carried(callback)
+                self.enqueueJob { carried.value.call(withArguments: [["error": "invalid URL: \(urlText)"]]) }
                 return
             }
             var request = URLRequest(url: url)
@@ -565,11 +574,12 @@ final class NodeEngine: @unchecked Sendable {
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
             self.outstanding += 1
+            let carried = Carried(callback)
             URLSession.shared.dataTask(with: request) { data, response, error in
                 self.enqueueJob {
                     self.outstanding -= 1
                     if let error {
-                        callback.call(withArguments: [["error": error.localizedDescription]])
+                        carried.value.call(withArguments: [["error": error.localizedDescription]])
                         return
                     }
                     let http = response as? HTTPURLResponse
@@ -577,7 +587,7 @@ final class NodeEngine: @unchecked Sendable {
                     for (name, value) in http?.allHeaderFields ?? [:] {
                         headerMap[String(describing: name).lowercased()] = String(describing: value)
                     }
-                    callback.call(withArguments: [[
+                    carried.value.call(withArguments: [[
                         "status": http?.statusCode ?? 0,
                         "headers": headerMap,
                         "body": (data ?? Data()).base64EncodedString(),
@@ -592,27 +602,28 @@ final class NodeEngine: @unchecked Sendable {
         // switches on the name, so adding an event costs nothing here. All of these run on
         // the JS thread already (SocketTable delivers through `enqueueJob`).
         func dispatcher(_ callback: JSValue) -> SocketTable.Handler {
-            func plain(_ address: SocketTable.Address) -> [String: Any] {
+            let carried = Carried(callback)
+            @Sendable func plain(_ address: SocketTable.Address) -> [String: Any] {
                 ["address": address.address, "port": address.port, "family": address.family]
             }
             return { id, event in
                 switch event {
                 case let .connect(local, remote):
-                    callback.call(withArguments: [id, "connect", ["local": plain(local), "remote": plain(remote)]])
+                    carried.value.call(withArguments: [id, "connect", ["local": plain(local), "remote": plain(remote)]])
                 case let .listening(address):
-                    callback.call(withArguments: [id, "listening", plain(address)])
+                    carried.value.call(withArguments: [id, "listening", plain(address)])
                 case let .connection(socket, local, remote):
-                    callback.call(withArguments: [id, "connection", ["id": socket, "local": plain(local), "remote": plain(remote)]])
+                    carried.value.call(withArguments: [id, "connection", ["id": socket, "local": plain(local), "remote": plain(remote)]])
                 case let .data(bytes):
-                    callback.call(withArguments: [id, "data", bytes.base64EncodedString()])
+                    carried.value.call(withArguments: [id, "data", bytes.base64EncodedString()])
                 case .end:
-                    callback.call(withArguments: [id, "end", NSNull()])
+                    carried.value.call(withArguments: [id, "end", NSNull()])
                 case .drain:
-                    callback.call(withArguments: [id, "drain", NSNull()])
+                    carried.value.call(withArguments: [id, "drain", NSNull()])
                 case .close:
-                    callback.call(withArguments: [id, "close", NSNull()])
+                    carried.value.call(withArguments: [id, "close", NSNull()])
                 case let .error(message, code):
-                    callback.call(withArguments: [id, "error", ["message": message, "code": code]])
+                    carried.value.call(withArguments: [id, "error", ["message": message, "code": code]])
                 }
             }
         }
@@ -647,9 +658,10 @@ final class NodeEngine: @unchecked Sendable {
         let netResolve: @convention(block) (String, Int32, JSValue) -> Void = { [weak self] host, family, callback in
             guard let self else { return }
             socketsUsed = true
+            let carried = Carried(callback)
             sockets.resolve(host: host, family: Int(family)) { found, code in
                 let list = found.map { ["address": $0.address, "family": $0.family == "IPv6" ? 6 : 4] as [String: Any] }
-                callback.call(withArguments: [list, code ?? ""])
+                carried.value.call(withArguments: [list, code ?? ""])
             }
         }
         expose("netResolve", netResolve)
@@ -658,10 +670,11 @@ final class NodeEngine: @unchecked Sendable {
         let fsWatch: @convention(block) (String, Bool, JSValue) -> Int32 = { [weak self] path, recursive, callback in
             guard let self else { return 0 }
             watchersUsed = true
+            let carried = Carried(callback)
             guard let id = watchers.watch(path: realURL(path).path, recursive: recursive, handler: { event in
                 switch event {
-                case let .rename(name): callback.call(withArguments: ["rename", name])
-                case let .change(name): callback.call(withArguments: ["change", name])
+                case let .rename(name): carried.value.call(withArguments: ["rename", name])
+                case let .change(name): carried.value.call(withArguments: ["change", name])
                 }
             }) else { return 0 }
             return Int32(id)
@@ -801,6 +814,196 @@ final class NodeEngine: @unchecked Sendable {
             default: return NSNull()
             }
         }
+        // -- asymmetric: EC and Ed25519 signing ------------------------------------------
+        // CryptoKit imports and exports PKCS#8/SPKI PEM for P-256/384/521 directly, so no
+        // ASN.1 of ours is involved for EC. Ed25519 has no PEM API, but RFC 8410 wrappers are
+        // FIXED shapes (48 bytes private, 44 public) — checked byte for byte here rather than
+        // parsed loosely, so a malformed key errors instead of yielding garbage.
+        let ed25519PrivatePrefix = Data([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03,
+                                         0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20])
+        let ed25519PublicPrefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
+                                        0x03, 0x21, 0x00])
+        func pemBody(_ pem: String) -> Data? {
+            let lines = pem.split(separator: "\n").filter { !$0.hasPrefix("-----") }
+            return Data(base64Encoded: lines.joined())
+        }
+        func pemWrap(_ body: Data, _ label: String) -> String {
+            let base64 = body.base64EncodedString()
+            var lines: [String] = []
+            var index = base64.startIndex
+            while index < base64.endIndex {
+                let end = base64.index(index, offsetBy: 64, limitedBy: base64.endIndex) ?? base64.endIndex
+                lines.append(String(base64[index..<end]))
+                index = end
+            }
+            return "-----BEGIN \(label)-----\n" + lines.joined(separator: "\n") + "\n-----END \(label)-----\n"
+        }
+        func edPrivate(_ pem: String) -> Curve25519.Signing.PrivateKey? {
+            guard let body = pemBody(pem), body.count == 48,
+                  body.prefix(16) == ed25519PrivatePrefix else { return nil }
+            return try? Curve25519.Signing.PrivateKey(rawRepresentation: body.suffix(32))
+        }
+        func edPublic(_ pem: String) -> Curve25519.Signing.PublicKey? {
+            guard let body = pemBody(pem), body.count == 44,
+                  body.prefix(12) == ed25519PublicPrefix else { return nil }
+            return try? Curve25519.Signing.PublicKey(rawRepresentation: body.suffix(32))
+        }
+        /// What kind of key is this? JS needs it for `asymmetricKeyType` and to reject an
+        /// algorithm/key mismatch the way node does.
+        let keyIdentify: @convention(block) (String) -> Any = { pem in
+            if pem.contains("RSA") || (pemBody(pem)?.count ?? 0) > 200 {
+                // An RSA key imports fine here and then cannot be used, so name it and let JS
+                // refuse with the reason.
+                if (try? P521.Signing.PrivateKey(pemRepresentation: pem)) == nil,
+                   (try? P521.Signing.PublicKey(pemRepresentation: pem)) == nil {
+                    return ["type": "rsa", "curve": ""] as [String: Any]
+                }
+            }
+            if (try? P256.Signing.PrivateKey(pemRepresentation: pem)) != nil ||
+               (try? P256.Signing.PublicKey(pemRepresentation: pem)) != nil {
+                return ["type": "ec", "curve": "prime256v1"] as [String: Any]
+            }
+            if (try? P384.Signing.PrivateKey(pemRepresentation: pem)) != nil ||
+               (try? P384.Signing.PublicKey(pemRepresentation: pem)) != nil {
+                return ["type": "ec", "curve": "secp384r1"] as [String: Any]
+            }
+            if (try? P521.Signing.PrivateKey(pemRepresentation: pem)) != nil ||
+               (try? P521.Signing.PublicKey(pemRepresentation: pem)) != nil {
+                return ["type": "ec", "curve": "secp521r1"] as [String: Any]
+            }
+            if edPrivate(pem) != nil || edPublic(pem) != nil {
+                return ["type": "ed25519", "curve": ""] as [String: Any]
+            }
+            return ["type": "unknown", "curve": ""] as [String: Any]
+        }
+        /// Sign. `raw` picks node's `dsaEncoding: 'ieee-p1363'` over the DER default.
+        let keySign: @convention(block) (String, String, String, Bool) -> Any = { pem, dataBase64, digestName, raw in
+            guard let data = Data(base64Encoded: dataBase64) else { return NSNull() }
+            func ecSignature<Key>(_ key: Key, _ sign: (Key, Data) throws -> (der: Data, raw: Data)) -> Any {
+                guard let pair = try? sign(key, data) else { return NSNull() }
+                return (raw ? pair.raw : pair.der).base64EncodedString()
+            }
+            func digestData(_ name: String, _ input: Data) -> (any Digest)? {
+                // OpenSSL's legacy names reach us through real libraries: `jwa` signs ES256 by
+                // asking for "RSA-SHA256" (the prefix is historical and works for any key type
+                // in node), and certificates use "ecdsa-with-SHA256". Not normalizing these
+                // made jsonwebtoken fail on a digest node accepts.
+                var normalized = name.lowercased().replacingOccurrences(of: "-", with: "")
+                for prefix in ["rsa", "ecdsawith", "ecdsa"] where normalized.hasPrefix(prefix) {
+                    normalized = String(normalized.dropFirst(prefix.count))
+                    break
+                }
+                switch normalized {
+                case "sha256": return SHA256.hash(data: input)
+                case "sha384": return SHA384.hash(data: input)
+                case "sha512": return SHA512.hash(data: input)
+                case "sha1": return Insecure.SHA1.hash(data: input)
+                default: return nil
+                }
+            }
+            if let key = try? P256.Signing.PrivateKey(pemRepresentation: pem) {
+                guard let digest = digestData(digestName, data),
+                      let signature = try? key.signature(for: digest) else { return NSNull() }
+                return (raw ? signature.rawRepresentation : signature.derRepresentation).base64EncodedString()
+            }
+            if let key = try? P384.Signing.PrivateKey(pemRepresentation: pem) {
+                guard let digest = digestData(digestName, data),
+                      let signature = try? key.signature(for: digest) else { return NSNull() }
+                return (raw ? signature.rawRepresentation : signature.derRepresentation).base64EncodedString()
+            }
+            if let key = try? P521.Signing.PrivateKey(pemRepresentation: pem) {
+                guard let digest = digestData(digestName, data),
+                      let signature = try? key.signature(for: digest) else { return NSNull() }
+                return (raw ? signature.rawRepresentation : signature.derRepresentation).base64EncodedString()
+            }
+            if let key = edPrivate(pem) {
+                // Ed25519 signs the MESSAGE, never a digest — that is the algorithm, and node
+                // rejects a digest name for it too.
+                guard let signature = try? key.signature(for: data) else { return NSNull() }
+                return signature.base64EncodedString()
+            }
+            return NSNull()
+        }
+        let keyVerify: @convention(block) (String, String, String, String, Bool) -> Any = {
+            pem, dataBase64, signatureBase64, digestName, raw in
+            guard let data = Data(base64Encoded: dataBase64),
+                  let signature = Data(base64Encoded: signatureBase64) else { return false }
+            func digestData(_ name: String, _ input: Data) -> (any Digest)? {
+                // OpenSSL's legacy names reach us through real libraries: `jwa` signs ES256 by
+                // asking for "RSA-SHA256" (the prefix is historical and works for any key type
+                // in node), and certificates use "ecdsa-with-SHA256". Not normalizing these
+                // made jsonwebtoken fail on a digest node accepts.
+                var normalized = name.lowercased().replacingOccurrences(of: "-", with: "")
+                for prefix in ["rsa", "ecdsawith", "ecdsa"] where normalized.hasPrefix(prefix) {
+                    normalized = String(normalized.dropFirst(prefix.count))
+                    break
+                }
+                switch normalized {
+                case "sha256": return SHA256.hash(data: input)
+                case "sha384": return SHA384.hash(data: input)
+                case "sha512": return SHA512.hash(data: input)
+                case "sha1": return Insecure.SHA1.hash(data: input)
+                default: return nil
+                }
+            }
+            // A public key may arrive as either an SPKI public PEM or a private one.
+            if let key = (try? P256.Signing.PublicKey(pemRepresentation: pem))
+                ?? (try? P256.Signing.PrivateKey(pemRepresentation: pem))?.publicKey {
+                guard let digest = digestData(digestName, data) else { return false }
+                let parsed = raw ? try? P256.Signing.ECDSASignature(rawRepresentation: signature)
+                                 : try? P256.Signing.ECDSASignature(derRepresentation: signature)
+                guard let parsed else { return false }
+                return key.isValidSignature(parsed, for: digest)
+            }
+            if let key = (try? P384.Signing.PublicKey(pemRepresentation: pem))
+                ?? (try? P384.Signing.PrivateKey(pemRepresentation: pem))?.publicKey {
+                guard let digest = digestData(digestName, data) else { return false }
+                let parsed = raw ? try? P384.Signing.ECDSASignature(rawRepresentation: signature)
+                                 : try? P384.Signing.ECDSASignature(derRepresentation: signature)
+                guard let parsed else { return false }
+                return key.isValidSignature(parsed, for: digest)
+            }
+            if let key = (try? P521.Signing.PublicKey(pemRepresentation: pem))
+                ?? (try? P521.Signing.PrivateKey(pemRepresentation: pem))?.publicKey {
+                guard let digest = digestData(digestName, data) else { return false }
+                let parsed = raw ? try? P521.Signing.ECDSASignature(rawRepresentation: signature)
+                                 : try? P521.Signing.ECDSASignature(derRepresentation: signature)
+                guard let parsed else { return false }
+                return key.isValidSignature(parsed, for: digest)
+            }
+            if let key = edPublic(pem) ?? edPrivate(pem)?.publicKey {
+                return key.isValidSignature(signature, for: data)
+            }
+            return false
+        }
+        let keyGenerate: @convention(block) (String, String) -> Any = { type, curve in
+            switch (type, curve) {
+            case ("ec", "prime256v1"), ("ec", "P-256"), ("ec", ""):
+                let key = P256.Signing.PrivateKey()
+                return ["privateKey": key.pemRepresentation,
+                        "publicKey": key.publicKey.pemRepresentation] as [String: Any]
+            case ("ec", "secp384r1"), ("ec", "P-384"):
+                let key = P384.Signing.PrivateKey()
+                return ["privateKey": key.pemRepresentation,
+                        "publicKey": key.publicKey.pemRepresentation] as [String: Any]
+            case ("ec", "secp521r1"), ("ec", "P-521"):
+                let key = P521.Signing.PrivateKey()
+                return ["privateKey": key.pemRepresentation,
+                        "publicKey": key.publicKey.pemRepresentation] as [String: Any]
+            case ("ed25519", _):
+                let key = Curve25519.Signing.PrivateKey()
+                let privateBody = ed25519PrivatePrefix + key.rawRepresentation
+                let publicBody = ed25519PublicPrefix + key.publicKey.rawRepresentation
+                return ["privateKey": pemWrap(privateBody, "PRIVATE KEY"),
+                        "publicKey": pemWrap(publicBody, "PUBLIC KEY")] as [String: Any]
+            default:
+                return NSNull()
+            }
+        }
+        expose("keyIdentify", keyIdentify)
+        expose("keySign", keySign)
+        expose("keyVerify", keyVerify)
+        expose("keyGenerate", keyGenerate)
         expose("cipherSeal", cipherSeal)
         expose("cipherOpen", cipherOpen)
         expose("pbkdf2", pbkdf2Block)
@@ -1646,7 +1849,12 @@ final class NodeEngine: @unchecked Sendable {
         return out;
       }
       function b64Decode(str) {
-        str = String(str).replace(/[^A-Za-z0-9+/]/g, '');
+        // node's base64 decoder accepts the base64URL alphabet too, and real code relies on
+        // that: `jwa` hands a base64url signature straight to Buffer.from(s, 'base64'). We
+        // STRIPPED `-` and `_` instead of translating them, so those bytes vanished and a DER
+        // signature arrived two bytes short — which surfaced as ecdsa-sig-formatter reporting
+        // a bad sequence length, nowhere near the actual bug.
+        str = String(str).replace(/-/g, '+').replace(/_/g, '/').replace(/[^A-Za-z0-9+/=]/g, '');
         const bytes = [];
         for (let i = 0; i < str.length; i += 4) {
           const n = (B64.indexOf(str[i]) << 18) | (B64.indexOf(str[i+1]) << 12) |
@@ -6145,6 +6353,12 @@ final class NodeEngine: @unchecked Sendable {
         function toBuf(data, encoding) {
           if (Buffer.isBuffer(data)) return data;
           if (data instanceof Uint8Array) return Buffer.from(data);
+          // A KeyObject is legal wherever key material is, and jsonwebtoken relies on it:
+          // it wraps the secret with createSecretKey before calling createHmac, so stringifying
+          // the object here hashed with "[object Object]" and produced a signature nothing else
+          // could verify. Found by a real package; every direct HMAC test passed.
+          if (data && data._keyObject) return Buffer.from(data._material);
+          if (data && typeof data === 'object' && data.key !== undefined) return toBuf(data.key, encoding);
           return Buffer.from(String(data), encoding || 'utf8');
         }
         function finishDigest(base64, encoding) {
@@ -6288,6 +6502,121 @@ final class NodeEngine: @unchecked Sendable {
           return !!other && other._keyObject === true && this._material.equals(other._material);
         };
 
+        // ---- asymmetric: EC and Ed25519 -------------------------------------------------
+        // What the device can actually do: ECDSA over P-256/384/521 and Ed25519, through
+        // CryptoKit. RSA needs SecKey plumbing and still refuses by name. Keys travel as PEM
+        // because that is what CryptoKit imports and what node's callers already hold.
+        function AsymmetricKeyObject(pem, kind) {
+          this._keyObject = true;
+          this._pem = String(pem);
+          this.type = kind;                       // 'private' | 'public'
+          const identity = bridge.keyIdentify(this._pem);
+          this.asymmetricKeyType = identity.type;
+          this.asymmetricKeyDetails = identity.curve ? { namedCurve: identity.curve } : {};
+          if (identity.type === 'unknown') {
+            throw Object.assign(new Error('Failed to read the key: expected a PKCS#8 or SPKI PEM for EC (P-256/384/521) or Ed25519'),
+                                { code: 'ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE' });
+          }
+          if (identity.type === 'rsa') {
+            throw Object.assign(new Error('RSA keys are not usable here: RSA needs Security framework SecKey plumbing. EC (P-256/384/521) and Ed25519 are real'),
+                                { code: 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED' });
+          }
+        }
+        AsymmetricKeyObject.prototype.export = function(options) {
+          options = options || {};
+          if (options.format === 'der') {
+            const body = this._pem.split('\n').filter(line => line.indexOf('-----') < 0).join('');
+            return Buffer.from(body, 'base64');
+          }
+          return this._pem;
+        };
+        AsymmetricKeyObject.prototype.equals = function(other) {
+          return !!other && other._pem === this._pem;
+        };
+
+        function keyPem(key, expected) {
+          if (key && key._pem) return key._pem;
+          if (typeof key === 'string') return key;
+          if (Buffer.isBuffer(key)) return key.toString('utf8');
+          if (key && key.key) return keyPem(key.key, expected);
+          throw Object.assign(new Error('Invalid key: pass a PEM string, a Buffer, or a KeyObject'),
+                              { code: 'ERR_INVALID_ARG_TYPE' });
+        }
+        function dsaIsRaw(key) {
+          return !!(key && typeof key === 'object' && key.dsaEncoding === 'ieee-p1363');
+        }
+        function signWith(algorithm, data, key) {
+          const pem = keyPem(key);
+          const identity = bridge.keyIdentify(pem);
+          if (identity.type === 'ed25519' && algorithm) {
+            // node: Ed25519 signs the message itself, so naming a digest is an error.
+            throw Object.assign(new Error('Ed25519 signs the message directly; pass null as the algorithm'),
+                                { code: 'ERR_OSSL_INVALID_DIGEST' });   // node's code, measured
+          }
+          const signature = bridge.keySign(pem, Buffer.from(data).toString('base64'),
+                                           String(algorithm || 'sha256'), dsaIsRaw(key));
+          if (!signature) {
+            throw Object.assign(new Error('Signing failed: the key must be an EC (P-256/384/521) or Ed25519 private key, and the digest one of sha1/sha256/sha384/sha512'),
+                                { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+          }
+          return Buffer.from(signature, 'base64');
+        }
+        function verifyWith(algorithm, data, key, signature) {
+          const pem = keyPem(key);
+          const identity = bridge.keyIdentify(pem);
+          if (identity.type === 'ed25519' && algorithm) {
+            throw Object.assign(new Error('Ed25519 verifies the message directly; pass null as the algorithm'),
+                                { code: 'ERR_OSSL_INVALID_DIGEST' });
+          }
+          return !!bridge.keyVerify(pem, Buffer.from(data).toString('base64'),
+                                    Buffer.from(signature).toString('base64'),
+                                    String(algorithm || 'sha256'), dsaIsRaw(key));
+        }
+
+        // The streaming shape: update() until sign()/verify(), which is how node's own API and
+        // every JWT library drive it.
+        function Signer(algorithm) {
+          this._algorithm = algorithm;
+          this._chunks = [];
+        }
+        Signer.prototype.update = function(data, encoding) {
+          this._chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(String(data), encoding || 'utf8'));
+          return this;
+        };
+        Signer.prototype.sign = function(key, outputEncoding) {
+          const signature = signWith(this._algorithm, Buffer.concat(this._chunks), key);
+          return outputEncoding ? signature.toString(outputEncoding) : signature;
+        };
+        function Verifier(algorithm) {
+          this._algorithm = algorithm;
+          this._chunks = [];
+        }
+        Verifier.prototype.update = Signer.prototype.update;
+        Verifier.prototype.verify = function(key, signature, encoding) {
+          const bytes = Buffer.isBuffer(signature) ? signature : Buffer.from(String(signature), encoding || 'hex');
+          return verifyWith(this._algorithm, Buffer.concat(this._chunks), key, bytes);
+        };
+
+        function generateKeyPairSync(type, options) {
+          options = options || {};
+          const kind = String(type).toLowerCase();
+          if (kind !== 'ec' && kind !== 'ed25519') {
+            throw Object.assign(new Error("Key type '" + type + "' is not available: this device can generate EC (P-256/384/521) and Ed25519 through CryptoKit; RSA and DSA need SecKey plumbing"),
+                                { code: 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED' });
+          }
+          const pair = bridge.keyGenerate(kind, String(options.namedCurve || ''));
+          if (!pair) {
+            throw Object.assign(new Error("Unsupported curve '" + options.namedCurve + "': P-256 (prime256v1), P-384 (secp384r1) and P-521 (secp521r1) are available"),
+                                { code: 'ERR_CRYPTO_INVALID_CURVE' });
+          }
+          // node returns PEM strings when encodings are given and KeyObjects otherwise.
+          const wantPublicPem = options.publicKeyEncoding && options.publicKeyEncoding.format === 'pem';
+          const wantPrivatePem = options.privateKeyEncoding && options.privateKeyEncoding.format === 'pem';
+          return {
+            publicKey: wantPublicPem ? pair.publicKey : new AsymmetricKeyObject(pair.publicKey, 'public'),
+            privateKey: wantPrivatePem ? pair.privateKey : new AsymmetricKeyObject(pair.privateKey, 'private'),
+          };
+        }
         function refuseCrypto(name, reason) {
           return function() {
             const error = new Error('crypto.' + name + ' is not available: ' + reason);
@@ -6372,23 +6701,44 @@ final class NodeEngine: @unchecked Sendable {
           getHashes: function() { return ['md5', 'sha1', 'sha256', 'sha384', 'sha512']; },
           // What CryptoKit actually carries. Listing curves we cannot use would be a lie a
           // library then acts on.
-          getCurves: function() { return ['prime256v1', 'secp384r1', 'secp521r1', 'x25519', 'ed25519']; },
+          getCurves: function() { return ['prime256v1', 'secp384r1', 'secp521r1', 'ed25519']; },
           // The asymmetric family. Every one of these needs key parsing, ASN.1 and padding
           // modes that this device exposes only through Security framework's SecKey — real
           // work, not a shim, and it is honest to say so rather than half-do it. A caller gets
           // a clear error naming what is missing instead of `undefined is not a function`.
-          createSign: refuseCrypto('createSign', 'signing needs SecKey key parsing (ASN.1/PKCS#8) — digests, HMAC, ciphers and KDFs are real'),
-          createVerify: refuseCrypto('createVerify', 'signature verification needs SecKey key parsing'),
-          sign: refuseCrypto('sign', 'signing needs SecKey key parsing'),
-          verify: refuseCrypto('verify', 'signature verification needs SecKey key parsing'),
-          Sign: refuseCrypto('Sign', 'signing needs SecKey key parsing'),
-          Verify: refuseCrypto('Verify', 'signature verification needs SecKey key parsing'),
-          generateKeyPair: refuseCrypto('generateKeyPair', 'key-pair generation needs SecKey and PEM/DER encoding'),
-          generateKeyPairSync: refuseCrypto('generateKeyPairSync', 'key-pair generation needs SecKey and PEM/DER encoding'),
-          generateKey: refuseCrypto('generateKey', 'use createSecretKey with randomBytes for symmetric keys'),
-          generateKeySync: refuseCrypto('generateKeySync', 'use createSecretKey with randomBytes for symmetric keys'),
-          createPrivateKey: refuseCrypto('createPrivateKey', 'private-key parsing needs ASN.1/PKCS#8 decoding'),
-          createPublicKey: refuseCrypto('createPublicKey', 'public-key parsing needs ASN.1/SPKI decoding'),
+          // Real signing: ECDSA over P-256/384/521 and Ed25519, through CryptoKit. RSA is the
+          // part that still needs SecKey, and it refuses by name from inside these.
+          createSign: function(algorithm) { return new Signer(algorithm); },
+          createVerify: function(algorithm) { return new Verifier(algorithm); },
+          sign: function(algorithm, data, key) { return signWith(algorithm, data, key); },
+          verify: function(algorithm, data, key, signature) { return verifyWith(algorithm, data, key, signature); },
+          Sign: Signer,
+          Verify: Verifier,
+          generateKeyPairSync: generateKeyPairSync,
+          generateKeyPair: function(type, options, callback) {
+            if (typeof options === 'function') { callback = options; options = {}; }
+            try {
+              const pair = generateKeyPairSync(type, options);
+              process.nextTick(function(){ callback(null, pair.publicKey, pair.privateKey); });
+            } catch (error) { process.nextTick(function(){ callback(error); }); }
+          },
+          generateKeySync: function(type, options) {
+            const length = ((options && options.length) || 256) / 8;
+            return new SecretKeyObject(Buffer.from(bridge.randomBytes(length), 'base64'));
+          },
+          generateKey: function(type, options, callback) {
+            try {
+              const key = this.generateKeySync(type, options);
+              process.nextTick(function(){ callback(null, key); });
+            } catch (error) { process.nextTick(function(){ callback(error); }); }
+          },
+          createPrivateKey: function(key) { return new AsymmetricKeyObject(keyPem(key), 'private'); },
+          createPublicKey: function(key) {
+            const pem = keyPem(key);
+            // node accepts a PRIVATE key here and derives the public half; CryptoKit does the
+            // same when the signer needs it, so the object records what it was given.
+            return new AsymmetricKeyObject(pem, pem.indexOf('PRIVATE') >= 0 ? 'private' : 'public');
+          },
           createECDH: refuseCrypto('createECDH', 'ECDH needs SecKey key exchange plumbing'),
           createDiffieHellman: refuseCrypto('createDiffieHellman', 'finite-field DH needs a bignum implementation'),
           createDiffieHellmanGroup: refuseCrypto('createDiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),

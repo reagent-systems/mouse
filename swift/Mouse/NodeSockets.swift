@@ -26,7 +26,7 @@ final class SocketTable: @unchecked Sendable {
 
     /// `(socket id, event)`. For `.connection` the id is the SERVER's; the new socket's id
     /// rides in the event.
-    typealias Handler = (Int, Event) -> Void
+    typealias Handler = @Sendable (Int, Event) -> Void
 
     /// One event, named the way the JS side switches on it.
     enum Event {
@@ -52,9 +52,9 @@ final class SocketTable: @unchecked Sendable {
     /// Anything a socket does that the event loop must stay awake for. The engine holds the
     /// count; `unref()` drops it without closing (node's semantics — a server that has
     /// `unref`'d does not by itself keep the process alive).
-    private let deliver: (@escaping () -> Void) -> Void
-    private let retain: () -> Void
-    private let release: () -> Void
+    private let deliver: (@escaping @Sendable () -> Void) -> Void
+    private let retain: @Sendable () -> Void
+    private let release: @Sendable () -> Void
 
     private let queue = DispatchQueue(label: "mouse.node.net")
     /// Name resolution only. Concurrent and separate from `queue` because `getaddrinfo`
@@ -67,7 +67,9 @@ final class SocketTable: @unchecked Sendable {
     /// 64 KB, node's default socket high-water mark: `write` returns false past it.
     private static let highWaterMark = 64 * 1024
 
-    private final class Entry {
+    /// Every field is read and written on `queue` only — that confinement is what makes the
+    /// unchecked annotation true, and it is the same discipline the engine uses for `TTY`.
+    private final class Entry: @unchecked Sendable {
         let id: Int
         let fd: Int32
         var isServer = false
@@ -103,9 +105,9 @@ final class SocketTable: @unchecked Sendable {
         }
     }
 
-    init(deliver: @escaping (@escaping () -> Void) -> Void,
-         retain: @escaping () -> Void,
-         release: @escaping () -> Void) {
+    init(deliver: @escaping (@escaping @Sendable () -> Void) -> Void,
+         retain: @escaping @Sendable () -> Void,
+         release: @escaping @Sendable () -> Void) {
         self.deliver = deliver
         self.retain = retain
         self.release = release
@@ -145,8 +147,9 @@ final class SocketTable: @unchecked Sendable {
             let family = first.pointee.ai_family
             freeaddrinfo(list)
 
+            let resolved = target      // hand the closure a value, not a mutable var
             queue.async {
-                self.beginConnect(id: id, family: family, address: target,
+                self.beginConnect(id: id, family: family, address: resolved,
                                   length: length, host: host, port: port, handler: handler)
             }
         }
@@ -227,7 +230,7 @@ final class SocketTable: @unchecked Sendable {
 
     /// `getaddrinfo` for its own sake — what `dns.lookup` is. Runs on `resolvers` (it blocks
     /// for as long as the network takes) and answers on the JS thread through `deliver`.
-    func resolve(host: String, family: Int, completion: @escaping ([Address], String?) -> Void) {
+    func resolve(host: String, family: Int, completion: @escaping @Sendable ([Address], String?) -> Void) {
         retain()
         resolvers.async { [self] in
             var hints = addrinfo(ai_flags: 0,
@@ -254,7 +257,8 @@ final class SocketTable: @unchecked Sendable {
                 node = current.pointee.ai_next
             }
             freeaddrinfo(list)
-            deliver { completion(found, found.isEmpty ? "ENOTFOUND" : nil) }
+            let addresses = found
+            deliver { completion(addresses, addresses.isEmpty ? "ENOTFOUND" : nil) }
             release()
         }
     }
@@ -602,8 +606,9 @@ final class SocketTable: @unchecked Sendable {
         case EHOSTUNREACH: return "EHOSTUNREACH"
         case ENETUNREACH: return "ENETUNREACH"
         case ENOTCONN: return "ENOTCONN"
-        default: return "E" + String(cString: strerror(errno)).uppercased()
-                                    .replacingOccurrences(of: " ", with: "")
+        default:
+            let text = strerror(errno).map { String(cString: $0) } ?? "UNKNOWN"
+            return "E" + text.uppercased().replacingOccurrences(of: " ", with: "")
         }
     }
 
@@ -648,7 +653,9 @@ final class SocketTable: @unchecked Sendable {
             }
             result.family = "IPv6"
         }
-        result.address = String(cString: text)
+        result.address = text.withUnsafeBufferPointer { buffer in
+            String(decoding: buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        }
         return result
     }
 }

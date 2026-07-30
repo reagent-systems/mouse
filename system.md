@@ -96,6 +96,7 @@ so a TUI navigates and edits.
 | **Phase G — the core-module surface audit** | Every core module's exports diffed against real node's and the gaps filled where they matter: `fs` 81→105 of 106 (`Stats`/`Dirent` as real classes, `opendir`, `cp`, `writev`/`readv`, `statfs`, the access constants), `fs/promises` 13→32 of 32 (including `open` and a real `FileHandle`), `os` and `stream` and `buffer` and `dns` and `url` and `timers` complete, plus `events.on` as an async iterator, `util.parseArgs`, `process.uptime`/`loadEnvFile`, `assert.CallTracker`. It also found a bug that mattered: our `URL` resolved relative URLs by trimming the base after the last slash |
 | **Phase G — real ciphers and KDFs** | `crypto` 17→70 of 71: AES-128/192/256 in GCM, CBC, CTR and ECB plus ChaCha20-Poly1305 (CryptoKit for the AEAD modes, CommonCrypto for the rest — the only system API that exposes CBC/CTR), `pbkdf2`, `hkdf`, `KeyObject`/`createSecretKey`, `randomFill`, `getCiphers`/`getCipherInfo`/`getHashes`/`getCurves`, `crypto.hash`. Ciphertext, tags and derived keys are byte-identical to node's, and **what one engine seals the other opens**. The asymmetric family refuses with the reason (it needs SecKey key parsing) rather than half-working |
 | **Phase G — `tsc --watch` runs** | TypeScript's compiler in WATCH mode, installed by our package manager and running on our engine: it compiled clean, detected an edit through our kqueue watcher, recompiled, and reported the same diagnostic (`TS2339`) in the same order as real node. The heaviest real consumer of `fs.watch` there is, and a phase-D milestone reached early — **the credible-IDE loop (edit → recompile → diagnostics) now closes on the device** |
+| **Phase G — signing, and JWTs** | ECDSA over P-256/384/521 and Ed25519 through CryptoKit: `createSign`/`createVerify`, one-shot `sign`/`verify`, `generateKeyPair`, `createPrivateKey`/`createPublicKey`, and DER *or* JOSE raw (`ieee-p1363`) signature encoding. Real node verifies our signatures and we verify node's, for all four key types, with tampered messages rejected. **`jsonwebtoken` works cross-engine** on ES256 and HS256 — and it found three bugs nothing else had, including a base64url decoding fault that silently dropped bytes |
 
 ### Verification performed
 
@@ -1005,6 +1006,42 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **Signing is real for what the device can do, and `jsonwebtoken` proved it.**
+  ECDSA over P-256/384/521 and Ed25519 ride CryptoKit, which imports and exports
+  PKCS#8/SPKI PEM directly — so no ASN.1 of ours is involved for EC. Ed25519 has
+  no PEM API, but RFC 8410's wrappers are fixed shapes (48 bytes private, 44
+  public), checked byte for byte rather than parsed loosely. Signatures are
+  randomized, so byte comparison proves nothing; the test is that **real node
+  verifies our signatures and we verify node's**, across all four key types,
+  with a tampered message rejected. Then the real-package proof: genuine
+  `jsonwebtoken` signing ES256 and HS256 tokens that the other engine verifies.
+  It found three bugs, none of them in the signing code:
+  1. **`jwa` asks for `RSA-SHA256`** — OpenSSL's legacy digest name, which works
+     for any key type in node. We didn't normalize it, so ES256 signing failed
+     outright.
+  2. **Our base64 decoder STRIPPED `-` and `_` instead of translating them.**
+     node's decoder accepts the base64URL alphabet, and `jwa` hands it a
+     base64url signature directly — so bytes silently vanished and a DER
+     signature arrived two bytes short. It surfaced as `ecdsa-sig-formatter`
+     complaining about a sequence length, nowhere near the actual fault. This
+     one was quietly corrupting any base64url input.
+  3. **`createHmac` didn't accept a `KeyObject`.** `jsonwebtoken` wraps the
+     secret with `createSecretKey` before calling it (it tries
+     `createPrivateKey` first and falls back), so we hashed the string
+     `"[object Object]"` and produced a signature nothing else could verify —
+     while every direct HMAC test passed, because tests pass strings.
+  RSA still refuses: it needs SecKey and ASN.1 work, and node generating a key
+  where we refuse is a deliberate divergence, asserted on our side alone rather
+  than in a twin fixture.
+- **The concurrency annotations the new layers were missing.** `SocketTable` and
+  `WatchTable` hand closures across queues by design, which Swift 6 language
+  mode treats as errors, and the JSValue-carrying bridges warned at every site.
+  Both tables now declare the crossing (`@Sendable` handler types, `@unchecked
+  Sendable` on the queue-confined Entry/Watcher classes with the confinement
+  stated), values are handed to closures instead of mutable vars, and a single
+  `Carried` box records the one crossing that can never be checked — a JSValue
+  travelling to the JS thread. **The build is warning-free**, which the previous
+  commit claimed prematurely; it was true only of the warning that commit fixed.
 - **`tsc --watch` works, and it passed on the first attempt.** TypeScript's own
   compiler in watch mode — a 10 MB bundle that builds a watch host out of
   `fs.watch`/`fs.watchFile`, resolves modules, compiles, and reports diagnostics
@@ -1491,7 +1528,7 @@ D  web toolchain          tsc, bundling, Preview container     PARTLY DONE — t
                           watches on the engine (see §0); bundling + Preview remain
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, real ciphers+KDFs — express, ws and chokidar run; gaps: asymmetric crypto, TLS server, socket pooling, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, ciphers+KDFs, EC/Ed25519 signing — express, ws, chokidar, tsc --watch and jsonwebtoken run; gaps: RSA, TLS server, socket pooling, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

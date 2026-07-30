@@ -23,9 +23,9 @@ final class WatchTable: @unchecked Sendable {
         case change(String)
     }
 
-    private let deliver: (@escaping () -> Void) -> Void
-    private let retain: () -> Void
-    private let release: () -> Void
+    private let deliver: (@escaping @Sendable () -> Void) -> Void
+    private let retain: @Sendable () -> Void
+    private let release: @Sendable () -> Void
 
     private let queue = DispatchQueue(label: "mouse.node.watch")
     private var watchers: [Int: Watcher] = [:]
@@ -34,17 +34,18 @@ final class WatchTable: @unchecked Sendable {
 
     /// One `fs.watch()` call. A recursive watch owns several kqueue sources but is one
     /// watcher to JavaScript.
-    private final class Watcher {
+    /// Confined to `queue`, like the socket table's Entry.
+    private final class Watcher: @unchecked Sendable {
         let id: Int
         let root: String
         let recursive: Bool
-        let handler: (Event) -> Void
+        let handler: @Sendable (Event) -> Void
         var sources: [String: (source: DispatchSourceFileSystemObject, fd: Int32)] = [:]
         /// Directory listings, for diffing a kqueue "something changed" into a filename.
         var listings: [String: Set<String>] = [:]
         var closed = false
 
-        init(id: Int, root: String, recursive: Bool, handler: @escaping (Event) -> Void) {
+        init(id: Int, root: String, recursive: Bool, handler: @escaping @Sendable (Event) -> Void) {
             self.id = id
             self.root = root
             self.recursive = recursive
@@ -52,9 +53,9 @@ final class WatchTable: @unchecked Sendable {
         }
     }
 
-    init(deliver: @escaping (@escaping () -> Void) -> Void,
-         retain: @escaping () -> Void,
-         release: @escaping () -> Void) {
+    init(deliver: @escaping (@escaping @Sendable () -> Void) -> Void,
+         retain: @escaping @Sendable () -> Void,
+         release: @escaping @Sendable () -> Void) {
         self.deliver = deliver
         self.retain = retain
         self.release = release
@@ -62,15 +63,11 @@ final class WatchTable: @unchecked Sendable {
 
     /// Start watching. Returns the id synchronously; `nil` back through `failure` when the
     /// path cannot be opened (node throws ENOENT for that, so the caller needs to know).
-    func watch(path: String, recursive: Bool, handler: @escaping (Event) -> Void) -> Int? {
-        var isDirectory = false
-        var exists = false
-        var stats = stat()
-        if lstat(path, &stats) == 0 {
-            exists = true
-            isDirectory = (stats.st_mode & S_IFMT) == S_IFDIR
-        }
-        guard exists else { return nil }
+    func watch(path: String, recursive: Bool, handler: @escaping @Sendable (Event) -> Void) -> Int? {
+        var probe = stat()
+        guard lstat(path, &probe) == 0 else { return nil }
+        // Read before the queue hop: the closure below must capture values, not a mutable var.
+        let isDirectory = (probe.st_mode & S_IFMT) == S_IFDIR
 
         let id = claimID()
         retain()
