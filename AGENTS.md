@@ -176,6 +176,15 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**Use `__toBytes` for anything a caller hands you as data.** Never
+`Buffer.isBuffer(x) ? x : Buffer.from(String(x))` — that stringifies a plain
+`Uint8Array` into `"7,0,0,0"`, and it was in TEN writers (sockets, HTTP bodies,
+ciphers, signers, child stdin, WebSocket sends, fs). Binary protocols arrive as
+views, not Buffers.
+**`child.unref()` must really release the handle**, like a socket's: esbuild keeps
+its service alive with a ping loop and unrefs the child, so a no-op unref means a
+program that finished correctly never exits — which reads as a hang long after it
+started working.
 **A piped child's stdio is BYTES.** latin1 is the transport in both directions (one
 codepoint per byte, lossless through the String hop); UTF-8 is for a terminal and
 destroys a binary protocol. `fs.write` on fd 1/2 must accept ANY `ArrayBufferView`
@@ -199,9 +208,11 @@ claim made before `Buffer.from(arrayBuffer)` shared memory was against a broken
 path: webpack's hashes re-earned it, esbuild-wasm did not (it needs a live child
 process — see below). Loading is not running.
 **WebAssembly RUNS on this engine** (JSC, interpreter mode) — wasm packages work
-today; the WebView JIT would buy speed, not capability. Keep the webpack proof
-green: it bundles byte-identically to real node and exercises wasm hashing,
-module resolution and terser at once.
+today; the WebView JIT would buy speed, not capability. Keep the webpack AND
+esbuild-wasm proofs green: webpack bundles byte-identically and exercises wasm
+hashing, module resolution and terser; esbuild-wasm runs a whole compiler in wasm
+through a live child process and a binary pipe protocol, which is the sternest
+test of stdio fidelity there is.
 `require(".")` and `require("..")` are relative DIRECTORY requests — webpack's
 Compiler.js uses the first form.
 The `WebSocket` GLOBAL rides URLSession's WebSocket task — the only TLS-capable
