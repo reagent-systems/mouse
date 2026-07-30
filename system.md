@@ -1074,6 +1074,30 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The formatting audit — `console.log` of a Map printed `{}`.** For a terminal IDE this is
+  not cosmetic: console output IS what the user reads and what they paste into a bug report.
+  Forty-one checks against node's `util.inspect` and `util.format`.
+  **`Map`, `Set`, `Date`, `RegExp` and `Promise` all printed as `{}`** — completely opaque, so
+  logging any of them told the reader nothing. Also: a circular reference expanded three levels
+  deep instead of being marked (misleading, and unbounded for a large graph); long collections
+  printed in full where node caps at 100 with a count; class instances lost their constructor
+  name; `-0` printed as `0`; BigInt lost its `n`; typed arrays printed as plain objects; sparse
+  array holes printed as nothing rather than `<1 empty item>`; symbol keys and null prototypes
+  went unmarked; boxed primitives showed as `{}`.
+  **The worst was that GETTERS WERE EVALUATED.** `util.inspect` called them, so logging an
+  object could run a side effect in the program being logged. node prints `[Getter]` and does
+  not touch it. That is a logger changing the thing it observes.
+  Two format bugs too: `%d` used `parseInt` where node uses `Number` (so `'42.9'` printed
+  `42`), and a LONE string was still processed, so `console.log('100%% off')` lost a percent
+  sign — node only collapses `%%` when it is actually filling a placeholder.
+  Two divergences pinned to our values with reasons: node reads a promise's resolved value
+  through V8 internals JSC does not expose, and node's column-aligned multi-line grid for long
+  numeric arrays is intricate width arithmetic for no behavioural gain (the truncation itself
+  is implemented and asserted).
+  **A harness flaw worth recording**: the first comparison was by LINE INDEX, so the single
+  multi-line divergence shifted everything after it and a dozen identical lines looked broken.
+  Keyed by label instead — otherwise I would have spent the boundary chasing bugs that were
+  not there.
 - **The encoding audit — and `base64url` that was never implemented.** A wrong encoding
   produces wrong bytes or wrong text SILENTLY, which is the same shape as the range read that
   returned the whole file. Thirty checks: every named encoding across `Buffer.from`,

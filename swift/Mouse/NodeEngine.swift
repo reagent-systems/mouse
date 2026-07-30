@@ -3419,40 +3419,156 @@ final class NodeEngine: @unchecked Sendable {
       };
 
       // ---- inspect / format (console + util) ----
-      function inspect(value, depth) {
+      // For a terminal IDE this is not cosmetic: console.log output IS what the user reads and
+      // what gets pasted into a bug report. A formatting audit against node found Map, Set, Date,
+      // RegExp and Promise all printing as `{}` — completely opaque — plus circular references
+      // expanded three levels deep instead of marked, no truncation of long collections, class
+      // names dropped, and GETTERS EVALUATED (a logger with side effects). Each of those is a
+      // debugging session made worse.
+      function quoteKey(key) {
+        return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : "'" + key + "'";
+      }
+      function quoteString(text) {
+        return "'" + text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n') + "'";
+      }
+      /// node caps a collection at 100 entries and says how many it left out, which keeps a
+      /// 10,000-element array from becoming a wall of text.
+      function withLimit(items, total) {
+        if (total <= 100) return items;
+        const left = total - 100;
+        return items.concat(['... ' + left + ' more item' + (left === 1 ? '' : 's')]);
+      }
+      function inspect(value, depth, seen) {
+        // The outer call reports a cycle with `<ref *1>` so a reader knows the [Circular *1]
+        // marker below refers to THIS object rather than something further out.
+        if (seen === undefined) {
+          inspect._sawCycle = false;
+          const text = inspect(value, depth, []);
+          return inspect._sawCycle ? '<ref *1> ' + text : text;
+        }
         depth = depth === undefined ? 2 : depth;
         if (value === null) return 'null';
         if (value === undefined) return 'undefined';
         const type = typeof value;
-        if (type === 'string') return "'" + value.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
-        if (type === 'number' || type === 'boolean' || type === 'bigint') return String(value);
+        if (type === 'string') return quoteString(value);
+        // -0 is not 0, and node shows the difference.
+        if (type === 'number') return Object.is(value, -0) ? '-0' : String(value);
+        if (type === 'boolean') return String(value);
+        if (type === 'bigint') return String(value) + 'n';
+        if (type === 'symbol') return String(value);
         if (type === 'function') {
-          const name = value.name ? ': ' + value.name : ' (anonymous)';
-          return (String(value).startsWith('class') ? '[class' : '[Function') + name + ']';
+          const isClass = /^class[\s{]/.test(String(value));
+          if (isClass) return value.name ? '[class ' + value.name + ']' : '[class (anonymous)]';
+          return value.name ? '[Function: ' + value.name + ']' : '[Function (anonymous)]';
         }
-        if (value instanceof Error) return value.stack || String(value);
+        if (value instanceof Error) {
+          const stack = value.stack ? String(value.stack) : '';
+          // JSC's stack does not begin with "Error: message" the way V8's does, so the header is
+          // rebuilt rather than trusted.
+          const header = (value.name || 'Error') + (value.message ? ': ' + value.message : '');
+          return stack.startsWith(header) ? stack : (stack ? header + '\n    ' + stack.split('\n').join('\n    ') : header);
+        }
         if (Buffer.isBuffer(value)) {
           const hex = Array.from(value.subarray(0, 50)).map(b => b.toString(16).padStart(2, '0')).join(' ');
           return '<Buffer ' + hex + (value.length > 50 ? ' ... ' + (value.length - 50) + ' more bytes' : '') + '>';
         }
+        if (value instanceof Date) return isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
+        if (value instanceof RegExp) return String(value);
+        // A cycle must be MARKED, not followed: expanding it three levels both misleads and can
+        // produce enormous output.
+        if (seen.indexOf(value) >= 0) { inspect._sawCycle = true; return '[Circular *1]'; }
+        const nested = seen.concat([value]);
+
         if (Array.isArray(value)) {
           if (depth < 0) return '[Array]';
-          const items = value.map(v => inspect(v, depth - 1));
-          return items.length === 0 ? '[]' : '[ ' + items.join(', ') + ' ]';
+          const items = [];
+          const shown = Math.min(value.length, 100);
+          for (let i = 0; i < shown; i++) {
+            // A HOLE is not undefined, and node counts consecutive holes together.
+            if (!(i in value)) {
+              let run = 0;
+              while (i + run < shown && !((i + run) in value)) run += 1;
+              items.push('<' + run + ' empty item' + (run === 1 ? '' : 's') + '>');
+              i += run - 1;
+              continue;
+            }
+            items.push(inspect(value[i], depth - 1, nested));
+          }
+          // Named properties on an array are shown after its elements.
+          for (const key of Object.keys(value)) {
+            if (/^\d+$/.test(key)) continue;
+            items.push(quoteKey(key) + ': ' + inspect(value[key], depth - 1, nested));
+          }
+          const all = value.length > 100 ? withLimit(items, value.length) : items;
+          return all.length === 0 ? '[]' : '[ ' + all.join(', ') + ' ]';
+        }
+        if (ArrayBuffer.isView(value)) {
+          const name = value.constructor && value.constructor.name || 'TypedArray';
+          if (depth < 0) return '[' + name + ']';
+          const items = withLimit(Array.from(value.subarray(0, 100)).map(String), value.length);
+          return name + '(' + value.length + ') ' + (items.length ? '[ ' + items.join(', ') + ' ]' : '[]');
         }
         if (type === 'object') {
+          if (value instanceof Map) {
+            if (depth < 0) return '[Map]';
+            const items = [];
+            let count = 0;
+            for (const [key, entry] of value) {
+              if (count++ >= 100) break;
+              items.push(inspect(key, depth - 1, nested) + ' => ' + inspect(entry, depth - 1, nested));
+            }
+            const all = withLimit(items, value.size);
+            return 'Map(' + value.size + ') ' + (all.length ? '{ ' + all.join(', ') + ' }' : '{}');
+          }
+          if (value instanceof Set) {
+            if (depth < 0) return '[Set]';
+            const items = [];
+            let count = 0;
+            for (const entry of value) {
+              if (count++ >= 100) break;
+              items.push(inspect(entry, depth - 1, nested));
+            }
+            const all = withLimit(items, value.size);
+            return 'Set(' + value.size + ') ' + (all.length ? '{ ' + all.join(', ') + ' }' : '{}');
+          }
+          if (typeof Promise === 'function' && value instanceof Promise) return 'Promise { <pending> }';
+          if (value instanceof Number) return '[Number: ' + Number.prototype.valueOf.call(value) + ']';
+          if (value instanceof String) return "[String: " + quoteString(String.prototype.valueOf.call(value)) + ']';
+          if (value instanceof Boolean) return '[Boolean: ' + Boolean.prototype.valueOf.call(value) + ']';
           if (depth < 0) return '[Object]';
-          const keys = Object.keys(value);
-          if (keys.length === 0) return '{}';
-          const items = keys.map(k => (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : "'" + k + "'") + ': ' + inspect(value[k], depth - 1));
-          return '{ ' + items.join(', ') + ' }';
+
+          // A class instance carries its constructor's name; a null prototype is called out,
+          // because both change what the reader thinks they are looking at.
+          const prototype = Object.getPrototypeOf(value);
+          let prefix = '';
+          if (prototype === null) prefix = '[Object: null prototype] ';
+          else {
+            const name = prototype.constructor && prototype.constructor.name;
+            if (name && name !== 'Object') prefix = name + ' ';
+          }
+          const items = [];
+          for (const key of Object.keys(value)) {
+            // A getter is REPORTED, not called: invoking it here can have side effects, and a
+            // logger must not change the program it is logging.
+            const describe = Object.getOwnPropertyDescriptor(value, key);
+            if (describe && describe.get) { items.push(quoteKey(key) + ': [Getter]'); continue; }
+            items.push(quoteKey(key) + ': ' + inspect(value[key], depth - 1, nested));
+          }
+          for (const key of Object.getOwnPropertySymbols(value)) {
+            if (!Object.getOwnPropertyDescriptor(value, key).enumerable) continue;
+            items.push('[' + String(key) + ']: ' + inspect(value[key], depth - 1, nested));
+          }
+          return items.length === 0 ? prefix + '{}' : prefix + '{ ' + items.join(', ') + ' }';
         }
         return String(value);
       }
       function formatOne(value) { return typeof value === 'string' ? value : inspect(value); }
       function format() {
         const args = Array.from(arguments);
-        if (typeof args[0] === 'string' && /%[sdifjoO%]/.test(args[0])) {
+        // No substitution arguments means no processing at all: node returns '100%%' unchanged,
+        // and only collapses '%%' when it is actually filling in a placeholder. Ours processed a
+        // lone string, so `console.log('100%% off')` lost a percent sign.
+        if (args.length > 1 && typeof args[0] === 'string' && /%[sdifjoO%]/.test(args[0])) {
           let i = 1;
           let text = args[0].replace(/%([sdifjoO%])/g, (match, spec) => {
             if (spec === '%') return '%';
@@ -3460,7 +3576,9 @@ final class NodeEngine: @unchecked Sendable {
             const value = args[i++];
             switch (spec) {
               case 's': return formatOne(value);
-              case 'd': case 'i': return String(parseInt(value, 10));
+              // %d is Number, %i is parseInt — '42.9' prints 42.9 and 42 respectively.
+              case 'd': return String(Number(value));
+              case 'i': return String(parseInt(value, 10));
               case 'f': return String(parseFloat(value));
               case 'j': return JSON.stringify(value);
               default: return inspect(value);

@@ -465,6 +465,11 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Diff by LABEL, never by line index.** One multi-line divergence shifts every later line, so
+  an index-keyed comparison reports a dozen identical rows as broken. That nearly sent a whole
+  boundary chasing bugs that did not exist.
+- **A logger must not change the program it observes.** `util.inspect` was CALLING getters.
+  Anything that formats for display reports what it finds; it does not invoke it.
 - **A passing real-package proof can hide a missing primitive.** jsonwebtoken worked while
   `base64url` did not exist, because the library swaps the alphabet itself. A package proof
   says the package works, not that the API underneath it does — sweep the primitive

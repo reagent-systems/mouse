@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `console.log`/`util.inspect` format the way node's do. `Map`, `Set`, `Date`,
+  `RegExp` and `Promise` printed as `{}`; circular references expanded instead of being
+  marked; long collections were never truncated; class names, `-0`, BigInt `n`, typed arrays,
+  sparse holes, symbol keys and null prototypes were all wrong. Getters are now reported as
+  `[Getter]` rather than CALLED — inspecting an object could run a side effect. `%d` uses
+  Number, and a lone string is no longer processed, so `console.log('100%% off')` keeps its
+  percent sign.
 - Node layer: `base64url` works — it was not implemented at all, so
   `Buffer.from(token, 'base64url')` returned the token's own bytes. Also fixed:
   `utf16le`/`ucs2` ignored by `Buffer.from`, `ascii` not masked (and asymmetric in node —
