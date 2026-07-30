@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `TextDecoderStream` and `TextEncoderStream` exist, and `TextDecoder` can
+  actually stream — it ignored its options argument, so `{stream: true}` was a silent
+  no-op and a character split across chunks decoded to replacement characters. Adds
+  `fatal`, `ignoreBOM` and `TextEncoder.encodeInto`.
 - Node layer: `http.Server` gained `closeIdleConnections()` and `closeAllConnections()`.
   They act without closing the listener, and differ as node's do — an in-flight request
   survives the first and dies to the second.

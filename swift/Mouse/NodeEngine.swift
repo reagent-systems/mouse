@@ -2830,13 +2830,111 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.TextEncoder = class TextEncoder {
         get encoding() { return 'utf-8'; }
         encode(text) { return new Uint8Array(Buffer.from(String(text), 'utf8')); }
+        /// Encode into a caller's array, reporting how much fit. Never splits a character: a
+        /// destination too small for the next one stops rather than writing half of it.
+        encodeInto(text, destination) {
+          const source = String(text);
+          let read = 0, written = 0;
+          for (const character of source) {
+            const bytes = Buffer.from(character, 'utf8');
+            if (written + bytes.length > destination.length) break;
+            for (let i = 0; i < bytes.length; i++) destination[written + i] = bytes[i];
+            written += bytes.length;
+            read += character.length;          // a surrogate pair counts as its two units
+          }
+          return { read: read, written: written };
+        }
       };
+      /// How many trailing bytes form an INCOMPLETE UTF-8 sequence, so a streaming decode can
+      /// hold them back instead of emitting replacement characters. Without this, a multi-byte
+      /// character split across two chunks is corrupted — which is the whole difference between
+      /// decoding a stream and decoding each chunk.
+      function incompleteTailLength(bytes) {
+        const total = bytes.length;
+        for (let back = 1; back <= 4 && back <= total; back++) {
+          const byte = bytes[total - back];
+          if (byte < 0x80) return 0;                    // ASCII: nothing pending
+          if ((byte & 0xC0) === 0x80) continue;         // continuation byte: keep looking back
+          const needed = (byte & 0xE0) === 0xC0 ? 2
+                       : (byte & 0xF0) === 0xE0 ? 3
+                       : (byte & 0xF8) === 0xF0 ? 4 : 1;
+          return needed > back ? back : 0;
+        }
+        return 0;
+      }
+
       globalThis.TextDecoder = class TextDecoder {
-        constructor(encoding) { this.encoding = (encoding || 'utf-8').toLowerCase(); }
-        decode(view) {
-          if (view === undefined) return '';
-          const buffer = Buffer.from(view.buffer ? new Uint8Array(view.buffer, view.byteOffset, view.byteLength) : view);
-          return buffer.toString(this.encoding === 'utf-16le' ? 'utf16le' : 'utf8');
+        constructor(encoding, options) {
+          this.encoding = (encoding || 'utf-8').toLowerCase();
+          options = options || {};
+          this.fatal = !!options.fatal;
+          this.ignoreBOM = !!options.ignoreBOM;
+          this._carry = null;      // bytes held back mid-sequence between streaming calls
+          this._sawBOM = false;
+        }
+        decode(view, options) {
+          const streaming = !!(options && options.stream);
+          let bytes = view === undefined ? Buffer.alloc(0)
+            : Buffer.from(view.buffer ? new Uint8Array(view.buffer, view.byteOffset, view.byteLength) : view);
+          if (this._carry && this._carry.length) {
+            bytes = Buffer.concat([this._carry, bytes]);
+            this._carry = null;
+          }
+          const utf16 = this.encoding === 'utf-16le';
+          if (streaming && !utf16) {
+            const pending = incompleteTailLength(bytes);
+            if (pending > 0) {
+              this._carry = bytes.slice(bytes.length - pending);
+              bytes = bytes.slice(0, bytes.length - pending);
+            }
+          }
+          let text = bytes.toString(utf16 ? 'utf16le' : 'utf8');
+          // A leading BOM is dropped once unless the caller asked to keep it.
+          if (!this.ignoreBOM && !this._sawBOM && text.charCodeAt(0) === 0xFEFF) {
+            text = text.slice(1);
+            this._sawBOM = true;
+          } else if (text.length) {
+            this._sawBOM = true;
+          }
+          if (!streaming) { this._carry = null; this._sawBOM = false; }
+          return text;
+        }
+      };
+      // The WHATWG stream forms, which is how a fetch body is read as text without buffering it
+      // all: `response.body.pipeThrough(new TextDecoderStream())`.
+      globalThis.TextDecoderStream = class TextDecoderStream {
+        constructor(encoding, options) {
+          const decoder = new globalThis.TextDecoder(encoding, options);
+          this.encoding = decoder.encoding;
+          this.fatal = decoder.fatal;
+          this.ignoreBOM = decoder.ignoreBOM;
+          const inner = new globalThis.TransformStream({
+            transform: function(chunk, controller) {
+              const text = decoder.decode(chunk, { stream: true });
+              if (text) controller.enqueue(text);
+            },
+            flush: function(controller) {
+              // The tail: whatever was held back, decoded now that no more is coming.
+              const text = decoder.decode();
+              if (text) controller.enqueue(text);
+            },
+          });
+          this.readable = inner.readable;
+          this.writable = inner.writable;
+        }
+      };
+      globalThis.TextEncoderStream = class TextEncoderStream {
+        constructor() {
+          const encoder = new globalThis.TextEncoder();
+          this.encoding = 'utf-8';
+          const inner = new globalThis.TransformStream({
+            transform: function(chunk, controller) {
+              const bytes = encoder.encode(String(chunk));
+              if (bytes.length) controller.enqueue(bytes);
+            },
+          });
+          this.readable = inner.readable;
+          this.writable = inner.writable;
         }
       };
       globalThis.performance = {

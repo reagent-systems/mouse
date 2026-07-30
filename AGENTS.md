@@ -465,6 +465,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **An ignored options argument is a silent no-op.** `TextDecoder.decode(view, options)`
+  accepted the second argument and dropped it, so `{stream: true}` looked supported and
+  corrupted split characters. When a signature takes options, either honour them or throw
+  on the ones you do not — accepting and ignoring is the worst of the three.
+- **Keep the surface consistent with its own refusals.** `crypto.subtle` is absent so
+  feature detection falls back; exposing `Crypto`/`SubtleCrypto` as globals would undo
+  that. A refusal is only worth something if everything around it agrees.
 - **A property count is not an impact estimate.** The shape sweep's biggest entry
   (`process.stdout`, 27 missing) turned out to matter least: piping TO stdout already
   worked, since `pipe()` needs only `write`/`end`. Test what BREAKS before building from

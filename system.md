@@ -1074,6 +1074,32 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **A third sweep, over the GLOBALS — and it found a decoder that could not stream.**
+  Module exports and instance shapes had been swept; nothing had looked at `globalThis`,
+  where the web-standard surface modern packages reach for directly lives. 49 of node's
+  67 were present and **not one differed in KIND**, which is a good result for a hand-
+  built global surface. The 18 absent were all constructor NAMES.
+  The useful one: **`TextDecoderStream`/`TextEncoderStream`**, because
+  `response.body.pipeThrough(new TextDecoderStream())` is how a fetch body is read as
+  text without buffering it all. Building it exposed the real defect underneath — our
+  `TextDecoder.decode()` **ignored its options argument entirely**, so it had no
+  partial-sequence state, and `{stream: true}` was silently a no-op. A character split
+  across chunks (`0xe2 0x82` | `0xac`) would have decoded to replacement characters.
+  It now holds an incomplete trailing sequence, which is the entire difference between
+  decoding a stream and decoding each chunk. `fatal`, `ignoreBOM` and
+  `TextEncoder.encodeInto` (all flagged by the earlier shape sweep) came with it —
+  `encodeInto` reports what fit and never splits a character, so a destination too small
+  for the next one writes nothing rather than half of it.
+  **Three globals stay absent on purpose, and consistency is the reason.** `Crypto`,
+  `CryptoKey` and `SubtleCrypto` are the WebCrypto types, and `crypto.subtle` is
+  deliberately absent here so that a library which feature-detects it takes its fallback
+  path. Exposing the type names would undo exactly that. The same argument that justified
+  the `crypto.subtle` refusal two boundaries ago forbids these three now — a refusal is
+  only worth anything if the surface around it agrees with it.
+  Also still absent, and honestly so: `PerformanceObserver` and the WHATWG stream
+  controller/reader classes. `PerformanceObserver` needs real entry observation, and a
+  constructor that observes nothing is the silent no-op AGENTS.md forbids; better absent
+  than lying. The controller classes are internals reachable only through `instanceof`.
 - **`http.Server`'s connection management, and a gap deliberately NOT closed.** The shape
   sweep's two largest remaining entries were `http.Server` (17 properties) and
   `process.stdout` (27). Before building either, both were tested for what actually
