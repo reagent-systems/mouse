@@ -340,6 +340,17 @@ final class NodeEngine: @unchecked Sendable {
         if socketsUsed { sockets.closeAll() }
         if watchersUsed { watchers.closeAll() }
 
+        // `process.exitCode = n` is the OTHER way a program reports failure: it does not exit,
+        // it records what the exit status should be once the loop drains. It was a plain
+        // property nothing ever read, so every tool that reports failure this way — mocha,
+        // and any test runner or linter that lets pending work finish — exited 0 on failure.
+        // An explicit `process.exit(n)` still wins, having already set exitCode here.
+        if exitCode == nil,
+           let recorded = context.objectForKeyedSubscript("process")?.forProperty("exitCode"),
+           !recorded.isUndefined, !recorded.isNull {
+            exitCode = Int32(recorded.toInt32())
+        }
+
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
 
@@ -3486,6 +3497,71 @@ final class NodeEngine: @unchecked Sendable {
       // replaces — `Buffer.isBuffer(x) ? x : Buffer.from(String(x))` — turns a Uint8Array of
       // [7,0,0,0] into the TEXT "7,0,0,0", which is exactly how esbuild's protocol packets and
       // Go's stdout writes were corrupted. Ten places had that shape.
+      // Deep equality, shared by `assert` and `util.isDeepStrictEqual`. All three call sites used
+      // to be `JSON.stringify(a) === JSON.stringify(b)`, which is wrong in every direction that
+      // matters: key ORDER decided equality, NaN never equalled itself, Map/Set/Date/RegExp all
+      // collapsed to {}, a key holding undefined vanished so `{a: undefined}` equalled `{}`, and
+      // a circular structure threw instead of comparing.
+      globalThis.__deepEqual = function(a, b, strict) {
+        return (function compare(x, y, seen) {
+          if (x === y) return true;
+          // SameValueZero for the strict form, so NaN equals NaN as node has it.
+          if (typeof x === 'number' && typeof y === 'number' && Number.isNaN(x) && Number.isNaN(y)) return true;
+          if (x === null || y === null || typeof x !== 'object' || typeof y !== 'object') {
+            return strict ? false : x == y;
+          }
+          // A pair already under comparison is taken as equal — the standard rule that lets two
+          // self-referential structures compare without recursing forever.
+          for (const pair of seen) if (pair[0] === x && pair[1] === y) return true;
+          const nested = seen.concat([[x, y]]);
+
+          if (strict && Object.getPrototypeOf(x) !== Object.getPrototypeOf(y)) return false;
+          if (x instanceof Date || y instanceof Date) {
+            return x instanceof Date && y instanceof Date && x.getTime() === y.getTime();
+          }
+          if (x instanceof RegExp || y instanceof RegExp) {
+            return x instanceof RegExp && y instanceof RegExp && x.source === y.source && x.flags === y.flags;
+          }
+          if (ArrayBuffer.isView(x) || ArrayBuffer.isView(y)) {
+            if (!ArrayBuffer.isView(x) || !ArrayBuffer.isView(y)) return false;
+            const bx = new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+            const by = new Uint8Array(y.buffer, y.byteOffset, y.byteLength);
+            if (bx.length !== by.length) return false;
+            for (let i = 0; i < bx.length; i++) if (bx[i] !== by[i]) return false;
+            return true;
+          }
+          if (x instanceof Map || y instanceof Map) {
+            if (!(x instanceof Map) || !(y instanceof Map) || x.size !== y.size) return false;
+            for (const [key, value] of x) {
+              // Keys may be objects, so `y.get(key)` would miss an equal-but-not-identical key.
+              let found = false;
+              for (const [otherKey, otherValue] of y) {
+                if (compare(key, otherKey, nested) && compare(value, otherValue, nested)) { found = true; break; }
+              }
+              if (!found) return false;
+            }
+            return true;
+          }
+          if (x instanceof Set || y instanceof Set) {
+            if (!(x instanceof Set) || !(y instanceof Set) || x.size !== y.size) return false;
+            for (const value of x) {
+              let found = false;
+              for (const other of y) if (compare(value, other, nested)) { found = true; break; }
+              if (!found) return false;
+            }
+            return true;
+          }
+          if (Array.isArray(x) !== Array.isArray(y)) return false;
+          const keysX = Object.keys(x), keysY = Object.keys(y);
+          if (keysX.length !== keysY.length) return false;
+          for (const key of keysX) {
+            if (!Object.prototype.hasOwnProperty.call(y, key)) return false;
+            if (!compare(x[key], y[key], nested)) return false;
+          }
+          return true;
+        })(a, b, []);
+      };
+
       globalThis.__toBytes = function(value, encoding) {
         if (Buffer.isBuffer(value)) return value;
         if (ArrayBuffer.isView(value)) {
@@ -4167,7 +4243,16 @@ final class NodeEngine: @unchecked Sendable {
         title: 'node',
         cwd: function(){ return __cwd; },
         chdir: function(){ throw new Error('process.chdir is not supported'); },
-        exit: function(code){ bridge.exit(code === undefined ? 0 : code | 0); throw new Error('__mouse_exit__'); },
+        // A bare `process.exit()` adopts whatever `process.exitCode` holds; only an explicit
+        // argument overrides it.
+        exit: function(code){
+          if (code === undefined) {
+            const recorded = process.exitCode;
+            code = (recorded === undefined || recorded === null) ? 0 : recorded;
+          }
+          bridge.exit(code | 0);
+          throw new Error('__mouse_exit__');
+        },
         exitCode: undefined,
         nextTick: function(fn){
           tickQueue.push([fn, Array.prototype.slice.call(arguments, 1)]);
@@ -4675,7 +4760,7 @@ final class NodeEngine: @unchecked Sendable {
           isFunction: v => typeof v === 'function',
           isString: v => typeof v === 'string',
           isObject: v => v !== null && typeof v === 'object',
-          isDeepStrictEqual: function(a, b) { return JSON.stringify(a) === JSON.stringify(b); },
+          isDeepStrictEqual: function(a, b) { return globalThis.__deepEqual(a, b, true); },
           // The deprecated-but-still-used type checks. Packages that support old node call
           // these directly, and an undefined one reads as "not that type".
           isBoolean: v => typeof v === 'boolean',
@@ -6023,33 +6108,241 @@ final class NodeEngine: @unchecked Sendable {
           }
           return Object.keys(expected).every(key => partialMatch(actual[key], expected[key]));
         }
+        // node's assert throws an AssertionError, not an Error, and test runners READ its
+        // fields: mocha renders its diff from `actual`/`expected`, and tools classify by
+        // `code === 'ERR_ASSERTION'`. Every assertion here used to throw a bare Error with a
+        // message like "not deeply equal", which names no value and locates nothing.
+        class AssertionError extends Error {
+          constructor(options) {
+            super(options.message);
+            this.name = 'AssertionError';
+            this.code = 'ERR_ASSERTION';
+            this.actual = options.actual;
+            this.expected = options.expected;
+            this.operator = options.operator;
+            this.generatedMessage = options.generatedMessage;
+          }
+        }
+        // A caller's `message` always wins, and marks the message as not generated.
+        function fail(options, message) {
+          if (message instanceof Error) throw message;
+          throw new AssertionError({
+            message: message === undefined || message === null ? options.message : String(message),
+            actual: options.actual, expected: options.expected, operator: options.operator,
+            // node reports these as NOT generated even when it wrote them itself — the
+            // missing-exception family is fixed text, not a rendering of the values.
+            generatedMessage: options.generated === false
+              ? false : (message === undefined || message === null),
+          });
+        }
+        // node inspects with `compact: false` in these messages, so every entry sits on its own
+        // line — which is what makes the deep-equal diff readable line by line.
+        function expand(value, indent) {
+          const pad = ' '.repeat(indent), inner = ' '.repeat(indent + 2);
+          if (value === null || typeof value !== 'object') return inspect(value);
+          if (value instanceof Date || value instanceof RegExp) return inspect(value);
+          if (ArrayBuffer.isView(value)) return inspect(value);
+          if (Array.isArray(value)) {
+            if (!value.length) return '[]';
+            return '[\n' + value.map(item => inner + expand(item, indent + 2)).join(',\n') + '\n' + pad + ']';
+          }
+          if (value instanceof Map) {
+            if (!value.size) return 'Map(0) {}';
+            const parts = [];
+            for (const [key, item] of value) parts.push(inner + expand(key, indent + 2) + ' => ' + expand(item, indent + 2));
+            return 'Map(' + value.size + ') {\n' + parts.join(',\n') + '\n' + pad + '}';
+          }
+          if (value instanceof Set) {
+            if (!value.size) return 'Set(0) {}';
+            const parts = [];
+            for (const item of value) parts.push(inner + expand(item, indent + 2));
+            return 'Set(' + value.size + ') {\n' + parts.join(',\n') + '\n' + pad + '}';
+          }
+          const keys = Object.keys(value);
+          if (!keys.length) return '{}';
+          return '{\n' + keys.map(key => inner + quoteKey(key) + ': ' + expand(value[key], indent + 2)).join(',\n') +
+                 '\n' + pad + '}';
+        }
+        // The +/- body of a strict deep-equal failure: both values expanded, then a line diff.
+        // Common lines carry a two-space prefix, so a marker replaces it without shifting text.
+        function diffLines(actual, expected, label) {
+          // `label` renders node's "Comparison { … }" — the pseudo-object it diffs when an
+          // expected-error matcher fails, holding only the keys the matcher named.
+          const head = text => label ? text.replace(/^\{/, label + '{') : text;
+          const a = head(expand(actual, 0)).split('\n'), b = head(expand(expected, 0)).split('\n');
+          // Longest common subsequence over lines — the sequences here are small.
+          const table = [];
+          for (let i = 0; i <= a.length; i++) table.push(new Array(b.length + 1).fill(0));
+          for (let i = a.length - 1; i >= 0; i--) {
+            for (let j = b.length - 1; j >= 0; j--) {
+              table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1
+                                          : Math.max(table[i + 1][j], table[i][j + 1]);
+            }
+          }
+          const out = [];
+          let i = 0, j = 0;
+          while (i < a.length && j < b.length) {
+            if (a[i] === b[j]) { out.push('  ' + a[i]); i++; j++; }
+            else if (table[i + 1][j] >= table[i][j + 1]) { out.push('+ ' + a[i]); i++; }
+            else { out.push('- ' + b[j]); j++; }
+          }
+          while (i < a.length) out.push('+ ' + a[i++]);
+          while (j < b.length) out.push('- ' + b[j++]);
+          return out.join('\n');
+        }
         function assert(value, message) {
-          if (!value) throw new Error(message || 'Assertion failed');
+          if (value) return;
+          fail({ message: 'The expression evaluated to a falsy value:\n\n  assert.ok(' + inspect(value) + ')\n',
+                 actual: value, expected: true, operator: '==' }, message);
         }
         assert.ok = assert;
-        assert.equal = function(a, b, message) { if (a != b) throw new Error(message || (a + ' != ' + b)); };
-        assert.strictEqual = function(a, b, message) { if (a !== b) throw new Error(message || (a + ' !== ' + b)); };
-        assert.notEqual = function(a, b, message) { if (a == b) throw new Error(message || (a + ' == ' + b)); };
-        assert.notStrictEqual = function(a, b, message) { if (a === b) throw new Error(message || (a + ' === ' + b)); };
+        assert.AssertionError = AssertionError;
+        assert.equal = function(a, b, message) {
+          if (a == b) return;
+          fail({ message: inspect(a) + ' == ' + inspect(b), actual: a, expected: b, operator: '==' }, message);
+        };
+        assert.notEqual = function(a, b, message) {
+          if (a != b) return;
+          fail({ message: inspect(a) + ' != ' + inspect(b), actual: a, expected: b, operator: '!=' }, message);
+        };
+        assert.strictEqual = function(a, b, message) {
+          if (Object.is(a, b)) return;
+          fail({ message: 'Expected values to be strictly equal:\n\n' + inspect(a) + ' !== ' + inspect(b) + '\n',
+                 actual: a, expected: b, operator: 'strictEqual' }, message);
+        };
+        assert.notStrictEqual = function(a, b, message) {
+          if (!Object.is(a, b)) return;
+          fail({ message: 'Expected "actual" to be strictly unequal to: ' + inspect(b),
+                 actual: a, expected: b, operator: 'notStrictEqual' }, message);
+        };
         assert.deepStrictEqual = function(a, b, message) {
-          if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(message || 'not deeply equal');
+          if (globalThis.__deepEqual(a, b, true)) return;
+          fail({ message: 'Expected values to be strictly deep-equal:\n+ actual - expected\n\n' +
+                          diffLines(a, b) + '\n',
+                 actual: a, expected: b, operator: 'deepStrictEqual' }, message);
         };
-        assert.deepEqual = assert.deepStrictEqual;
         assert.notDeepStrictEqual = function(a, b, message) {
-          if (JSON.stringify(a) === JSON.stringify(b)) throw new Error(message || 'unexpectedly deeply equal');
+          if (!globalThis.__deepEqual(a, b, true)) return;
+          fail({ message: 'Expected "actual" not to be strictly deep-equal to:\n\n' + expand(a, 0) + '\n',
+                 actual: a, expected: b, operator: 'notDeepStrictEqual' }, message);
         };
-        assert.notDeepEqual = assert.notDeepStrictEqual;
-        assert.fail = function(message) { throw new Error(message instanceof Error ? message.message : (message || 'Failed')); };
-        assert.ifError = function(value) { if (value) throw (value instanceof Error ? value : new Error('ifError got ' + value)); };
-        assert.throws = function(fn, message) {
-          try { fn(); } catch (e) { return; }
-          throw new Error(message || 'Missing expected exception');
+        assert.deepEqual = function(a, b, message) {
+          if (globalThis.__deepEqual(a, b, false)) return;
+          fail({ message: 'Expected values to be loosely deep-equal:\n\n' + expand(a, 0) +
+                          '\n\nshould loosely deep-equal\n\n' + expand(b, 0),
+                 actual: a, expected: b, operator: 'deepEqual' }, message);
         };
-        assert.doesNotThrow = function(fn, message) {
-          try { fn(); } catch (e) { throw new Error(message || 'Got unwanted exception'); }
+        assert.notDeepEqual = function(a, b, message) {
+          if (!globalThis.__deepEqual(a, b, false)) return;
+          fail({ message: 'Expected "actual" not to be loosely deep-equal to:\n\n' + expand(a, 0) + '\n',
+                 actual: a, expected: b, operator: 'notDeepEqual' }, message);
+        };
+        assert.fail = function(message) {
+          if (message instanceof Error) throw message;
+          fail({ message: 'Failed', actual: undefined, expected: undefined, operator: 'fail' }, message);
+        };
+        assert.ifError = function(value) {
+          if (!value) return;
+          const described = value instanceof Error ? value.message : inspect(value);
+          throw new AssertionError({ message: 'ifError got unwanted exception: ' + described,
+                                     actual: value, expected: null, operator: 'ifError',
+                                     generatedMessage: false });
+        };
+        // The expected-error argument was IGNORED, so `assert.throws(fn, RangeError)` passed on
+        // any throw at all — a test asserting a specific failure silently accepted the wrong one.
+        function errorMatches(error, expected) {
+          if (expected instanceof RegExp) return expected.test(String(error));
+          if (typeof expected === 'function') {
+            // A class to instantiate against, or a predicate returning true.
+            if (expected.prototype !== undefined && error instanceof expected) return true;
+            return expected(error) === true;
+          }
+          if (expected && typeof expected === 'object') {
+            return Object.keys(expected).every(key => {
+              const want = expected[key];
+              if (want instanceof RegExp) return want.test(String(error[key]));
+              return globalThis.__deepEqual(error[key], want, true);
+            });
+          }
+          return true;
+        }
+        function describeExpected(expected) {
+          if (typeof expected === 'function' && expected.name) return expected.name;
+          return inspect(expected);
+        }
+        assert.throws = function(fn, expected, message) {
+          if (typeof expected === 'string' && message === undefined) { message = expected; expected = undefined; }
+          let thrown, threw = false;
+          try { fn(); } catch (error) { thrown = error; threw = true; }
+          if (!threw) {
+            fail({ message: 'Missing expected exception.', generated: false, actual: undefined, expected: expected,
+                   operator: 'throws' }, message);
+          }
+          if (expected === undefined || errorMatches(thrown, expected)) return;
+          if (expected instanceof RegExp) {
+            fail({ message: 'The input did not match the regular expression ' + expected +
+                            '. Input:\n\n' + inspect(String(thrown)) + '\n',
+                   actual: thrown, expected: expected, operator: 'throws' }, message);
+          }
+          if (expected && typeof expected === 'object') {
+            // Only the keys the matcher named are compared, so the diff shows the properties
+            // that were actually asserted rather than the whole error.
+            const comparison = {};
+            for (const key of Object.keys(expected)) comparison[key] = thrown ? thrown[key] : undefined;
+            fail({ message: 'Expected values to be strictly deep-equal:\n+ actual - expected\n\n' +
+                            diffLines(comparison, expected, 'Comparison ') + '\n',
+                   actual: comparison, expected: expected, operator: 'throws' }, message);
+          }
+          fail({ message: 'The error is expected to be an instance of "' + describeExpected(expected) +
+                          '". Received "' + (thrown && thrown.name ? thrown.name : inspect(thrown)) +
+                          '"\n\nError message:\n\n' + (thrown && thrown.message !== undefined ? thrown.message : ''),
+                 actual: thrown, expected: expected, operator: 'throws' }, message);
+        };
+        assert.doesNotThrow = function(fn, expected, message) {
+          if (typeof expected === 'string' && message === undefined) { message = expected; expected = undefined; }
+          try { fn(); } catch (error) {
+            if (expected !== undefined && !errorMatches(error, expected)) throw error;
+            fail({ message: 'Got unwanted exception.\nActual message: "' +
+                            (error && error.message !== undefined ? error.message : String(error)) + '"',
+                   actual: error, expected: expected, generated: false, operator: 'doesNotThrow' }, message);
+          }
+        };
+        // The async halves. `rejects` takes a promise or a function returning one.
+        assert.rejects = async function(target, expected, message) {
+          if (typeof expected === 'string' && message === undefined) { message = expected; expected = undefined; }
+          let thrown, threw = false;
+          try { await (typeof target === 'function' ? target() : target); }
+          catch (error) { thrown = error; threw = true; }
+          if (!threw) {
+            fail({ message: 'Missing expected rejection.', generated: false, actual: undefined, expected: expected,
+                   operator: 'rejects' }, message);
+          }
+          if (expected === undefined || errorMatches(thrown, expected)) return;
+          fail({ message: 'The error is expected to be an instance of "' + describeExpected(expected) +
+                          '". Received "' + (thrown && thrown.name ? thrown.name : inspect(thrown)) + '"',
+                 actual: thrown, expected: expected, operator: 'rejects' }, message);
+        };
+        assert.doesNotReject = async function(target, expected, message) {
+          if (typeof expected === 'string' && message === undefined) { message = expected; expected = undefined; }
+          try { await (typeof target === 'function' ? target() : target); }
+          catch (error) {
+            if (expected !== undefined && !errorMatches(error, expected)) throw error;
+            fail({ message: 'Got unwanted rejection.\nActual message: "' +
+                            (error && error.message !== undefined ? error.message : String(error)) + '"',
+                   actual: error, expected: expected, generated: false, operator: 'doesNotReject' }, message);
+          }
         };
         assert.match = function(value, regexp, message) {
-          if (!regexp.test(value)) throw new Error(message || (value + ' does not match ' + regexp));
+          if (regexp.test(value)) return;
+          fail({ message: 'The input did not match the regular expression ' + regexp + '. Input:\n\n' +
+                          inspect(value) + '\n',
+                 actual: value, expected: regexp, operator: 'match' }, message);
+        };
+        assert.doesNotMatch = function(value, regexp, message) {
+          if (!regexp.test(value)) return;
+          fail({ message: 'The input was expected to not match the regular expression ' + regexp +
+                          '. Input:\n\n' + inspect(value) + '\n',
+                 actual: value, expected: regexp, operator: 'doesNotMatch' }, message);
         };
         assert.strict = assert;
         assert.CallTracker = CallTracker;
@@ -11218,7 +11511,7 @@ final class NodeEngine: @unchecked Sendable {
           if (!m.TextEncoder) m.TextEncoder = globalThis.TextEncoder;
           if (!m.TextDecoder) m.TextDecoder = globalThis.TextDecoder;
           if (!m.formatWithOptions) m.formatWithOptions = function(options, ...rest) { return m.format.apply(null, rest); };
-          if (!m.isDeepStrictEqual) m.isDeepStrictEqual = function(a, b) { return JSON.stringify(a) === JSON.stringify(b); };
+          if (!m.isDeepStrictEqual) m.isDeepStrictEqual = function(a, b) { return globalThis.__deepEqual(a, b, true); };
           if (m.inspect && !m.inspect.custom) m.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
           if (m.promisify && !m.promisify.custom) m.promisify.custom = Symbol.for('nodejs.util.promisify.custom');
           if (!m.getSystemErrorName) m.getSystemErrorName = function(code) {

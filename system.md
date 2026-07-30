@@ -113,6 +113,7 @@ so a TUI navigates and edits.
 | **Phase G — unix domain sockets** | `net.connect({ path })` and `server.listen(path)` work on a real socket FILE, in both directions with real node — the same stream machinery with a different address family, plus the two things a socket file adds: a stale file removed before bind, and the file unlinked when the listener closes. A path longer than `sockaddr_un` fails loudly rather than being truncated into a different socket |
 | **Phase G — multicast** | `addMembership`/`dropMembership` with `setMulticastTTL`, `setMulticastLoopback` and `setMulticastInterface` — the `IP_ADD_MEMBERSHIP` the refusal named. Both engines join a group on loopback, send to it and receive their own packet, identically. That empties the audit's "reachable but unbuilt" list: UDP, unix sockets and multicast were all on it |
 | **Phase G — eslint lints, and the clock is real** | **eslint 9 runs on the engine and reports the same findings on the same files as real node.** A real-package proof is different evidence from a surface sweep — it exercises capabilities in COMBINATION, and it found four defects no per-API sweep had. `process.hrtime` was built on `Date.now()`: wall-clock, millisecond-resolution, and free to run BACKWARDS across an NTP correction — so a diff could come out negative. It now reads a monotonic clock (`DispatchTime`, mach_absolute_time underneath, the same source node uses on Darwin) and carries the `bigint` property eslint destructures. `pathToFileURL`/`fileURLToPath` were stubs doing string surgery that round-tripped plain ASCII and lost on everything else; and our `URL` dropped the `//` from an empty authority (`file:///a` → `file:/a`), never percent-encoded the path, reported `file:` where node reports `null` for an opaque origin, and handed out a DETACHED `searchParams` — so eslint's mtime cache-bust vanished silently. 38 URL vectors are now byte-identical, and a query on a `file:` specifier busts the module cache as it is meant to |
+| **Phase G — mocha runs, and `assert` grew up** | **mocha 10 runs a suite on the engine and reports the same results as real node — every pass, failure, pending and timeout, in the same order, with the same exit code.** A test runner lives on the parts of a runtime hardest to fake, and it found the worst defect of the session: **`process.exitCode = n` was a property nothing ever read**, so a suite with failing tests exited **0** — a CI green light on a red build. Chasing the assertion messages then exposed the `assert` module as mostly a facade: no `AssertionError` class at all (every failure a bare `Error` with no `code`, `operator`, `actual` or `expected` — the exact fields a runner renders its diff from), `deepStrictEqual` implemented as `JSON.stringify` comparison (so key ORDER decided equality, `NaN` never equalled itself, `Map`/`Set`/`Date`/`RegExp` all collapsed to `{}`, and a circular structure threw), `deepEqual` aliased to the strict form, and **`assert.throws` ignoring its expected-error argument entirely** — so a test asserting a specific error passed on any throw at all. All rewritten: 18 message/field shapes and 37 behaviours byte-identical to node, including the `+ actual - expected` diff bodies. The one deep-equal now backs `util.isDeepStrictEqual` too, which had the same `JSON.stringify` bug copied into two more places |
 
 ### Verification performed
 
@@ -1202,7 +1203,7 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   like it lives in one place.
   autoDestroy changes stream LIFETIMES everywhere, so the full battery ran: 97 fixtures, http,
   express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch, chokidar, spawn,
-  eslint.
+  eslint, mocha.
 - **The rest of the stream surface — `unpipe` was a TypeError.** What the instance-shape
   sweep left. `unpipe` is the one that mattered: real code stops a pipe MID-FLIGHT — proxying,
   extracting a tar, aborting a download — and calling it threw. `pipe` now remembers its
@@ -1218,7 +1219,7 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   chunk too — which matters precisely because it is the number a caller compares AGAINST
   `writableHighWaterMark`, so the two disagreeing is worse than either being wrong alone.
   Every stream-dependent harness re-ran, since `pipe` itself changed: 96 fixtures, http,
-  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch and eslint.
+  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch, eslint and mocha.
 - **An audit of the VERIFICATION ITSELF, after two harness bugs in two boundaries.** The
   rule this session keeps proving — when the same defect appears twice, sweep the class —
   applied to the test infrastructure rather than the engine. The console boundary was
@@ -1299,8 +1300,8 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
      PURPOSE is to hold a split character. It now holds an incomplete UTF-8 tail, an odd
      UTF-16 byte, a lone high surrogate, and a partial base64 group.
   Buffer encodings are load-bearing for everything, so every harness re-ran: 93 fixtures,
-  pkg, webpack (byte-identical), esbuild-wasm, express, ws, http, jsonwebtoken, tsc --watch
-  and eslint.
+  pkg, webpack (byte-identical), esbuild-wasm, express, ws, http, jsonwebtoken, tsc --watch,
+  eslint and mocha.
 - **The event-sequence audit: two events that never fired.** Real code WAITS on events, so
   one that never fires is a hang and one that fires twice is a double-free — and ordering
   matters as much as presence. Nine lifecycles recorded as ordered lists and diffed against

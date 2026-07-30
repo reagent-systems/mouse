@@ -8,6 +8,24 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **mocha 10 runs a suite**, reporting the same passes, failures, pending tests,
+  timeouts and exit code as real node.
+- Node layer: `process.exitCode = n` is honoured. It was a property nothing ever read back, so
+  a program that reports failure by setting it — every test runner and most linters — exited
+  **0** on failure. A bare `process.exit()` now adopts it too, as node's does.
+- Node layer: `assert` throws a real `AssertionError` carrying node's `code`, `operator`,
+  `actual`, `expected` and `generatedMessage`. Failures used to be bare `Error`s, so a test
+  runner had nothing to build a diff from. Messages are byte-identical to node's, including
+  the `+ actual - expected` diff bodies.
+- Node layer: deep equality is real, replacing `JSON.stringify` comparison in all three places
+  that used it (`assert.deepStrictEqual`, `assert.deepEqual` — which was merely aliased to the
+  strict form — and `util.isDeepStrictEqual`). Key order no longer decides equality; `NaN`
+  equals itself; `Map`, `Set`, `Date`, `RegExp` and typed arrays compare structurally; a key
+  holding `undefined` is distinct from a missing key; circular structures compare instead of
+  throwing; and the loose form is genuinely loose.
+- Node layer: `assert.throws`/`doesNotThrow` honour their expected-error argument — a regular
+  expression, an error class, or a property matcher. It was ignored, so a test asserting a
+  specific error passed on ANY throw. Adds the async `assert.rejects`/`doesNotReject`.
 - Node layer: **eslint 9 runs**, reporting the same findings on the same files as real node.
   A real-package proof exercises capabilities in combination, and this one found four defects
   no per-API sweep had.
