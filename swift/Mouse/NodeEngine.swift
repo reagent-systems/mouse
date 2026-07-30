@@ -3828,6 +3828,21 @@ final class NodeEngine: @unchecked Sendable {
         return globalThis.__cloneDecode(globalThis.__cloneEncode(value));
       };
 
+      // One shape for every compression coder class: `new X(opts)` and `createX(opts)` both
+      // produce a stream that passes `instanceof X`, which node guarantees and callers branch
+      // on. A global because the zlib factory and augmentCore are separate functions and both
+      // need it — the brotli coders live in the second.
+      globalThis.__coderClass = function(build, Base) {
+        const Coder = function(options) {
+          const stream = build(options);
+          Object.setPrototypeOf(stream, Coder.prototype);
+          return stream;
+        };
+        Coder.prototype = Object.create(Base.prototype);
+        Coder.prototype.constructor = Coder;
+        return Coder;
+      };
+
       globalThis.__toBytes = function(value, encoding) {
         if (Buffer.isBuffer(value)) return value;
         if (ArrayBuffer.isView(value)) {
@@ -11735,8 +11750,12 @@ final class NodeEngine: @unchecked Sendable {
             stream.reset = function() {};
             return stream;
           };
-          zlib[className] = Coder;
-          zlib['create' + className] = function(options) { return new Coder(options); };
+          // node's contract is `createGzip() instanceof zlib.Gzip`, and code branches on it —
+          // the factory returned a plain Transform, so the check was false. Reparenting the
+          // stream onto a class whose prototype chains to Transform's satisfies both forms
+          // without changing what the stream IS.
+          zlib[className] = globalThis.__coderClass(Coder, Transform);
+          zlib['create' + className] = function(options) { return new zlib[className](options); };
         }
         // Flush constants and level names coder streams pass around.
         Object.assign(zlib.constants, {
@@ -12376,8 +12395,15 @@ final class NodeEngine: @unchecked Sendable {
               return stream;
             };
           };
-          m.createBrotliCompress = BrotliCoder(true);
-          m.createBrotliDecompress = BrotliCoder(false);
+          // The CLASS forms were missing entirely, so `new zlib.BrotliCompress()` threw while
+          // every zlib equivalent worked — and a pipeline built with the constructor is how
+          // packages reach for brotli.
+          // augmentCore does not destructure `stream` the way the zlib factory does.
+          const BrotliBase = coreRequire('stream').Transform;
+          m.BrotliCompress = globalThis.__coderClass(BrotliCoder(true), BrotliBase);
+          m.BrotliDecompress = globalThis.__coderClass(BrotliCoder(false), BrotliBase);
+          m.createBrotliCompress = function(options) { return new m.BrotliCompress(options); };
+          m.createBrotliDecompress = function(options) { return new m.BrotliDecompress(options); };
           // zstd genuinely has no system implementation — Compression framework has LZFSE, LZ4,
           // LZMA, zlib and brotli, and no zstd.
           for (const missing of ['zstdCompress', 'zstdCompressSync', 'zstdDecompress',

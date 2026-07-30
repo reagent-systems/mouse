@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Fixed
+- Node layer: `zlib.BrotliCompress`/`BrotliDecompress` exist as classes, so `new
+  zlib.BrotliCompress()` works rather than throwing — brotli had only the factory functions.
+  And `createGzip() instanceof zlib.Gzip` is now true, as node has it; the factories returned a
+  plain Transform, so every `instanceof` check against a coder class was false.
 - Terminal: leaving the alternate screen restores what was there. `ESC[?1049h`/`ESC[?1049l`
   is a save/restore pair, but entering cleared without saving and leaving cleared again — so
   quitting `less`, `top` or any full-screen program wiped the terminal instead of returning the
