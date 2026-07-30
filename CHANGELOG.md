@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: Buffer gained 35 missing documented methods — `writeFloatBE/LE` and
+  `writeInt16BE/LE` (whose readers were already present), signed `BigInt64`, the
+  variable-width integer family over 1..6 bytes, `swap16/32/64`, node's lowercase
+  `uint` aliases and `Buffer.copyBytesFrom`. All byte-exact against real node.
 - Node layer: the `dns.resolve*` family is real (`swift/Mouse/NodeDNS.swift`) — TXT, MX,
   NS, CNAME, PTR, SOA, SRV, NAPTR, CAA, `resolveAny`, `reverse` and `lookupService`,
   through the system resolver in libresolv. Verified against real node on live records.

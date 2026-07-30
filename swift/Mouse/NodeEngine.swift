@@ -2626,6 +2626,10 @@ final class NodeEngine: @unchecked Sendable {
         writeUInt16LE(v, o) { this._view().setUint16(o | 0, v, true); return (o | 0) + 2; }
         readInt16BE(o) { return this._view().getInt16(o | 0, false); }
         readInt16LE(o) { return this._view().getInt16(o | 0, true); }
+        // The 16-bit signed WRITERS were missing while their readers were present — the same
+        // read-without-write asymmetry as writeFloat, and the shape sweep caught both.
+        writeInt16BE(v, o) { this._view().setInt16(o | 0, v, false); return (o | 0) + 2; }
+        writeInt16LE(v, o) { this._view().setInt16(o | 0, v, true); return (o | 0) + 2; }
         readUInt32BE(o) { return this._view().getUint32(o | 0, false); }
         readUInt32LE(o) { return this._view().getUint32(o | 0, true); }
         writeUInt32BE(v, o) { this._view().setUint32(o | 0, v, false); return (o | 0) + 4; }
@@ -2644,6 +2648,95 @@ final class NodeEngine: @unchecked Sendable {
         writeDoubleLE(v, o) { this._view().setFloat64(o | 0, v, true); return (o | 0) + 8; }
         readFloatBE(o) { return this._view().getFloat32(o | 0, false); }
         readFloatLE(o) { return this._view().getFloat32(o | 0, true); }
+        // Everything below was missing and is documented Buffer API — found by a sweep over
+        // instance SHAPES rather than exports, which is the only way a missing method on the most
+        // used object in Node shows up before a program needs it. writeFloat is the one that
+        // stings: readFloat was here, so binary formats could be read and not written.
+        writeFloatBE(v, o) { this._view().setFloat32(o | 0, v, false); return (o | 0) + 4; }
+        writeFloatLE(v, o) { this._view().setFloat32(o | 0, v, true); return (o | 0) + 4; }
+        readBigInt64BE(o) { return this._view().getBigInt64(o | 0, false); }
+        readBigInt64LE(o) { return this._view().getBigInt64(o | 0, true); }
+        writeBigInt64BE(v, o) { this._view().setBigInt64(o | 0, BigInt(v), false); return (o | 0) + 8; }
+        writeBigInt64LE(v, o) { this._view().setBigInt64(o | 0, BigInt(v), true); return (o | 0) + 8; }
+        /// The variable-width readers: any byte count from 1 to 6, which is what a wire format
+        /// with 3- or 5-byte integers needs. Above 6 bytes the value would exceed the exact
+        /// integer range, which is why node caps it there too.
+        readUIntBE(offset, byteLength) {
+          const at = offset | 0, size = byteLength | 0;
+          if (size < 1 || size > 6) throw new RangeError('byteLength must be >= 1 and <= 6');
+          let value = 0;
+          for (let i = 0; i < size; i++) value = value * 256 + this[at + i];
+          return value;
+        }
+        readUIntLE(offset, byteLength) {
+          const at = offset | 0, size = byteLength | 0;
+          if (size < 1 || size > 6) throw new RangeError('byteLength must be >= 1 and <= 6');
+          let value = 0;
+          for (let i = size - 1; i >= 0; i--) value = value * 256 + this[at + i];
+          return value;
+        }
+        readIntBE(offset, byteLength) {
+          const size = byteLength | 0;
+          const value = this.readUIntBE(offset, size);
+          // Sign extension: the top bit of the FIRST byte is the sign, so subtract the full range.
+          const limit = Math.pow(2, size * 8 - 1);
+          return value >= limit ? value - limit * 2 : value;
+        }
+        readIntLE(offset, byteLength) {
+          const size = byteLength | 0;
+          const value = this.readUIntLE(offset, size);
+          const limit = Math.pow(2, size * 8 - 1);
+          return value >= limit ? value - limit * 2 : value;
+        }
+        writeUIntBE(value, offset, byteLength) {
+          const at = offset | 0, size = byteLength | 0;
+          if (size < 1 || size > 6) throw new RangeError('byteLength must be >= 1 and <= 6');
+          let rest = Math.floor(Number(value));
+          for (let i = size - 1; i >= 0; i--) { this[at + i] = rest & 0xff; rest = Math.floor(rest / 256); }
+          return at + size;
+        }
+        writeUIntLE(value, offset, byteLength) {
+          const at = offset | 0, size = byteLength | 0;
+          if (size < 1 || size > 6) throw new RangeError('byteLength must be >= 1 and <= 6');
+          let rest = Math.floor(Number(value));
+          for (let i = 0; i < size; i++) { this[at + i] = rest & 0xff; rest = Math.floor(rest / 256); }
+          return at + size;
+        }
+        writeIntBE(value, offset, byteLength) {
+          const size = byteLength | 0;
+          const raw = Number(value) < 0 ? Number(value) + Math.pow(2, size * 8) : Number(value);
+          return this.writeUIntBE(raw, offset, size);
+        }
+        writeIntLE(value, offset, byteLength) {
+          const size = byteLength | 0;
+          const raw = Number(value) < 0 ? Number(value) + Math.pow(2, size * 8) : Number(value);
+          return this.writeUIntLE(raw, offset, size);
+        }
+        /// Byte-order swaps, in place, returning the same buffer as node does.
+        swap16() {
+          if (this.length % 2 !== 0) throw new RangeError('Buffer size must be a multiple of 16-bits');
+          for (let i = 0; i < this.length; i += 2) {
+            const a = this[i]; this[i] = this[i + 1]; this[i + 1] = a;
+          }
+          return this;
+        }
+        swap32() {
+          if (this.length % 4 !== 0) throw new RangeError('Buffer size must be a multiple of 32-bits');
+          for (let i = 0; i < this.length; i += 4) {
+            let a = this[i]; this[i] = this[i + 3]; this[i + 3] = a;
+            a = this[i + 1]; this[i + 1] = this[i + 2]; this[i + 2] = a;
+          }
+          return this;
+        }
+        swap64() {
+          if (this.length % 8 !== 0) throw new RangeError('Buffer size must be a multiple of 64-bits');
+          for (let i = 0; i < this.length; i += 8) {
+            for (let j = 0; j < 4; j++) {
+              const a = this[i + j]; this[i + j] = this[i + 7 - j]; this[i + 7 - j] = a;
+            }
+          }
+          return this;
+        }
         compare(other) {
           const length = Math.min(this.length, other.length);
           for (let i = 0; i < length; i++) { if (this[i] !== other[i]) return this[i] < other[i] ? -1 : 1; }
@@ -2700,6 +2793,37 @@ final class NodeEngine: @unchecked Sendable {
           value: bufferStatics[name], writable: true, enumerable: true, configurable: true,
         });
       }
+      // node exposes a lowercase-`uint` alias for every UInt accessor (readUint16BE next to
+      // readUInt16BE), and code written against the newer docs uses those spellings. Generated
+      // from the real ones so the pair can never drift apart.
+      for (const name of Object.getOwnPropertyNames(Buffer.prototype)) {
+        if (name.indexOf('UInt') < 0 && name.indexOf('BigUInt') < 0) continue;
+        const alias = name.replace('BigUInt', 'BigUint').replace(/(?<!Big)UInt/, 'Uint');
+        if (alias !== name && !(alias in Buffer.prototype)) {
+          Object.defineProperty(Buffer.prototype, alias, {
+            value: Buffer.prototype[name], writable: true, enumerable: false, configurable: true,
+          });
+        }
+      }
+      // `Buffer.copyBytesFrom(view[, offset[, length]])` copies OUT of a typed array, and copies
+      // by VALUE — the same distinction that made Buffer.from(typedArray) subtle.
+      Object.defineProperty(Buffer, 'copyBytesFrom', {
+        writable: true, enumerable: true, configurable: true,
+        value: function(view, offset, length) {
+          if (!ArrayBuffer.isView(view)) {
+            throw Object.assign(new TypeError('The "view" argument must be an instance of TypedArray'),
+                                { code: 'ERR_INVALID_ARG_TYPE' });
+          }
+          const start = offset === undefined ? 0 : Number(offset);
+          const count = length === undefined ? view.length - start : Number(length);
+          const slice = view.subarray(start, start + count);
+          // Element VALUES, widened to bytes per element — not a reinterpretation of the memory.
+          const out = Buffer.alloc(slice.length * view.BYTES_PER_ELEMENT);
+          const target = new (view.constructor)(out.buffer, out.byteOffset, slice.length);
+          target.set(slice);
+          return out;
+        },
+      });
       globalThis.Buffer = Buffer;
 
       // ---- Web globals JSC doesn't ship (wasm/Emscripten glue expects them) ----

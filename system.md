@@ -1074,6 +1074,43 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **A second sweep, over instance SHAPES — and Buffer was missing documented methods.**
+  The export sweep called functions; it cannot see an object. That blind spot is where
+  two of this engine's worst bugs lived: Buffer's statics were non-enumerable (express
+  broke on every route) and `fs.Stats` had no `mode` (chokidar hid every file). So the
+  second sweep walks each instance's whole prototype chain in both engines and diffs.
+  **Buffer** was missing 35 documented methods, and the shape of the gap is worth
+  recording: `writeFloatBE/LE` and `writeInt16BE/LE` were absent while their READERS
+  were present, so a binary format could be read and not written. Also the signed
+  `BigInt64` pair, the whole variable-width integer family
+  (`readUIntBE`/`writeIntLE`/… over 1..6 bytes, which is what a wire format with 3- or
+  5-byte integers needs), `swap16/32/64`, node's lowercase `uint` aliases (generated
+  from the real accessors so the pair cannot drift), and `Buffer.copyBytesFrom`.
+  All verified byte-exact against node — 31 lines including the BigInt64 extremes,
+  negative variable-width values, the RangeErrors for byte counts outside 1..6, and
+  `copyBytesFrom` copying VALUES rather than reinterpreting memory.
+  Buffer's remaining 19 differences are node internals (`utf8Slice`, `asciiWrite`,
+  `hexSlice`, `offset`, `parent`) that no documented program calls.
+  **What the shape sweep says is left, in impact order** — this is the map for the
+  next boundaries, not a wish list:
+  1. `crypto.Hash`/`Hmac`/`Cipher` are NOT streams here (56 properties each). In node
+     they are Transforms, so `fs.createReadStream(f).pipe(hash)` is an ordinary way to
+     hash a file, and it cannot work here. Biggest real gap found.
+  2. `stream.Readable` is missing node 17+'s operators — `map`, `filter`, `reduce`,
+     `take`, `drop`, `every`, `some`, `find`, `flatMap`, `toArray`, `compose`,
+     `iterator`. Increasingly common in modern code.
+  3. `process.stdout` is a hand-built object rather than a real Writable, so it cannot
+     be piped TO and has no `destroy`/`writableLength`/`fd`.
+  4. `http.Server` lacks `closeAllConnections`/`closeIdleConnections` (node 18+), which
+     is how a server with keep-alive clients is actually shut down.
+  5. Smaller and exact: `TextEncoder.encodeInto`, `TextDecoder.fatal`/`ignoreBOM`,
+     `Response.formData`, `string_decoder`'s `text`/`lastNeed`/`lastTotal`.
+  **A process note that cost me a wrong claim mid-boundary.** I collapsed the source
+  list into a shell variable, the quoting made it one argument, both builds failed —
+  and the run printed "81 fixtures ALL PASS" from a STALE output file. It was visible
+  only because I had deleted the binary first, which is the habit AGENTS.md picked up
+  two boundaries ago. Delete the OUTPUT as well as the binary: a stale `s.txt` lies
+  just as convincingly as a stale executable.
 - **The `dns.resolve*` family, which is what the sweep pointed at.** `dns.lookup` was
   always real because getaddrinfo answers it; the RESOLVERS ask a DNS SERVER for a
   specific record type, and that is why they were absent. The queries now go through

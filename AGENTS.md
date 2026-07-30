@@ -465,6 +465,15 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Delete the OUTPUT file too, not just the binary.** A failed build leaves the old
+  executable AND the old results file. Reading a stale `s.txt` produced a confident
+  "81 fixtures ALL PASS" for a build that had just failed. `rm` both before a run you
+  intend to believe.
+- **Sweep object SHAPES, not only exports.** An export list cannot see a missing method
+  on an instance, and that is where the worst bugs here have lived (Buffer's
+  non-enumerable statics, `Stats.mode`). Walk the prototype chain in both engines and
+  diff; filter node's internals (`utf8Slice`, `asciiWrite`) so the documented gaps stand
+  out. Read-without-write asymmetries show up immediately this way.
 - **A harness that compiles is not evidence the app does.** The scratch `swiftc`
   invocation runs a looser language mode than the project: `NodeDNS.swift` built clean
   in the harness and the xcodebuild step rejected two Swift 6 concurrency errors. Run
