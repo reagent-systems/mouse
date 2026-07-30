@@ -385,6 +385,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   `--config.minimum-release-age=0` to compare pure resolution. (That gate
   is worth considering for OUR installer someday — noted, not built.)
   43 node fixtures + PHASE F ALL PASS + full battery green
+- **Batch 4: REAL TSC COMPILES TYPESCRIPT ON THE ENGINE — a phase-D
+  milestone proven early.** typescript@5.9.3's `transpileModule` emits
+  correct CommonJS from TS source, byte-identical to real node (fixture
+  `tsc-cli`). lodash and zod passed outright. Two findings en route:
+  (1) typescript@7 is the GO-native tsc — like claude-code 2.x, another
+  the-future-is-native data point; 5.x is the JS-runnable compiler, so
+  phase D targets `typescript@^5`. (2) prettier exposed two transpiler
+  bugs: dynamic `import()` is legal in CJS too (prettier lazy-loads
+  parsers with it) and JSC's native import has no loader — now rewritten
+  through `__dynamicImport` in CJS as well (fixture `dynamic-import-cjs`);
+  and ESM files legitimately declare `const __filename =
+  fileURLToPath(import.meta.url)`, which our substitution turned into a
+  TDZ self-reference — `import.meta.url` now routes through a
+  shadow-proof `__mouseFilename` wrapper param (fixture
+  `filename-shadow-esm`). prettier now formats correctly (clean output;
+  its exit code shows the dangling-promise 13 quirk — output intact,
+  recorded as a follow-up lead). 46 node fixtures, full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

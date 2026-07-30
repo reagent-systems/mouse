@@ -182,7 +182,11 @@ final class NodeEngine: @unchecked Sendable {
 
         let dir = virtualDirname(path)
         let entryIsESM = isESModule(id: normalize(path), source: source)
-        if entryIsESM { source = Self.transpileESM(source) }
+        if entryIsESM {
+            source = Self.transpileESM(source)
+        } else if source.contains("import") {
+            source = Self.rewriteDynamicImport(source)
+        }
         if let function = wrapModule(source, async: entryIsESM) {
             let module = context.evaluateScript("({exports: {}})")!
             let require = makeRequire(fromDir: dir)
@@ -201,7 +205,7 @@ final class NodeEngine: @unchecked Sendable {
                 }
                 let launcher = context.evaluateScript("""
                     (function(fn, exports, require, module, filename, dirname, settled){
-                        fn(exports, require, module, filename, dirname, require)
+                        fn(exports, require, module, filename, dirname, require, filename)
                             .then(function(){ settled(undefined); },
                                   function(e){ settled(e === undefined || e === null ? new Error('undefined thrown') : e); });
                         return module.__esmDone === true || module.__esmError !== undefined;
@@ -211,7 +215,7 @@ final class NodeEngine: @unchecked Sendable {
                                                              JSValue(object: entrySettled, in: context)!])
                 entryPending = finished?.toBool() != true
             } else {
-                function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir, require])
+                function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir, require, path])
             }
         }
         if let fatal, exitCode == nil {
@@ -244,7 +248,7 @@ final class NodeEngine: @unchecked Sendable {
         // shadows the `require` PARAMETER scope-wide, which would put the transpiled imports
         // above that line in TDZ; `__mouseRequire` is untouched by that shadow.
         let keyword = async ? "async function" : "function"
-        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire){\n" + body + "\n})"
+        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){\n" + body + "\n})"
         let function = context.evaluateScript(wrapped)
         guard let function, function.isObject else { return nil }
         return function
@@ -818,7 +822,13 @@ final class NodeEngine: @unchecked Sendable {
                 source = source.drop(while: { $0 != "\n" }).isEmpty ? "" : String(source.drop(while: { $0 != "\n" }))
             }
             let esm = isESModule(id: id, source: source)
-            if esm { source = Self.transpileESM(source) }
+            if esm {
+                source = Self.transpileESM(source)
+            } else if source.contains("import") {
+                // Dynamic import() is legal in CJS too (prettier lazy-loads plugins with it).
+                // JSC's native import has no module loader here — route through ours.
+                source = Self.rewriteDynamicImport(source)
+            }
             // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
             // dependency); CJS stays a plain sync function.
             guard let function = wrapModule(source, async: esm) else {
@@ -835,7 +845,7 @@ final class NodeEngine: @unchecked Sendable {
                 // the exports; transpiled importers await it, real ESM's infection).
                 let trampoline = context.evaluateScript("""
                     (function(fn, exports, require, module, filename, dirname){
-                        const promise = fn(exports, require, module, filename, dirname, require);
+                        const promise = fn(exports, require, module, filename, dirname, require, filename);
                         if (module.__esmError !== undefined) {
                             promise.catch(function(){});
                             const e = module.__esmError;
@@ -860,7 +870,7 @@ final class NodeEngine: @unchecked Sendable {
                 // evict, and rethrow the ORIGINAL error in the requiring frame.
                 let trampoline = context.evaluateScript("""
                     (function(fn, exports, require, module, filename, dirname){
-                        try { fn(exports, require, module, filename, dirname, require); return null; }
+                        try { fn(exports, require, module, filename, dirname, require, filename); return null; }
                         catch (e) { return { __mouseRequireThrow: e === undefined ? new Error('undefined thrown') : e }; }
                     })
                     """)!
@@ -912,6 +922,16 @@ final class NodeEngine: @unchecked Sendable {
     /// ESM → CJS, statement-shaped: the rigid grammar of import/export declarations makes a
     /// regex transform reliable for real packages; expressions stay untouched. Named exports
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
+    /// `import(spec)` → `__dynamicImport(__mouseRequire, spec)`. Applied to ESM (as part of
+    /// the transpile) AND to CJS that contains it — dynamic import is legal in both, and
+    /// JSC's native import has no module loader wired to our resolver.
+    static func rewriteDynamicImport(_ source: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\bimport\s*\("#) else { return source }
+        let ns = source as NSString
+        return regex.stringByReplacingMatches(in: source, range: NSRange(location: 0, length: ns.length),
+                                              withTemplate: "__dynamicImport(__mouseRequire, ")
+    }
+
     static func transpileESM(_ source: String) -> String {
         var text = source
         var epilogue: [String] = []
@@ -1061,12 +1081,11 @@ final class NodeEngine: @unchecked Sendable {
         }
         // dynamic import() and import.meta.*
         text = text.replacingOccurrences(of: "import.meta.resolve", with: "__mouseRequire.resolve")
-        text = text.replacingOccurrences(of: "import.meta.url", with: "('file://' + __filename)")
-        if let regex = try? NSRegularExpression(pattern: #"\bimport\s*\("#) {
-            let ns = text as NSString
-            text = regex.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: ns.length),
-                                                  withTemplate: "__dynamicImport(__mouseRequire, ")
-        }
+        // __mouseFilename, not __filename: ESM files legitimately declare
+        // `const __filename = fileURLToPath(import.meta.url)`, and substituting the param
+        // name would make that line a TDZ self-reference (prettier's bundle).
+        text = text.replacingOccurrences(of: "import.meta.url", with: "('file://' + __mouseFilename)")
+        text = rewriteDynamicImport(text)
 
         // The body runs under an ASYNC wrapper (imports may await). The try/catch makes the
         // sync outcome inspectable the moment the wrapper call returns: __esmDone means the
