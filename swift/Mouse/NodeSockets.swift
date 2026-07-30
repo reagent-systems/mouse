@@ -500,6 +500,50 @@ final class SocketTable: @unchecked Sendable {
         }
     }
 
+    /// Join or leave a multicast group — the `IP_ADD_MEMBERSHIP` the refusal named. Returns an
+    /// error code, because a join can fail for reasons worth reporting (no such interface, or a
+    /// unicast address handed to a multicast call).
+    func multicastMembership(id: Int, group: String, interface: String, join: Bool) -> String? {
+        var problem: String?
+        queue.sync {
+            guard let entry = entries[id], entry.isDatagram else { problem = "EBADF"; return }
+            var request = ip_mreq()
+            guard inet_pton(AF_INET, group, &request.imr_multiaddr) == 1 else { problem = "EINVAL"; return }
+            if interface.isEmpty {
+                request.imr_interface.s_addr = INADDR_ANY.bigEndian
+            } else if inet_pton(AF_INET, interface, &request.imr_interface) != 1 {
+                problem = "EINVAL"
+                return
+            }
+            let option = join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP
+            if setsockopt(entry.fd, IPPROTO_IP, option, &request,
+                          socklen_t(MemoryLayout<ip_mreq>.size)) != 0 {
+                problem = errnoCode()
+            }
+        }
+        return problem
+    }
+
+    /// The knobs that go with a group: how far packets travel, whether the sender sees its own,
+    /// and which interface they leave by.
+    func multicastOption(id: Int, ttl: Int?, loopback: Bool?, interface: String?) {
+        queue.sync {
+            guard let entry = entries[id], entry.isDatagram else { return }
+            if var value = ttl.map({ UInt8($0 & 0xff) }) {
+                setsockopt(entry.fd, IPPROTO_IP, IP_MULTICAST_TTL, &value, socklen_t(MemoryLayout<UInt8>.size))
+            }
+            if var value = loopback.map({ UInt8($0 ? 1 : 0) }) {
+                setsockopt(entry.fd, IPPROTO_IP, IP_MULTICAST_LOOP, &value, socklen_t(MemoryLayout<UInt8>.size))
+            }
+            if let interface, !interface.isEmpty {
+                var address = in_addr()
+                if inet_pton(AF_INET, interface, &address) == 1 {
+                    setsockopt(entry.fd, IPPROTO_IP, IP_MULTICAST_IF, &address, socklen_t(MemoryLayout<in_addr>.size))
+                }
+            }
+        }
+    }
+
     private func startReceiving(_ entry: Entry) {
         let source = DispatchSource.makeReadSource(fileDescriptor: entry.fd, queue: queue)
         source.setEventHandler { [weak self, weak entry] in

@@ -946,6 +946,20 @@ final class NodeEngine: @unchecked Sendable {
                 carried.value.call(withArguments: [code ?? ""])
             }
         }
+        let dgramMembership: @convention(block) (Int32, String, String, Bool) -> String = { [weak self] id, group, interface, join in
+            // nil from the socket layer means SUCCESS. Coalescing it to "EBADF" reported every
+            // successful join as a failure — the empty string is the "no problem" answer here.
+            guard let self else { return "EBADF" }
+            return sockets.multicastMembership(id: Int(id), group: group, interface: interface, join: join) ?? ""
+        }
+        let dgramOption: @convention(block) (Int32, Int32, Int32, String) -> Void = { [weak self] id, ttl, loopback, interface in
+            // -1 means "leave this one alone": each knob is set independently.
+            self?.sockets.multicastOption(id: Int(id), ttl: ttl < 0 ? nil : Int(ttl),
+                                          loopback: loopback < 0 ? nil : loopback == 1,
+                                          interface: interface.isEmpty ? nil : interface)
+        }
+        expose("dgramMembership", dgramMembership)
+        expose("dgramOption", dgramOption)
         expose("dgramBind", dgramBind)
         expose("dgramSend", dgramSend)
         expose("netResolve", netResolve)
@@ -7311,15 +7325,45 @@ final class NodeEngine: @unchecked Sendable {
         Socket.prototype.ref = function(){ if (this._id) bridge.netRef(this._id, true); return this; };
         Socket.prototype.unref = function(){ if (this._id) bridge.netRef(this._id, false); return this; };
         Socket.prototype.setTTL = function(){ return this; };
-        Socket.prototype.setMulticastTTL = function(){ return this; };
-        Socket.prototype.setMulticastLoopback = function(){ return this; };
-        // Multicast needs IP_ADD_MEMBERSHIP on the fd, which the datagram table does not expose
-        // yet — unicast UDP is what is real.
-        Socket.prototype.addMembership = function() {
-          throw Object.assign(new Error('dgram.addMembership is not available: multicast needs IP_ADD_MEMBERSHIP on the socket, which the datagram table does not expose — unicast UDP works'),
-                              { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+        Socket.prototype.setMulticastTTL = function(ttl) {
+          this._requireBound('setMulticastTTL');
+          bridge.dgramOption(this._id, Number(ttl), -1, '');
+          return this;
         };
-        Socket.prototype.dropMembership = Socket.prototype.addMembership;
+        Socket.prototype.setMulticastLoopback = function(on) {
+          this._requireBound('setMulticastLoopback');
+          bridge.dgramOption(this._id, -1, on ? 1 : 0, '');
+          return this;
+        };
+        Socket.prototype.setMulticastInterface = function(address) {
+          this._requireBound('setMulticastInterface');
+          bridge.dgramOption(this._id, -1, -1, String(address || ''));
+          return this;
+        };
+        Socket.prototype._requireBound = function(name) {
+          if (!this._id) {
+            throw Object.assign(new Error('bind() before ' + name + ': the option applies to a socket, and there is none yet'),
+                                { code: 'ERR_SOCKET_DGRAM_NOT_RUNNING' });
+          }
+        };
+        // Multicast, which used to refuse: IP_ADD_MEMBERSHIP on the bound socket.
+        Socket.prototype.addMembership = function(group, iface) {
+          this._requireBound('addMembership');
+          const problem = bridge.dgramMembership(this._id, String(group), String(iface || ''), true);
+          if (problem) {
+            throw Object.assign(new Error('addMembership ' + problem + ' ' + group),
+                                { code: problem });
+          }
+          return this;
+        };
+        Socket.prototype.dropMembership = function(group, iface) {
+          this._requireBound('dropMembership');
+          const problem = bridge.dgramMembership(this._id, String(group), String(iface || ''), false);
+          if (problem) {
+            throw Object.assign(new Error('dropMembership ' + problem + ' ' + group), { code: problem });
+          }
+          return this;
+        };
         return {
           createSocket: function(options, listener) {
             const socket = new Socket(options);

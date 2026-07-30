@@ -176,6 +176,14 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**`interface` is a reserved word in strict mode** — a JS parameter named that
+compiles fine on the Swift side and breaks the bootstrap, because swiftc cannot see
+into the string. Run `node --check` on the extracted bootstrap after every edit.
+**In the socket layer, `nil` means SUCCESS.** `?? "EBADF"` on those returns reports
+every success as a failure — coalesce to `""` instead.
+**Killing a suite orphans the real-node peers it spawned**, and the next run fails
+on a port they still hold. Clear strays before re-running rather than debugging a
+phantom.
 **A refusal must NAME A REASON and stay true; audit them when capabilities grow.**
 A fixture pins the shape — every refusal has a reason, and none matches a stale
 pattern ("single process", "on the roadmap", "not available yet", a bare "X is not
