@@ -344,6 +344,19 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   string-export idiom end to end) — both byte-identical to real node v22.
   39 node fixtures, screen corpus, pyte cross-check, 56 TTY assertions,
   e2e, sh corpus, Swift 6 build — all green
+- **Batch 2: date-fns, fs-extra, glob, picocolors, nanoid — 3 more gaps.**
+  picocolors and date-fns passed outright. nanoid needed the WEB crypto
+  global (`crypto.getRandomValues`/`randomUUID` — distinct from the
+  `crypto` module; browser-targeted libraries reach for it). fs-extra
+  needed `fs.realpath` (callback form) and its `.native` variant
+  (graceful-fs patches them). glob was the dangerous one: **silently
+  empty** — status 0, wrong answer — because `readdirSync(dir,
+  {withFileTypes: true})` ignored the option and returned strings;
+  path-scurry read `isDirectory()` off a string as undefined and matched
+  nothing. Now returns Dirent-shaped objects (name/parentPath +
+  isFile/isDirectory/… methods). glob finds files correctly. Regression
+  fixtures `readdir-dirent` and `realpath-webcrypto`, both byte-identical
+  to real node v22 — 41 node fixtures total; full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

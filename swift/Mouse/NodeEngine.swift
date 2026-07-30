@@ -1207,6 +1207,17 @@ final class NodeEngine: @unchecked Sendable {
         now: function(){ return Date.now() - globalThis.performance.timeOrigin; },
         mark: function(){}, measure: function(){},
       };
+      // The Web Crypto global (distinct from the `crypto` module): nanoid, uuid, and browser-
+      // targeted libraries reach for `crypto.getRandomValues` / `crypto.randomUUID`.
+      globalThis.crypto = {
+        getRandomValues: function(view){
+          const bytes = Buffer.from(bridge.randomBytes(view.byteLength), 'base64');
+          const out = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+          for (let i = 0; i < out.length; i++) out[i] = bytes[i];
+          return view;
+        },
+        randomUUID: function(){ return bridge.randomUUID(); },
+      };
       // WHATWG streams — the subset vendored fetch/undici code touches. Queue-backed,
       // single-reader, promise-correct; no backpressure sizing.
       globalThis.ReadableStream = class ReadableStream {
@@ -2196,14 +2207,33 @@ final class NodeEngine: @unchecked Sendable {
             return statsFrom(raw);
           },
           lstatSync: function(file, options) { return fs.statSync(file, options); },
-          readdirSync: function(dir) {
-            const entries = bridge.readdir(resolvePath(dir));
+          readdirSync: function(dir, options) {
+            const parent = resolvePath(dir);
+            const entries = bridge.readdir(parent);
             if (!entries) {
               const error = new Error("ENOENT: no such file or directory, scandir '" + dir + "'");
               error.code = 'ENOENT';
               throw error;
             }
-            return entries;
+            if (!options || !options.withFileTypes) return entries;
+            // Dirent objects — glob's path-scurry walks these; strings would silently match
+            // nothing (isDirectory() undefined reads as "not a directory, not a file").
+            return entries.map(function(name) {
+              const raw = bridge.stat(parent + '/' + name);
+              const isDir = !!(raw && raw.dir);
+              return {
+                name: name,
+                parentPath: parent,
+                path: parent,
+                isFile: function(){ return !isDir; },
+                isDirectory: function(){ return isDir; },
+                isSymbolicLink: function(){ return false; },
+                isBlockDevice: function(){ return false; },
+                isCharacterDevice: function(){ return false; },
+                isFIFO: function(){ return false; },
+                isSocket: function(){ return false; },
+              };
+            });
           },
           mkdirSync: function(dir) { bridge.mkdir(resolvePath(dir)); },
           rmdirSync: function(dir) { bridge.remove(resolvePath(dir)); },
@@ -2241,6 +2271,13 @@ final class NodeEngine: @unchecked Sendable {
           };
         }
         fs.exists = function(file, callback) { setImmediate(() => callback(fs.existsSync(file))); };
+        // realpath + its `.native` variant (graceful-fs, which fs-extra layers on, patches it).
+        fs.realpath = function(file, options, callback) {
+          const cb = typeof options === 'function' ? options : callback;
+          setImmediate(function(){ cb(null, resolvePath(file)); });
+        };
+        fs.realpath.native = fs.realpath;
+        fs.realpathSync.native = fs.realpathSync;
         // The fd-based sync subset (log files, position reads). fd 1/2 write to the stdio.
         const fileDescriptors = {};
         let nextFd = 3;
