@@ -1074,6 +1074,37 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The `dns.resolve*` family, which is what the sweep pointed at.** `dns.lookup` was
+  always real because getaddrinfo answers it; the RESOLVERS ask a DNS SERVER for a
+  specific record type, and that is why they were absent. The queries now go through
+  `res_9_query` in **libresolv** — the system resolver every tool on the platform uses,
+  which brings nameserver discovery, retries and timeouts with it. Public symbols, not
+  private API, though they need binding by name: `resolv.h` maps `res_query` to
+  `res_9_query` with a macro Swift's importer does not follow.
+  What was left after that was parsing, in `NodeDNS.swift`: an answer section with
+  pointer compression (`res_9_dn_expand` does the decompression, since a plain byte
+  scan cannot follow those pointers), then reshaping to node's return values — which
+  are far less uniform than the docs suggest. TXT keeps its chunks SEPARATE (a split
+  record is an array, which is what SPF and DKIM depend on), SOA is a single object
+  rather than a list, and CAA names its property after the record's TAG, so an `issue`
+  record becomes `{critical, issue}`. `reverse` and `lookupService` need only
+  getnameinfo. Eleven record types verified against real node on LIVE records —
+  identical output, including the error codes for a name that does not exist.
+  Two things still say no, and say why. `resolveTlsa` carries a DANE
+  certificate-association hash, which needs a TLS stack that can consume it — and TLS
+  here belongs to URLSession. An unknown record type errors while naming the types that
+  ARE available, rather than returning an empty list that reads like "no records".
+  The live comparison lives in its own harness, not the fixture suite: the suite stays
+  hermetic, the same reason its `dns-lookup` fixture deliberately avoids the network.
+  The suite asserts the surface and the refusals; the internet-facing proof is separate.
+  **Two build lessons, both mine.** `h_errno` — which is how node tells ENOTFOUND from
+  ENODATA — is a plain `extern int` on Darwin that Swift 6 refuses to read as shared
+  mutable state, so it is reached through `dlsym` and stored as an ADDRESS rather than a
+  pointer (a pointer is not Sendable, and a `static let` every query thread reads has to
+  be). And the harness build passed all of this while the APP build rejected it: the
+  scratch `swiftc` invocation runs a looser language mode than the project. AGENTS.md's
+  build check is the xcodebuild one for exactly this reason, and a harness that compiles
+  is not evidence the app does.
 - **A SWEEP for reachable gaps, and brotli fell to it immediately.** Six refusals had
   been overturned one at a time, each found by accident — a package failing, or a
   reason that looked wrong on a second read. So the finding method became a tool: call

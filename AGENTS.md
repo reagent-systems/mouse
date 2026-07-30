@@ -465,6 +465,11 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A harness that compiles is not evidence the app does.** The scratch `swiftc`
+  invocation runs a looser language mode than the project: `NodeDNS.swift` built clean
+  in the harness and the xcodebuild step rejected two Swift 6 concurrency errors. Run
+  the xcodebuild check before believing a Swift change, especially anything touching a
+  global or a pointer.
 - **Turn a finding method into a tool.** Six refusals were overturned one at a time,
   each by accident. The sweep that generalises them — call every export with no
   arguments in both engines, classify the failure, diff — found a false refusal

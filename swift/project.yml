@@ -29,7 +29,8 @@ targets:
       CURRENT_PROJECT_VERSION: "1"
       # libz (system zlib) for the git engine's packfile inflate — GitCore.inflateStream needs
       # exact zlib-member delimiting, which the Compression framework can't do.
-      OTHER_LDFLAGS: "-lz"
+      # -lresolv: res_9_query for the dns.resolve* family (system library, not private API)
+      OTHER_LDFLAGS: "-lz -lresolv"
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

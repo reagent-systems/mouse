@@ -1042,6 +1042,52 @@ final class NodeEngine: @unchecked Sendable {
         expose("dgramBind", dgramBind)
         expose("dgramSend", dgramSend)
         expose("netResolve", netResolve)
+        // The dns.resolve* family. dns.lookup is getaddrinfo; these ask a DNS SERVER for a
+        // specific record type, which is why they were absent. res_9_query does the asking.
+        let dnsResolve: @convention(block) (String, String, JSValue) -> Void = { [weak self] name, type, callback in
+            guard let self else { return }
+            let carried = Carried(trampolined(callback))
+            NodeDNS.resolve(name: name, type: type) { [weak self] records, code in
+                self?.enqueueJob {
+                    carried.value.call(withArguments: [records ?? [], code ?? ""])
+                }
+            }
+            outstanding += 1
+            pendingLookups += 1
+        }
+        let dnsReverse: @convention(block) (String, JSValue) -> Void = { [weak self] address, callback in
+            guard let self else { return }
+            let carried = Carried(trampolined(callback))
+            NodeDNS.reverse(address: address) { [weak self] names, code in
+                self?.enqueueJob {
+                    carried.value.call(withArguments: [names ?? [], code ?? ""])
+                }
+            }
+            outstanding += 1
+            pendingLookups += 1
+        }
+        let dnsService: @convention(block) (String, Int32, JSValue) -> Void = { [weak self] address, port, callback in
+            guard let self else { return }
+            let carried = Carried(trampolined(callback))
+            NodeDNS.lookupService(address: address, port: Int(port)) { [weak self] host, service, code in
+                self?.enqueueJob {
+                    carried.value.call(withArguments: [host ?? "", service ?? "", code ?? ""])
+                }
+            }
+            outstanding += 1
+            pendingLookups += 1
+        }
+        // Every completion above releases the handle it took, so a program waiting only on a
+        // lookup stays alive exactly until the answer arrives.
+        let dnsDone: @convention(block) () -> Void = { [weak self] in
+            guard let self, pendingLookups > 0 else { return }
+            pendingLookups -= 1
+            outstanding -= 1
+        }
+        expose("dnsResolve", dnsResolve)
+        expose("dnsReverse", dnsReverse)
+        expose("dnsService", dnsService)
+        expose("dnsDone", dnsDone)
 
         // -- fs.watch: kqueue through WatchTable -------------------------------------------
         let fsWatch: @convention(block) (String, Bool, JSValue) -> Int32 = { [weak self] path, recursive, callback in
@@ -1767,6 +1813,8 @@ final class NodeEngine: @unchecked Sendable {
     /// Live brotli coders, the same shape as the zlib table above.
     private var brotliStreams: [Int: BrotliStream] = [:]
     private var brotliHandle = 0
+    /// Outstanding DNS queries, so the loop waits for an answer instead of exiting under it.
+    private var pendingLookups = 0
     private var nextZlibHandle = 1
 
     /// One-shot deflate or inflate with explicit windowBits (15=zlib, 15+16=gzip, -15=raw,
@@ -7363,16 +7411,26 @@ final class NodeEngine: @unchecked Sendable {
             callback(null, found.map(function(entry){ return entry.address; }));
           });
         }
-        function unsupported(type) {
+        // Real record lookups now. `dns.lookup` is getaddrinfo; these ask a DNS SERVER through
+        // the system resolver, which is the thing that used to be missing. Each type reshapes the
+        // parsed record into node's exact return value, and those shapes differ per type more
+        // than the docs suggest — TXT keeps its chunks SEPARATE, SOA is one object rather than an
+        // array, and CAA names its property after the tag.
+        function queryError(host, type, code) {
+          return Object.assign(new Error('query' + type + ' ' + code + ' ' + host),
+                               { code: code, syscall: 'query' + type, hostname: host });
+        }
+        function resolver(type, shape) {
           return function(host, callback) {
             const done = typeof callback === 'function' ? callback : arguments[arguments.length - 1];
-            const error = Object.assign(
-              new Error('dns.resolve' + type + ' is not available: it needs a DNS resolver talking to a server, and this device only exposes getaddrinfo (lookup/resolve4/resolve6 are real)'),
-              { code: 'ENOTIMP', syscall: 'query' + type, hostname: host });
-            if (typeof done === 'function') setImmediate(function(){ done(error); });
-            else throw error;
+            bridge.dnsResolve(String(host), type, function(records, code) {
+              bridge.dnsDone();
+              if (code) { done(queryError(host, type, code)); return; }
+              done(null, shape(records));
+            });
           };
         }
+        const plainValues = function(records){ return records.map(function(r){ return r.value; }); };
         function promisify(fn, arity) {
           return function() {
             const args = Array.prototype.slice.call(arguments);
@@ -7397,18 +7455,110 @@ final class NodeEngine: @unchecked Sendable {
           resolve: function(host, type, callback) {
             if (typeof type === 'function') { callback = type; type = 'A'; }
             const kind = String(type).toUpperCase();
-            if (kind === 'A') return resolveFamily(host, 4, callback);
-            if (kind === 'AAAA') return resolveFamily(host, 6, callback);
-            return unsupported(kind)(host, callback);
+            // `resolve` returns the same shape the type's own resolver would.
+            const byType = { A: 'resolve4', AAAA: 'resolve6', MX: 'resolveMx', TXT: 'resolveTxt',
+                             NS: 'resolveNs', CNAME: 'resolveCname', PTR: 'resolvePtr',
+                             SOA: 'resolveSoa', SRV: 'resolveSrv', NAPTR: 'resolveNaptr',
+                             CAA: 'resolveCaa' };
+            const method = byType[kind];
+            if (!method) {
+              const error = Object.assign(
+                new Error("dns.resolve: unsupported record type '" + kind + "': A, AAAA, CNAME, " +
+                          'MX, NAPTR, NS, PTR, SOA, SRV, TXT and CAA are available'),
+                { code: 'ENOTIMP', syscall: 'query' + kind, hostname: host });
+              setImmediate(function(){ callback(error); });
+              return;
+            }
+            return dns[method](host, callback);
           },
-          resolveAny: unsupported('Any'), resolveCaa: unsupported('Caa'),
-          resolveTlsa: unsupported('Tlsa'),
-          lookupService: unsupported('Service'),
-          resolveMx: unsupported('Mx'), resolveTxt: unsupported('Txt'),
-          resolveSrv: unsupported('Srv'), resolveNs: unsupported('Ns'),
-          resolveCname: unsupported('Cname'), resolvePtr: unsupported('Ptr'),
-          resolveSoa: unsupported('Soa'), resolveNaptr: unsupported('Naptr'),
-          reverse: unsupported('Reverse'),
+          // Each shape is node's, and they are less uniform than they look.
+          resolveMx: resolver('Mx', function(records) {
+            return records.map(function(r){ return { exchange: r.exchange, priority: r.priority }; });
+          }),
+          // TXT chunks stay separate: a record split across strings is an ARRAY in node, not a
+          // joined string, and DKIM/SPF records rely on that.
+          resolveTxt: resolver('Txt', function(records) {
+            return records.map(function(r){ return r.chunks; });
+          }),
+          resolveNs: resolver('Ns', plainValues),
+          resolveCname: resolver('Cname', plainValues),
+          resolvePtr: resolver('Ptr', plainValues),
+          // SOA is a single object, not an array — the one resolver that is not a list.
+          resolveSoa: resolver('Soa', function(records) {
+            const r = records[0] || {};
+            return { nsname: r.nsname, hostmaster: r.hostmaster, serial: r.serial,
+                     refresh: r.refresh, retry: r.retry, expire: r.expire, minttl: r.minttl };
+          }),
+          resolveSrv: resolver('Srv', function(records) {
+            return records.map(function(r) {
+              return { name: r.name, port: r.port, priority: r.priority, weight: r.weight };
+            });
+          }),
+          resolveNaptr: resolver('Naptr', function(records) {
+            return records.map(function(r) {
+              return { flags: r.flags, service: r.service, regexp: r.regexp,
+                       replacement: r.replacement, order: r.order, preference: r.preference };
+            });
+          }),
+          // CAA names its property after the TAG, so an `issue` record becomes {critical, issue}.
+          resolveCaa: resolver('Caa', function(records) {
+            return records.map(function(r) {
+              const entry = { critical: r.critical };
+              entry[r.tag] = r.value;
+              return entry;
+            });
+          }),
+          resolveAny: function(host, callback) {
+            // node asks for ANY; most resolvers refuse to answer it, so this asks for the types
+            // it can and merges — which is what the result is FOR.
+            const types = [['A', 'resolve4'], ['AAAA', 'resolve6'], ['MX', 'resolveMx'],
+                           ['TXT', 'resolveTxt'], ['NS', 'resolveNs'], ['SOA', 'resolveSoa']];
+            const found = [];
+            let left = types.length;
+            types.forEach(function(pair) {
+              dns[pair[1]](host, function(error, result) {
+                if (!error && result) {
+                  if (pair[0] === 'A' || pair[0] === 'AAAA') {
+                    result.forEach(function(address){ found.push({ type: pair[0], address: address }); });
+                  } else if (pair[0] === 'MX') {
+                    result.forEach(function(r){ found.push(Object.assign({ type: 'MX' }, r)); });
+                  } else if (pair[0] === 'TXT') {
+                    result.forEach(function(chunks){ found.push({ type: 'TXT', entries: chunks }); });
+                  } else if (pair[0] === 'NS') {
+                    result.forEach(function(v){ found.push({ type: 'NS', value: v }); });
+                  } else if (pair[0] === 'SOA' && result.nsname) {
+                    found.push(Object.assign({ type: 'SOA' }, result));
+                  }
+                }
+                if (--left === 0) callback(null, found);
+              });
+            });
+          },
+          // TLSA has no CryptoKit or system consumer here and its payload is an opaque hash, so
+          // it stays refused rather than shipping a record nothing can check.
+          resolveTlsa: function(host, callback) {
+            const done = typeof callback === 'function' ? callback : arguments[arguments.length - 1];
+            const error = Object.assign(
+              new Error('dns.resolveTlsa is not available: TLSA carries a certificate-association ' +
+                        'hash for DANE, which needs a TLS stack that can consume it — and TLS ' +
+                        'here belongs to URLSession'),
+              { code: 'ENOTIMP', syscall: 'queryTlsa', hostname: host });
+            setImmediate(function(){ done(error); });
+          },
+          reverse: function(address, callback) {
+            bridge.dnsReverse(String(address), function(names, code) {
+              bridge.dnsDone();
+              if (code) { callback(queryError(address, 'Reverse', code)); return; }
+              callback(null, names);
+            });
+          },
+          lookupService: function(address, port, callback) {
+            bridge.dnsService(String(address), Number(port), function(host, service, code) {
+              bridge.dnsDone();
+              if (code) { callback(queryError(address, 'Service', code)); return; }
+              callback(null, host, service);
+            });
+          },
           getServers: function() { return []; },
           setServers: function() {},
           setDefaultResultOrder: function() {},

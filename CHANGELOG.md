@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: the `dns.resolve*` family is real (`swift/Mouse/NodeDNS.swift`) — TXT, MX,
+  NS, CNAME, PTR, SOA, SRV, NAPTR, CAA, `resolveAny`, `reverse` and `lookupService`,
+  through the system resolver in libresolv. Verified against real node on live records.
+  `resolveTlsa` still refuses: a DANE hash needs a TLS stack that can consume it.
 - Node layer: brotli is real (`swift/Mouse/NodeBrotli.swift`) — one-shot and streaming,
   through Apple's Compression framework, which has had COMPRESSION_BROTLI since iOS 15.
   The refusal claimed brotli was not on the device. zstd genuinely is absent and keeps
