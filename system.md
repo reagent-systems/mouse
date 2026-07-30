@@ -402,6 +402,18 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   `filename-shadow-esm`). prettier now formats correctly (clean output;
   its exit code shows the dangling-promise 13 quirk — output intact,
   recorded as a follow-up lead). 46 node fixtures, full battery green
+- **The exit-13 quirk was a RACE in entry settlement — fixed.** Even
+  `await Promise.resolve(1)` as an entry exited 13 with correct output.
+  Mechanism: JSC drains microtasks when the launcher call's VM entry
+  exits, so a pure-microtask entry settles DURING the call — the settled
+  callback clears `entryPending` — and the Swift line after the call
+  assigned `finished != true`, overwriting the clear and stamping 13 on a
+  healthy run. Timer-based entries (the esm-tla fixture) settle later and
+  never hit it, which is why the suite missed it; prettier's
+  microtask-final await chain exposed it. Fix: set the flag BEFORE the
+  call, only ever CLEAR it after. prettier now exits 0. Fixture
+  `microtask-only-tla` pins the pure-microtask entry path against real
+  node — 47 node fixtures, full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

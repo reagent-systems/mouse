@@ -211,9 +211,14 @@ final class NodeEngine: @unchecked Sendable {
                         return module.__esmDone === true || module.__esmError !== undefined;
                     })
                     """)!
+                // Set BEFORE the call and only ever CLEAR after: JSC drains microtasks at
+                // the call's exit, so a pure-microtask entry settles DURING the call — the
+                // settled callback clears the flag, and assigning `finished != true` after
+                // the call would overwrite that clear and stamp exit 13 on a healthy run.
+                entryPending = true
                 let finished = launcher.call(withArguments: [function, module.forProperty("exports")!, require, module, path, dir,
                                                              JSValue(object: entrySettled, in: context)!])
-                entryPending = finished?.toBool() != true
+                if finished?.toBool() == true { entryPending = false }
             } else {
                 function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir, require, path])
             }
