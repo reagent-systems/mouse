@@ -19,6 +19,12 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `process.stdout` and `stderr` are `Writable`s and `process.stdin` is a `Readable`
+  — they were plain objects, so every `instanceof` check against them was false and code
+  branched the wrong way. Behaviour is unchanged; only the prototype was missing. Also,
+  `isTTY`/`columns`/`rows` are now absent rather than `false` when output is not a terminal,
+  as node has it.
+
 - Node layer: `process.cpuUsage()` reports real CPU time from `getrusage`. It returned hardcoded
   zeros, which is worse than absent — a caller measuring CPU saw a working API report nothing.
 

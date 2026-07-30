@@ -4393,15 +4393,12 @@ final class NodeEngine: @unchecked Sendable {
       const processEvents = {};
       function makeOutputStream(sink) {
         const listeners = {};
-        return {
+        const stream = {
           // Present on every other Writable here; a caller that guards on them should not have to
           // special-case stdout.
           destroy: function(){ this.destroyed = true; return this; },
           setDefaultEncoding: function(encoding){ this._defaultEncoding = String(encoding); return this; },
           destroyed: false,
-          isTTY: __isTTY,
-          columns: __ttyColumns,
-          rows: __ttyRows,
           write: function(chunk, encoding, callback) {
             // Binary out through latin1 when this is a pipe: `Buffer.from(chunk).toString()`
             // is a UTF-8 decode, and it silently mangles every byte above 0x7f.
@@ -4458,6 +4455,16 @@ final class NodeEngine: @unchecked Sendable {
             return true;
           },
         };
+        // node DEFINES isTTY/columns/rows only when the stream really is a terminal; when
+        // output is a pipe or a file the properties are absent, not false. Both are falsy, so
+        // `if (stream.isTTY)` behaves the same either way — but `'columns' in stream` does not,
+        // and that is the check a layout-aware writer makes.
+        if (__isTTY) {
+          stream.isTTY = true;
+          stream.columns = __ttyColumns;
+          stream.rows = __ttyRows;
+        }
+        return stream;
       }
       function makeInputStream() {
         const listeners = {};
@@ -4982,6 +4989,17 @@ final class NodeEngine: @unchecked Sendable {
 
       // ---- core modules (JS half) ----
       const coreCache = {};
+      // node's process.stdout and stderr ARE Writables and stdin IS a Readable, and code
+      // branches on `instanceof` — the same fault the zlib coder classes had. These objects are
+      // built before the core module cache exists (so `coreRequire('stream')` inside them hits a
+      // temporal dead zone), which is why the prototypes are attached here instead. Own
+      // properties shadow every inherited method, so the read and write paths are untouched.
+      globalThis.__linkStdioPrototypes = function() {
+        const streams = coreRequire('stream');
+        Object.setPrototypeOf(process.stdout, streams.Writable.prototype);
+        Object.setPrototypeOf(process.stderr, streams.Writable.prototype);
+        Object.setPrototypeOf(process.stdin, streams.Readable.prototype);
+      };
       const coreFactories = {};
 
       coreFactories.path = function() {
@@ -12726,6 +12744,8 @@ final class NodeEngine: @unchecked Sendable {
         return exports;
       }
       globalThis.__coreModule = coreRequire;
+      // Now that every factory is registered, give the stdio objects their real prototypes.
+      globalThis.__linkStdioPrototypes();
     })();
     """#
 }
