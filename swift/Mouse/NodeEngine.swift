@@ -9952,6 +9952,21 @@ final class NodeEngine: @unchecked Sendable {
           this._maybeClosed();
           return this;
         };
+        // node 18+'s connection management, and the two are different on purpose: an in-flight
+        // request SURVIVES closeIdleConnections and dies to closeAllConnections. `close()` above
+        // already ends idle sockets, so what these add is the ability to do it WITHOUT closing the
+        // listener — which is how a graceful shutdown drains keep-alive clients while still
+        // accepting, and how a forceful one stops waiting for a slow handler.
+        Server.prototype.closeIdleConnections = function() {
+          for (const socket of this._connections.slice()) {
+            if (socket._idleBetweenRequests) socket.destroy();
+          }
+        };
+        Server.prototype.closeAllConnections = function() {
+          // destroy(), not end(): a half-close would wait for the peer, and the point of this
+          // method is not to wait.
+          for (const socket of this._connections.slice()) socket.destroy();
+        };
         Server.prototype._maybeClosed = function() {
           if (!this._closing || this._connections.length || this._closed) return;
           this._closed = true;

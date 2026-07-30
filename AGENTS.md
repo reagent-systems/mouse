@@ -465,6 +465,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A property count is not an impact estimate.** The shape sweep's biggest entry
+  (`process.stdout`, 27 missing) turned out to matter least: piping TO stdout already
+  worked, since `pipe()` needs only `write`/`end`. Test what BREAKS before building from
+  a list, and be willing to leave the biggest number alone.
+- **Never add a config field nothing enforces.** `maxRequestsPerSocket` present-but-ignored
+  is worse than absent: a program that sets it believes it works. Absence is a signal;
+  a silent no-op is a lie.
 - **Two paths to the same data will diverge; test both.** `Readable`'s `'data'` path was
   binary-correct while `read()` corrupted anything non-UTF-8, for as long as no fixture
   read binary through `read()`. Where an API offers two ways to get the same bytes

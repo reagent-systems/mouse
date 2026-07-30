@@ -8,6 +8,9 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `http.Server` gained `closeIdleConnections()` and `closeAllConnections()`.
+  They act without closing the listener, and differ as node's do — an in-flight request
+  survives the first and dies to the second.
 - Node layer: node 17+'s stream operators are real — `map`, `filter`, `flatMap`, `take`
   and `drop` return streams; `forEach`, `toArray`, `reduce`, `some`, `every` and `find`
   return promises; plus `iterator([options])`. Matches real node including the edge

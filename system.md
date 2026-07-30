@@ -1074,6 +1074,32 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **`http.Server`'s connection management, and a gap deliberately NOT closed.** The shape
+  sweep's two largest remaining entries were `http.Server` (17 properties) and
+  `process.stdout` (27). Before building either, both were tested for what actually
+  BREAKS, because a property count is not an impact estimate:
+  **`process.stdout` — left alone, on purpose.** `Readable.pipe(process.stdout)` already
+  works, because `pipe()` needs only `write`/`end` and the hand-built object has them. So
+  the common CLI idiom is fine, and what is missing is piping FROM stdout, `destroy`, and
+  a set of introspection getters. Rebuilding stdout as a real Writable would put every
+  program's output through new code for a mostly cosmetic gain. Recorded as a judgement
+  rather than done: the largest number on the list was not the largest problem.
+  **`http.Server` — built, because the methods do something `close()` cannot.**
+  `closeIdleConnections()` and `closeAllConnections()` act WITHOUT closing the listener,
+  which is how a graceful shutdown drains keep-alive clients while still accepting, and
+  how a forceful one stops waiting for a slow handler. The two differ on purpose and the
+  fixture pins exactly that: an in-flight request SURVIVES closeIdleConnections and dies
+  to closeAllConnections. `destroy()` rather than `end()` for the forceful one — a
+  half-close would wait for the peer, and not waiting is the whole point.
+  `close()` already ended idle sockets, so the honest description of this boundary is
+  that it adds the ability to do so on demand.
+  Also verified before building: node's `server.close()` does NOT hang with an idle
+  keep-alive client, and neither does ours — so the "a hang is worse than an error"
+  concern that motivated looking here did not apply. Worth stating, because it is the
+  second time this session that measuring an assumed problem dissolved it.
+  The remaining `http.Server` properties are deliberately still absent. Adding
+  `maxRequestsPerSocket` or `headersTimeout` as fields nothing enforces would be worse
+  than their absence — a program that sets them would believe they work.
 - **node 17+'s stream operators — the "stream depth" item.** `map`, `filter`, `flatMap`,
   `take` and `drop` return streams; `forEach`, `toArray`, `reduce`, `some`, `every` and
   `find` return promises; `iterator([options])` exposes the async iterator with
