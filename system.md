@@ -1074,6 +1074,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **Every stream-LIKE object against ONE contract — `for await` on stdin threw.** The
+  previous lesson ("a behaviour can live in more than one place") turned into a sweep:
+  fourteen stream-like objects the engine hands out, checked against the same API. The
+  hand-rolled ones were the suspects and the suspicion was right.
+  **`process.stdin` had no `Symbol.asyncIterator`**, so
+  `for await (const chunk of process.stdin)` — the standard way a modern CLI reads piped
+  input — threw. It was also missing `push` and node 17+'s operators, which now DELEGATE to
+  the single implementation on `Readable.prototype` rather than being copied, since copies are
+  exactly how these two families drifted apart. `process.stdout`/`stderr` gained `destroy` and
+  `setDefaultEncoding`, present on every other Writable here.
+  Fixing the iterator exposed a deeper divergence: **our piped stdin never ENDED.** node's
+  emits `'end'` when the writer closes the pipe; ours stayed open forever, so the new iterator
+  waited for an EOF that could not arrive and the program produced NOTHING — worse than the
+  throw it replaced. A regression is not an improvement because the API got wider.
+  **The first fix for that was wrong in an instructive way.** I inferred "no TTY means no
+  writer" — false for a spawned CHILD, whose parent writes to its pipe later. The spawn
+  harness caught it immediately. Only the HOST knows whether more input can come, so it now
+  says so explicitly (`__stdinIsComplete`, true only for a run given a fixed string with no
+  live source) rather than JS guessing from `__isTTY`.
+  97 fixtures, and tty/spawn/fork/ws/http/express/pkg/webpack all still match. The tty
+  harness's "build failure" in the first sweep was my own wrong file list again — it needs the
+  terminal sources — checked rather than assumed, and it passes.
 - **Stream STATE across a lifecycle — streams never destroyed themselves.** The in-flight
   blind spot had now appeared twice (`highWaterMark`, then `writableLength`), which by this
   session's own rule means sweep the class. The class: state VALUES, which a shape sweep

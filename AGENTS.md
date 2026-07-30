@@ -465,6 +465,12 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Only the host knows what the host knows.** JS inferred "no TTY means nothing will write
+  to stdin", which is false for a spawned child whose parent writes later. When a fact lives
+  on the Swift side, pass it in explicitly instead of deducing it from a proxy.
+- **A wider API is not an improvement if it regresses behaviour.** Adding stdin's async
+  iterator turned a visible throw into silent no-output, because the underlying stream never
+  ended. Check what the new path does when the old one merely failed loudly.
 - **A behaviour can live in more than one place.** Stream finish exists on THREE paths here
   (plain Writable, Duplex, Transform). Patching the first one looked complete and left the
   others wrong; only re-running the sweep found it. After fixing a shared behaviour, grep for

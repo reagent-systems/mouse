@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `for await (const chunk of process.stdin)` works — stdin had no async
+  iterator, so the standard way to read piped input threw. Piped stdin now emits `'end'`
+  when there is no more input, as node's does; `process.stdin` gained `push` and the stream
+  operators, and `process.stdout`/`stderr` gained `destroy`/`setDefaultEncoding`.
 - Node layer: streams auto-destroy when finished, as node's have since v14, so
   `stream.destroyed` is finally a reliable "done with this" flag. `destroy()` now clears
   `readable`/`writable` too. A Duplex waits for both halves.

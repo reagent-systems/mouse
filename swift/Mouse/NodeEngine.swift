@@ -1739,6 +1739,12 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(env, forKeyedSubscript: "__env" as NSString)
         context.setObject(cwd, forKeyedSubscript: "__cwd" as NSString)
         context.setObject(stdin, forKeyedSubscript: "__stdin" as NSString)
+        // Is the seeded text ALL the input there will ever be? Only the host knows. A terminal
+        // can always deliver more, and a spawned CHILD's parent writes to its pipe later — the
+        // first version of this inferred "no TTY means no writer" and broke every child that
+        // reads stdin. True only for a run given a fixed string with no live source.
+        context.setObject(tty == nil && !stdioIsPipe,
+                          forKeyedSubscript: "__stdinIsComplete" as NSString)
         // A pipe is not a terminal: the sink is the same machinery, but `isTTY` must be false
         // or a program takes its interactive path — colors, spinners, raw mode — while writing
         // to a parent that wanted bytes.
@@ -3779,6 +3785,11 @@ final class NodeEngine: @unchecked Sendable {
       function makeOutputStream(sink) {
         const listeners = {};
         return {
+          // Present on every other Writable here; a caller that guards on them should not have to
+          // special-case stdout.
+          destroy: function(){ this.destroyed = true; return this; },
+          setDefaultEncoding: function(encoding){ this._defaultEncoding = String(encoding); return this; },
+          destroyed: false,
           isTTY: __isTTY,
           columns: __ttyColumns,
           rows: __ttyRows,
@@ -3843,6 +3854,12 @@ final class NodeEngine: @unchecked Sendable {
         const listeners = {};
         let paused = false;
         let buffered = __stdin;
+        // Piped stdin ENDS. node's emits 'end' when the writer closes the pipe, and without an
+        // interactive terminal there is no writer here — so the seeded text is all there will
+        // ever be. Leaving it open meant `for await (const chunk of process.stdin)` waited
+        // forever for an EOF that could not arrive, and a program reading piped input produced
+        // nothing at all. A live TTY is the opposite case: more can always come.
+        const pipedStdinIsComplete = !!__stdinIsComplete;
         // A TTY with someone listening keeps the process alive, like node's ref'd stdin —
         // without this the event loop would see quiescence and end a program mid-wait.
         function updateLiveness() {
@@ -3924,6 +3941,43 @@ final class NodeEngine: @unchecked Sendable {
             }
           },
           pipe: function(destination){ stream.on('data', c => destination.write(c)); return destination; },
+          // `for await (const chunk of process.stdin)` is how a modern CLI reads piped input, and
+          // it THREW here — stdin is hand-rolled rather than a real Readable, so it never gained
+          // the iterator the stream classes have. A contract sweep across every stream-like
+          // object the engine hands out is what surfaced it.
+          [Symbol.asyncIterator]: function() {
+            const self = this;
+            return {
+              next() {
+                return new Promise(function(resolve, reject) {
+                  if (buffered.length) {
+                    const chunk = buffered;
+                    buffered = '';
+                    resolve({ value: __stdioBinary ? Buffer.from(chunk, 'latin1') : chunk, done: false });
+                    return;
+                  }
+                  // Drained, and nothing more can come: a pipe with no writer is finished.
+                  if (stream._ended || pipedStdinIsComplete) { resolve({ value: undefined, done: true }); return; }
+                  const onData = function(chunk) { cleanup(); resolve({ value: chunk, done: false }); };
+                  const onEnd = function() { cleanup(); resolve({ value: undefined, done: true }); };
+                  const onError = function(error) { cleanup(); reject(error); };
+                  const cleanup = function() {
+                    stream.off('data', onData); stream.off('end', onEnd); stream.off('error', onError);
+                  };
+                  stream.on('data', onData); stream.on('end', onEnd); stream.on('error', onError);
+                  if (stream.resume) stream.resume();
+                });
+              },
+              return() { return Promise.resolve({ value: undefined, done: true }); },
+              [Symbol.asyncIterator]() { return this; },
+            };
+          },
+          push: function(chunk) {
+            if (chunk === null) { stream._ended = true; stream.emit('end'); return false; }
+            stream._push(Buffer.isBuffer(chunk) ? chunk.toString(__stdioBinary ? 'latin1' : 'utf8')
+                                                : String(chunk));
+            return true;
+          },
           // Anything a synchronous reader could not take goes back to the front of the buffer.
           unshift: function(chunk){
             buffered = (Buffer.isBuffer(chunk) ? chunk.toString(__stdioBinary ? 'latin1' : 'utf8') : String(chunk)) + buffered;
@@ -3931,6 +3985,35 @@ final class NodeEngine: @unchecked Sendable {
           _ended: false,
           unref: function(){ return this; }, ref: function(){ return this; },
         };
+        if (pipedStdinIsComplete) {
+          // Deliver what was piped, then END — which is what a closed pipe does in node, and what
+          // `.on('end')` and `for await` both wait for.
+          const flush = function() {
+            if (!(listeners['data'] || []).length && !(listeners['end'] || []).length) return;
+            if (buffered.length) {
+              const chunk = buffered;
+              buffered = '';
+              stream.emit('data', __stdioBinary ? Buffer.from(chunk, 'latin1') : Buffer.from(chunk));
+            }
+            if (!stream._ended) { stream._ended = true; stream.emit('end'); }
+          };
+          const originalOn = stream.on;
+          stream.on = function(event, handler) {
+            const result = originalOn.call(this, event, handler);
+            if (event === 'data' || event === 'end') process.nextTick(flush);
+            return result;
+          };
+        }
+        // node 17+'s operators, DELEGATED to the one implementation on Readable.prototype rather
+        // than copied — copies are exactly how these two stream families drifted apart. Resolved
+        // lazily because the stream module is built after stdio.
+        for (const name of ['map', 'filter', 'flatMap', 'take', 'drop', 'forEach', 'toArray',
+                            'reduce', 'some', 'every', 'find', 'iterator']) {
+          stream[name] = function() {
+            const shared = coreRequire('stream').Readable.prototype;
+            return shared[name].apply(this, arguments);
+          };
+        }
         return stream;
       }
 
