@@ -7,6 +7,12 @@ carry breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+- Node layer: `structuredClone`, worker `postMessage` (both directions), `workerData`,
+  `setEnvironmentData` and the engine-to-engine IPC wire all use the real structured clone.
+  Each was a JSON round-trip, so a `Map` posted to a worker arrived as `{}` — silently. node
+  defines every one of these in terms of the structured clone algorithm.
+
 ### Added
 - Node layer: `v8.serialize`/`deserialize` are a real structured clone, replacing
   `JSON.stringify`. Map, Set, Date, RegExp, Buffer and typed arrays survive; `undefined` stays

@@ -3504,7 +3504,7 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.DOMException = class DOMException extends Error {
         constructor(message, name) { super(message); this.name = name || 'Error'; }
       };
-      globalThis.structuredClone = function(value) { return JSON.parse(JSON.stringify(value)); };
+      globalThis.structuredClone = function(value) { return globalThis.__clone(value); };
       globalThis.queueMicrotask = globalThis.queueMicrotask || function(fn) { Promise.resolve().then(fn); };
       globalThis.URLSearchParams = class URLSearchParams {
         constructor(init) {
@@ -3714,6 +3714,118 @@ final class NodeEngine: @unchecked Sendable {
           }
           return true;
         })(a, b, []);
+      };
+
+      // The structured clone, in ONE place. Seven sites used `JSON.parse(JSON.stringify(x))`
+      // or `JSON.stringify` for a structural job — v8.serialize, structuredClone, worker
+      // postMessage (twice), workerData, and environmentData — and JSON silently drops a Map, a
+      // Set, a Date, a typed array, `undefined`, a BigInt and every cycle. That is the defect
+      // that hung jest, and it was already fixed once in deepStrictEqual before turning up
+      // again here: the sweep has to follow the MECHANISM, not the word.
+      globalThis.__cloneEncode = function(root) {
+        const heap = [], seen = new Map();
+        function encode(value) {
+          if (value === undefined) return { '#': 'u' };
+          if (value === null) return null;
+          const type = typeof value;
+          if (type === 'string' || type === 'boolean') return value;
+          if (type === 'number') {
+            // JSON has no -0, Infinity or NaN; they survive as tags.
+            if (Number.isFinite(value) && !Object.is(value, -0)) return value;
+            return { '#': 'f', v: Object.is(value, -0) ? '-0' : String(value) };
+          }
+          if (type === 'bigint') return { '#': 'n', v: value.toString() };
+          if (type === 'function' || type === 'symbol') {
+            const error = new Error(String(value) + ' could not be cloned.');
+            error.name = 'DataCloneError';
+            throw error;
+          }
+          const existing = seen.get(value);
+          if (existing !== undefined) return { '#': '@', i: existing };
+          // The slot is claimed BEFORE the children are walked, so a cycle finds it.
+          const index = heap.length;
+          seen.set(value, index);
+          heap.push(null);
+          heap[index] = encodeContainer(value);
+          return { '#': '@', i: index };
+        }
+        function encodeContainer(value) {
+          if (value instanceof Date) return { '#': 'd', v: value.getTime() };
+          if (value instanceof RegExp) return { '#': 'r', s: value.source, f: value.flags };
+          if (value instanceof Map) {
+            const pairs = [];
+            for (const [k, v] of value) pairs.push([encode(k), encode(v)]);
+            return { '#': 'm', v: pairs };
+          }
+          if (value instanceof Set) {
+            const items = [];
+            for (const item of value) items.push(encode(item));
+            return { '#': 's', v: items };
+          }
+          if (Buffer.isBuffer(value)) return { '#': 'b', v: value.toString('base64') };
+          if (ArrayBuffer.isView(value)) {
+            return { '#': 't', k: value.constructor.name,
+                     v: Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)).toString('base64') };
+          }
+          if (value instanceof ArrayBuffer) {
+            return { '#': 'ab', v: Buffer.from(new Uint8Array(value)).toString('base64') };
+          }
+          if (Array.isArray(value)) return { '#': 'a', v: value.map(encode) };
+          const out = {};
+          for (const key of Object.keys(value)) out[key] = encode(value[key]);
+          return { '#': 'o', v: out };
+        }
+        const encoded = encode(root);
+        return JSON.stringify({ heap: heap, root: encoded });
+      }
+
+      globalThis.__cloneDecode = function(buffer) {
+        const parsed = JSON.parse(typeof buffer === 'string' ? buffer : __toBytes(buffer).toString('utf8'));
+        const heap = parsed.heap, built = new Array(heap.length);
+        // Shells first, so a cycle can point at a container that is not filled yet.
+        for (let i = 0; i < heap.length; i++) {
+          const node = heap[i];
+          switch (node['#']) {
+            case 'd': built[i] = new Date(node.v); break;
+            case 'r': built[i] = new RegExp(node.s, node.f); break;
+            case 'm': built[i] = new Map(); break;
+            case 's': built[i] = new Set(); break;
+            case 'a': built[i] = []; break;
+            case 'b': built[i] = Buffer.from(node.v, 'base64'); break;
+            case 'ab': built[i] = Buffer.from(node.v, 'base64').buffer.slice(0); break;
+            case 't': {
+              const bytes = Buffer.from(node.v, 'base64');
+              const Kind = globalThis[node.k] || Uint8Array;
+              built[i] = new Kind(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+              break;
+            }
+            default: built[i] = {};
+          }
+        }
+        function decode(value) {
+          if (value === null || typeof value !== 'object') return value;
+          switch (value['#']) {
+            case 'u': return undefined;
+            case 'n': return BigInt(value.v);
+            case 'f': return value.v === '-0' ? -0 : Number(value.v);
+            case '@': return built[value.i];
+          }
+          return value;
+        }
+        for (let i = 0; i < heap.length; i++) {
+          const node = heap[i];
+          if (node['#'] === 'a') { for (const item of node.v) built[i].push(decode(item)); }
+          else if (node['#'] === 'o') { for (const key of Object.keys(node.v)) built[i][key] = decode(node.v[key]); }
+          else if (node['#'] === 'm') { for (const [k, v] of node.v) built[i].set(decode(k), decode(v)); }
+          else if (node['#'] === 's') { for (const item of node.v) built[i].add(decode(item)); }
+        }
+        return decode(parsed.root);
+      }
+
+
+      // The in-memory form, which is what `structuredClone` and node's message copies are.
+      globalThis.__clone = function(value) {
+        return globalThis.__cloneDecode(globalThis.__cloneEncode(value));
       };
 
       globalThis.__toBytes = function(value, encoding) {
@@ -4580,7 +4692,9 @@ final class NodeEngine: @unchecked Sendable {
           const done = typeof callback === 'function' ? callback
                      : (typeof options === 'function' ? options
                      : (typeof sendHandle === 'function' ? sendHandle : null));
-          bridge.ipcSend(JSON.stringify(message === undefined ? null : message));
+          // The IPC wire is the last site that was still JSON: a Map posted from a worker
+          // arrived as {}. node's message ports use the structured clone algorithm.
+          bridge.ipcSend(globalThis.__cloneEncode(message === undefined ? null : message));
           if (done) process.nextTick(function(){ done(null); });
           return true;
         };
@@ -4594,7 +4708,7 @@ final class NodeEngine: @unchecked Sendable {
       }
       globalThis.__mouseDeliverMessage = function(json) {
         let message = null;
-        try { message = JSON.parse(json); } catch (error) { message = json; }
+        try { message = globalThis.__cloneDecode(json); } catch (error) { message = json; }
         for (const handler of (processEvents.message || []).slice()) handler(message);
       };
 
@@ -7755,7 +7869,7 @@ final class NodeEngine: @unchecked Sendable {
             if (event === 'stderr') { child.stderr.push(Buffer.from(String(payload), 'latin1')); return; }
             if (event === 'message') {
               let message = null;
-              try { message = JSON.parse(String(payload)); } catch (error) { message = payload; }
+              try { message = globalThis.__cloneDecode(String(payload)); } catch (error) { message = payload; }
               child.emit('message', message);
               return;
             }
@@ -7793,7 +7907,7 @@ final class NodeEngine: @unchecked Sendable {
               const done = typeof callback === 'function' ? callback
                          : (typeof options === 'function' ? options
                          : (typeof sendHandle === 'function' ? sendHandle : null));
-              bridge.spawnMessage(id, JSON.stringify(message === undefined ? null : message));
+              bridge.spawnMessage(id, globalThis.__cloneEncode(message === undefined ? null : message));
               if (done) process.nextTick(function(){ done(null); });
               return true;
             };
@@ -9476,7 +9590,7 @@ final class NodeEngine: @unchecked Sendable {
         // Pairs rather than an object so a non-string key behaves as node's does.
         const environmentData = [];
         function envSlot(key) {
-            const wanted = JSON.stringify(key === undefined ? null : key);
+            const wanted = globalThis.__cloneEncode(key === undefined ? null : key);
             for (const pair of environmentData) if (pair.k === wanted) return pair;
             return null;
         }
@@ -9497,7 +9611,7 @@ final class NodeEngine: @unchecked Sendable {
             ipc: true, worker: true,
             // One envelope for everything inherited at spawn: the worker's data and the
             // environmentData snapshot as it stands NOW.
-            workerData: JSON.stringify({
+            workerData: globalThis.__cloneEncode({
               d: options.workerData === undefined ? null : options.workerData,
               e: environmentData,
             }),
@@ -9546,7 +9660,7 @@ final class NodeEngine: @unchecked Sendable {
           const peer = this._peer;
           if (!peer) return;
           // Structured clone, as far as JSON reaches: the same limit the child channel has.
-          const copy = message === undefined ? undefined : JSON.parse(JSON.stringify(message));
+          const copy = message === undefined ? undefined : globalThis.__clone(message);
           // Queue rather than dispatch: a port with nobody listening HOLDS its messages in node,
           // which is what makes receiveMessageOnPort able to drain them synchronously later.
           peer._queue = peer._queue || [];
@@ -9697,7 +9811,7 @@ final class NodeEngine: @unchecked Sendable {
             if (this._closed) {
                 throw Object.assign(new Error('BroadcastChannel is closed'), { name: 'InvalidStateError' });
             }
-            const data = message === undefined ? undefined : JSON.parse(JSON.stringify(message));
+            const data = message === undefined ? undefined : globalThis.__clone(message);
             deliverLocally(this.name, data, this);   // never the sender itself, as node does
             broadcastOut(this.name, data, null);
         };
@@ -9752,7 +9866,7 @@ final class NodeEngine: @unchecked Sendable {
         let parsedWorkerData = null;
         if (__isWorker && __workerData) {
           try {
-            const envelope = JSON.parse(__workerData);
+            const envelope = globalThis.__cloneDecode(__workerData);
             parsedWorkerData = envelope && 'd' in envelope ? envelope.d : null;
             if (envelope && Array.isArray(envelope.e)) {
               for (const pair of envelope.e) environmentData.push(pair);
@@ -9792,9 +9906,9 @@ final class NodeEngine: @unchecked Sendable {
               if (slot) environmentData.splice(environmentData.indexOf(slot), 1);
               return;
             }
-            const copy = JSON.parse(JSON.stringify(value));
+            const copy = globalThis.__clone(value);
             if (slot) slot.v = copy;
-            else environmentData.push({ k: JSON.stringify(key === undefined ? null : key), v: copy });
+            else environmentData.push({ k: globalThis.__cloneEncode(key === undefined ? null : key), v: copy });
           },
           getEnvironmentData: function(key) {
             const slot = envSlot(key);
@@ -9856,118 +9970,18 @@ final class NodeEngine: @unchecked Sendable {
         // This is a structured clone, not V8's wire format, so a cache written by real node is
         // not readable here and vice versa. That is fine for the purpose — a process serializes
         // for ITSELF — and honest about what it is.
-        function serialize(root) {
-          const heap = [], seen = new Map();
-          function encode(value) {
-            if (value === undefined) return { '#': 'u' };
-            if (value === null) return null;
-            const type = typeof value;
-            if (type === 'string' || type === 'boolean') return value;
-            if (type === 'number') {
-              // JSON has no -0, Infinity or NaN; they survive as tags.
-              if (Number.isFinite(value) && !Object.is(value, -0)) return value;
-              return { '#': 'f', v: Object.is(value, -0) ? '-0' : String(value) };
-            }
-            if (type === 'bigint') return { '#': 'n', v: value.toString() };
-            if (type === 'function' || type === 'symbol') {
-              const error = new Error(String(value) + ' could not be cloned.');
-              error.name = 'DataCloneError';
-              throw error;
-            }
-            const existing = seen.get(value);
-            if (existing !== undefined) return { '#': '@', i: existing };
-            // The slot is claimed BEFORE the children are walked, so a cycle finds it.
-            const index = heap.length;
-            seen.set(value, index);
-            heap.push(null);
-            heap[index] = encodeContainer(value);
-            return { '#': '@', i: index };
-          }
-          function encodeContainer(value) {
-            if (value instanceof Date) return { '#': 'd', v: value.getTime() };
-            if (value instanceof RegExp) return { '#': 'r', s: value.source, f: value.flags };
-            if (value instanceof Map) {
-              const pairs = [];
-              for (const [k, v] of value) pairs.push([encode(k), encode(v)]);
-              return { '#': 'm', v: pairs };
-            }
-            if (value instanceof Set) {
-              const items = [];
-              for (const item of value) items.push(encode(item));
-              return { '#': 's', v: items };
-            }
-            if (Buffer.isBuffer(value)) return { '#': 'b', v: value.toString('base64') };
-            if (ArrayBuffer.isView(value)) {
-              return { '#': 't', k: value.constructor.name,
-                       v: Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)).toString('base64') };
-            }
-            if (value instanceof ArrayBuffer) {
-              return { '#': 'ab', v: Buffer.from(new Uint8Array(value)).toString('base64') };
-            }
-            if (Array.isArray(value)) return { '#': 'a', v: value.map(encode) };
-            const out = {};
-            for (const key of Object.keys(value)) out[key] = encode(value[key]);
-            return { '#': 'o', v: out };
-          }
-          const encoded = encode(root);
-          return Buffer.from(JSON.stringify({ heap: heap, root: encoded }), 'utf8');
-        }
-
-        function deserialize(buffer) {
-          const parsed = JSON.parse(__toBytes(buffer).toString('utf8'));
-          const heap = parsed.heap, built = new Array(heap.length);
-          // Shells first, so a cycle can point at a container that is not filled yet.
-          for (let i = 0; i < heap.length; i++) {
-            const node = heap[i];
-            switch (node['#']) {
-              case 'd': built[i] = new Date(node.v); break;
-              case 'r': built[i] = new RegExp(node.s, node.f); break;
-              case 'm': built[i] = new Map(); break;
-              case 's': built[i] = new Set(); break;
-              case 'a': built[i] = []; break;
-              case 'b': built[i] = Buffer.from(node.v, 'base64'); break;
-              case 'ab': built[i] = Buffer.from(node.v, 'base64').buffer.slice(0); break;
-              case 't': {
-                const bytes = Buffer.from(node.v, 'base64');
-                const Kind = globalThis[node.k] || Uint8Array;
-                built[i] = new Kind(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-                break;
-              }
-              default: built[i] = {};
-            }
-          }
-          function decode(value) {
-            if (value === null || typeof value !== 'object') return value;
-            switch (value['#']) {
-              case 'u': return undefined;
-              case 'n': return BigInt(value.v);
-              case 'f': return value.v === '-0' ? -0 : Number(value.v);
-              case '@': return built[value.i];
-            }
-            return value;
-          }
-          for (let i = 0; i < heap.length; i++) {
-            const node = heap[i];
-            if (node['#'] === 'a') { for (const item of node.v) built[i].push(decode(item)); }
-            else if (node['#'] === 'o') { for (const key of Object.keys(node.v)) built[i][key] = decode(node.v[key]); }
-            else if (node['#'] === 'm') { for (const [k, v] of node.v) built[i].set(decode(k), decode(v)); }
-            else if (node['#'] === 's') { for (const item of node.v) built[i].add(decode(item)); }
-          }
-          return decode(parsed.root);
-        }
-
         return {
           getHeapStatistics: function() { return { total_heap_size: 0, used_heap_size: 0, heap_size_limit: 0 }; },
-          serialize: serialize,
-          deserialize: deserialize,
+          serialize: function(value) { return Buffer.from(globalThis.__cloneEncode(value), 'utf8'); },
+          deserialize: function(buffer) { return globalThis.__cloneDecode(buffer); },
           Serializer: class Serializer {
             constructor() { this._value = undefined; }
             writeValue(value) { this._value = value; }
-            releaseBuffer() { return serialize(this._value); }
+            releaseBuffer() { return Buffer.from(globalThis.__cloneEncode(this._value), 'utf8'); }
           },
           Deserializer: class Deserializer {
             constructor(buffer) { this._buffer = buffer; }
-            readValue() { return deserialize(this._buffer); }
+            readValue() { return globalThis.__cloneDecode(this._buffer); }
           },
         };
       };
