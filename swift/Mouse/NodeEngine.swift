@@ -2190,10 +2190,31 @@ final class NodeEngine: @unchecked Sendable {
             case .notFound(let message): return ["__mouseRequireError": message]
             }
         }
+        // `require.resolve.paths(request)`: the directories that WOULD be searched. jest asks
+        // for these to build its own module registry, so a missing one stops it at startup.
+        // node returns null for a core module, the node_modules walk-up for a bare specifier,
+        // and just the requiring directory for a relative one.
+        let resolvePathsBlock: @convention(block) (String) -> Any = { [weak self] request in
+            guard let self else { return NSNull() }
+            var name = request
+            if name.hasPrefix("node:") { name = String(name.dropFirst(5)) }
+            if Self.coreModules.contains(name) { return NSNull() }
+            if request.hasPrefix("./") || request.hasPrefix("../") || request == "." || request == ".." {
+                return [fromDir.isEmpty ? "/" : fromDir]
+            }
+            var paths: [String] = []
+            var dir = fromDir.isEmpty ? "/" : fromDir
+            while true {
+                paths.append(dir == "/" ? "/node_modules" : dir + "/node_modules")
+                if dir == "/" || dir.isEmpty { break }
+                dir = self.virtualDirname(dir)
+            }
+            return paths
+        }
         // Errors must throw IN the requiring frame — a native block can't, so a JS wrapper
         // inspects the marker and throws there.
         let factory = context.evaluateScript("""
-            (function(native, nativeResolve){
+            (function(native, nativeResolve, nativeResolvePaths){
                 function require(specifier){
                     const result = native(String(specifier));
                     if (result && result.__mouseRequireError) {
@@ -2213,11 +2234,15 @@ final class NodeEngine: @unchecked Sendable {
                     }
                     return result;
                 };
+                require.resolve.paths = function(specifier){
+                    return nativeResolvePaths(String(specifier));
+                };
                 return require;
             })
             """)!
         return factory.call(withArguments: [JSValue(object: requireBlock, in: context)!,
-                                            JSValue(object: resolveBlock, in: context)!])!
+                                            JSValue(object: resolveBlock, in: context)!,
+                                            JSValue(object: resolvePathsBlock, in: context)!])!
     }
 
     private func requireModule(_ request: String, fromDir: String) -> Any {
@@ -7363,16 +7388,97 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.module = function() {
-        const builtins = ['fs', 'path', 'os', 'util', 'events', 'buffer', 'tty', 'assert', 'url',
-                          'child_process', 'http', 'https', 'stream', 'zlib', 'readline', 'crypto',
-                          'string_decoder', 'constants', 'querystring', 'module'];
-        const moduleExports = {
-          createRequire: function(from) { return bridge.createRequire(String(from && from.href ? from.href : from)); },
-          builtinModules: builtins,
-          isBuiltin: function(name) { return builtins.includes(String(name).replace(/^node:/, '')); },
+        // This was three keys where node has forty. A module RUNNER — jest is the clearest
+        // case — does not just require things: it builds its own registry on top of node's,
+        // reading `_extensions` to learn which files are loadable, `_nodeModulePaths` to walk
+        // the same directories, and `_cache` to evict between test files. Missing internals
+        // stop such a tool at startup rather than degrading it.
+        const builtins = ['assert', 'async_hooks', 'buffer', 'child_process', 'cluster',
+                          'console', 'constants', 'crypto', 'dgram', 'diagnostics_channel',
+                          'dns', 'domain', 'events', 'fs', 'http', 'http2', 'https', 'inspector',
+                          'module', 'net', 'os', 'path', 'perf_hooks', 'process', 'querystring',
+                          'readline', 'stream', 'string_decoder', 'timers', 'tls', 'tty', 'url',
+                          'util', 'v8', 'vm', 'worker_threads', 'zlib'];
+        const rootRequire = bridge.createRequire('/');
+
+        function Module(id, parent) {
+          this.id = id === undefined ? '' : id;
+          this.path = id ? String(id).replace(/[/][^/]*$/, '') || '/' : '';
+          this.exports = {};
+          this.parent = parent === undefined ? null : parent;
+          this.filename = id || null;
+          this.loaded = false;
+          this.children = [];
+          this.paths = id ? Module._nodeModulePaths(this.path) : [];
+        }
+        Module.prototype.require = function(request) {
+          return bridge.createRequire(this.filename || '/')(String(request));
         };
-        moduleExports.Module = moduleExports;
-        return moduleExports;
+        Module.prototype.load = function(filename) {
+          this.filename = filename;
+          this.paths = Module._nodeModulePaths(String(filename).replace(/[/][^/]*$/, '') || '/');
+          const extension = /\.[^./]+$/.exec(String(filename));
+          const handler = Module._extensions[extension ? extension[0] : '.js'] || Module._extensions['.js'];
+          handler(this, filename);
+          this.loaded = true;
+        };
+        Module.prototype._compile = function(content, filename) {
+          // node compiles the text itself; here the engine owns compilation, so the honest
+          // equivalent is to load the file that text came from.
+          this.exports = bridge.createRequire(String(filename))(String(filename));
+          return this.exports;
+        };
+        Module.prototype.isPreloading = false;
+
+        Module._cache = {};
+        Module._pathCache = {};
+        Module._extensions = {
+          '.js': function(module, filename) { module.exports = rootRequire(String(filename)); },
+          '.json': function(module, filename) { module.exports = rootRequire(String(filename)); },
+          '.node': function(module, filename) {
+            const error = new Error('Cannot load native addon ' + filename +
+                                    ': a .node binary is compiled machine code, which iOS will ' +
+                                    'not map executable');
+            error.code = 'ERR_DLOPEN_FAILED';
+            throw error;
+          },
+        };
+        Module._nodeModulePaths = function(from) {
+          let dir = String(from || '/');
+          if (!dir.startsWith('/')) dir = '/' + dir;
+          const paths = [];
+          for (;;) {
+            if (!/[/]node_modules$/.test(dir)) paths.push(dir === '/' ? '/node_modules' : dir + '/node_modules');
+            if (dir === '/' || dir === '') break;
+            dir = dir.replace(/[/][^/]*$/, '') || '/';
+          }
+          return paths;
+        };
+        Module._resolveFilename = function(request, parent) {
+          const from = parent && parent.filename ? parent.filename : '/';
+          return bridge.createRequire(String(from)).resolve(String(request));
+        };
+        Module._resolveLookupPaths = function(request, parent) {
+          const from = parent && parent.path ? parent.path : '/';
+          return Module._nodeModulePaths(from);
+        };
+        Module._load = function(request, parent) {
+          const from = parent && parent.filename ? parent.filename : '/';
+          return bridge.createRequire(String(from))(String(request));
+        };
+        Module.globalPaths = [];
+        // node exposes the exact wrapper text; tools splice around it.
+        Module.wrapper = ['(function (exports, require, module, __filename, __dirname) { ', '\n});'];
+        Module.wrap = function(script) { return Module.wrapper[0] + script + Module.wrapper[1]; };
+        Module.builtinModules = builtins;
+        Module.isBuiltin = function(name) { return builtins.includes(String(name).replace(/^node:/, '')); };
+        Module.createRequire = function(from) {
+          return bridge.createRequire(String(from && from.href ? from.href : from));
+        };
+        Module.syncBuiltinESMExports = function() {};
+        Module.Module = Module;
+        Module.constants = { compileCacheStatus: { FAILED: 0, ENABLED: 1, ALREADY_ENABLED: 2, DISABLED: 3 } };
+        return Module;
       };
       coreFactories.buffer = function() {
         return {
@@ -7502,13 +7608,21 @@ final class NodeEngine: @unchecked Sendable {
           child.pid = 1;
           child.kill = function(){};
           setImmediate(function() {
+            // node emits 'spawn' once the child is running, before any output. A consumer that
+            // waits for it — and several do — otherwise waits forever.
+            child.emit('spawn');
             const parts = [command].concat((argv || []).map(shellQuote));
             const r = runShell(parts.join(' '));
             if (r.stdout) child.stdout.emit('data', Buffer.from(r.stdout));
             if (r.stderr) child.stderr.emit('data', Buffer.from(r.stderr));
             child.stdout.emit('end');
-            child.emit('close', r.status, null);
+            child.stderr.emit('end');
+            // 'exit' fires when the process is gone, 'close' once its stdio has drained — in
+            // that order. These were reversed, so anything keying off the pair saw the wrong
+            // sequence, and code that waits on 'exit' after seeing 'close' never resumed.
+            child.exitCode = r.status;
             child.emit('exit', r.status, null);
+            process.nextTick(function(){ child.emit('close', r.status, null); });
           });
           return child;
         }
@@ -7565,6 +7679,8 @@ final class NodeEngine: @unchecked Sendable {
             }
           });
           child.pid = id;
+          // Same 'spawn' announcement the shell path makes: the child exists and is running.
+          setImmediate(function(){ child.emit('spawn'); });
           child.stdin = new Writable({
             write: function(chunk, encoding, callback) {
               // A protocol writes Uint8Arrays; stringifying one is how the packets died.
@@ -9646,12 +9762,50 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.vm = function() {
+        // Half of this module is real and half was a stub that LIED: `createContext` returned
+        // the sandbox unchanged, so a feature check saw a working vm, and then `runInContext`
+        // was simply absent and threw a bare TypeError from inside the caller. That is the
+        // shape this project refuses — a capability must either work or say what is missing.
+        //
+        // What is missing is specific, and not impossible: a real context needs a SECOND
+        // JSContext in the same JSVirtualMachine (so values can cross between them) plus a
+        // live sandbox — node's contextified object is a proxy whose writes are visible on
+        // both sides, where copying at call boundaries would not be. That is a real piece of
+        // work, not a platform limit. It is what blocks jest, whose environment runs every
+        // test file inside a vm context.
+        const contextReason = 'vm contexts are not available: a real one needs a second ' +
+          'JSContext in the same JSVirtualMachine plus a live (proxied) sandbox, which is not ' +
+          'built yet. vm.runInThisContext and new vm.Script(...).runInThisContext() do work — ' +
+          'they evaluate in THIS context, which needs no sandbox';
+        const contextified = new WeakSet();
+        function refuseContext(name) {
+          return function() {
+            const error = new Error(name + ': ' + contextReason);
+            error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+            throw error;
+          };
+        }
         return {
-          runInThisContext: function(code) { return (0, eval)(code); },
-          createContext: function(sandbox) { return sandbox || {}; },
+          runInThisContext: function(code) { return (0, eval)(String(code)); },
+          // `createContext` keeps working: it returns the object node returns, and webpack
+          // genuinely depends on it — refusing here removed a capability that was real. What
+          // it CANNOT do is give that object a separate global, so the operations that need
+          // one refuse by name instead of throwing a bare TypeError from the caller's frame.
+          createContext: function(sandbox) {
+            const context = sandbox || {};
+            contextified.add(context);
+            return context;
+          },
+          isContext: function(value) { return contextified.has(value); },
+          runInContext: refuseContext('vm.runInContext'),
+          runInNewContext: refuseContext('vm.runInNewContext'),
+          compileFunction: refuseContext('vm.compileFunction'),
+          measureMemory: refuseContext('vm.measureMemory'),
           Script: class Script {
-            constructor(code) { this._code = code; }
+            constructor(code) { this._code = String(code); }
             runInThisContext() { return (0, eval)(this._code); }
+            runInContext() { refuseContext('script.runInContext')(); }
+            runInNewContext() { refuseContext('script.runInNewContext')(); }
           },
         };
       };

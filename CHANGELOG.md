@@ -8,6 +8,20 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `require.resolve.paths(request)` — the directories that would be searched.
+- Node layer: the `module` core module is real, growing from three exports to node's surface:
+  `_cache`, `_extensions`, `_nodeModulePaths`, `_resolveFilename`, `_load`, `_resolveLookupPaths`,
+  `wrap`/`wrapper`, `globalPaths`, a `Module` constructor with `require`/`load`/`_compile`, and a
+  complete `builtinModules`. Tools that build their own module registry on node's read these.
+- Node layer: a child process emits `'spawn'`, and a msh-bridged child emits `'exit'` before
+  `'close'` rather than after. The order was reversed and `'spawn'` was never emitted at all, so
+  code waiting on either — jest's file crawler waits on `'exit'` — could wait forever.
+
+### Fixed
+- Node layer: `vm.createContext` returned the sandbox unchanged while `runInContext` was absent,
+  so a feature check saw a working `vm` and then got a bare TypeError. The context-based
+  functions now refuse by name with the real reason. `runInThisContext` and `createContext`
+  keep working — the latter because webpack depends on it.
 - Node layer: **finite-field Diffie-Hellman is real** — `createDiffieHellman`,
   `createDiffieHellmanGroup` and `getDiffieHellman` with all eight MODP groups (RFC 2409 and
   RFC 3526), on JavaScriptCore's native `BigInt`. Real node and this engine derive the same
