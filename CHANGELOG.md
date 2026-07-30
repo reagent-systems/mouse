@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `process.threadCpuUsage`, `process.finalization` and `process.assert`; and
+  `process.dlopen`/`process.execve` refuse by name with the reason (no executable mapping, no
+  exec) instead of being absent.
+
 - Node layer: `util.MIMEType` and `util.MIMEParams` — parsing, parameter get/set/delete,
   iteration, and a `toString` that re-quotes values containing separators so a reassembled type
   parses back the same way. Plus `util.parseEnv`, `util.getCallSites`, `util.diff`, and
@@ -15,6 +19,9 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `process.cpuUsage()` reports real CPU time from `getrusage`. It returned hardcoded
+  zeros, which is worse than absent — a caller measuring CPU saw a working API report nothing.
+
 - Node layer: `zlib.BrotliCompress`/`BrotliDecompress` exist as classes, so `new
   zlib.BrotliCompress()` works rather than throwing — brotli had only the factory functions.
   And `createGzip() instanceof zlib.Gzip` is now true, as node has it; the factories returned a

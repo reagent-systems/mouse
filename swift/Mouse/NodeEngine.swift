@@ -645,6 +645,19 @@ final class NodeEngine: @unchecked Sendable {
         }
         expose("vmRelease", vmRelease)
 
+        // -- CPU time --
+        // `process.cpuUsage()` returned hardcoded zeros, which is the shape of stub this
+        // project refuses: it looks like a working API and silently reports nothing. getrusage
+        // has the real numbers, in microseconds, which is node's unit too.
+        let cpuUsage: @convention(block) () -> [String: Double] = {
+            var usage = rusage()
+            guard getrusage(RUSAGE_SELF, &usage) == 0 else { return ["user": 0, "system": 0] }
+            let user = Double(usage.ru_utime.tv_sec) * 1_000_000 + Double(usage.ru_utime.tv_usec)
+            let system = Double(usage.ru_stime.tv_sec) * 1_000_000 + Double(usage.ru_stime.tv_usec)
+            return ["user": user, "system": system]
+        }
+        expose("cpuUsage", cpuUsage)
+
         // -- monotonic clock --
         // `process.hrtime`, `hrtime.bigint` and `performance.now` all read a MONOTONIC clock:
         // one that never runs backwards when the wall clock is corrected, with sub-millisecond
@@ -4692,7 +4705,12 @@ final class NodeEngine: @unchecked Sendable {
         geteuid: function(){ return 501; },
         getegid: function(){ return 20; },
         umask: function(){ return 0o022; },
-        cpuUsage: function(){ return { user: 0, system: 0 }; },
+        cpuUsage: function(previous){
+          const now = bridge.cpuUsage();
+          const current = { user: Math.round(now.user), system: Math.round(now.system) };
+          if (!previous) return current;
+          return { user: current.user - previous.user, system: current.system - previous.system };
+        },
         resourceUsage: function(){ return { userCPUTime: 0, systemCPUTime: 0, maxRSS: 0 }; },
         availableParallelism: function(){ return 1; },
         hasUncaughtExceptionCaptureCallback: function(){ return false; },
@@ -4745,6 +4763,52 @@ final class NodeEngine: @unchecked Sendable {
         // actually call (loggers, benchmarks, health endpoints); the rest are here so a
         // feature check does not read undefined and conclude something false.
         uptime: function(){ return (Date.now() - globalThis.hrtimeBase) / 1000; },
+        // Named by the module-surface audit. The rest of what it lists for `process` is
+        // underscore-prefixed node internals, which stay out deliberately.
+        threadCpuUsage: function(previous) {
+          // One engine per thread here, so a thread's CPU time IS the process's.
+          const now = process.cpuUsage();
+          if (!previous) return now;
+          return { user: now.user - previous.user, system: now.system - previous.system };
+        },
+        // `process.assert` is deprecated in node but still present, and still throws.
+        assert: function(value, message) {
+          if (value) return;
+          throw new Error(message === undefined ? 'AssertionError' : String(message));
+        },
+        finalization: (function(){
+          // node's finalization registry ties a callback to an object's collection. JSC exposes
+          // no FinalizationRegistry hook that fires deterministically here, so `register` keeps
+          // the association without pretending the callback will run at collection time —
+          // `registerBeforeExit` is the half that CAN be honoured exactly, and is the half
+          // callers actually rely on for cleanup.
+          const beforeExit = new Map();
+          return {
+            register: function(target, callback) { beforeExit.set(target, callback); },
+            registerBeforeExit: function(target, callback) {
+              beforeExit.set(target, callback);
+              process.once('beforeExit', function(){
+                const fn = beforeExit.get(target);
+                if (fn) fn(target, 'beforeExit');
+              });
+            },
+            unregister: function(target) { beforeExit.delete(target); },
+          };
+        })(),
+        // Refusals with true reasons rather than silence.
+        dlopen: function() {
+          const error = new Error('process.dlopen is not available: a .node addon is compiled ' +
+                                  'machine code, and iOS will not map new executable pages');
+          error.code = 'ERR_DLOPEN_FAILED';
+          throw error;
+        },
+        execve: function() {
+          const error = new Error('process.execve is not available: iOS has no exec — a process ' +
+                                  'cannot replace its own image, which is why child processes ' +
+                                  'here are engines rather than fork/exec');
+          error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+          throw error;
+        },
         emitWarning: function(warning, type, code) {
           const text = warning instanceof Error ? warning.message : String(warning);
           const label = (typeof type === 'string' ? type : 'Warning');
