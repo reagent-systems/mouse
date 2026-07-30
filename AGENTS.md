@@ -153,6 +153,20 @@ construction — IP literals and hosts-file names — because node's `resolve4`
 queries a DNS server through c-ares and never reads the hosts file. Record
 types getaddrinfo cannot answer must keep saying so rather than returning an
 empty list.
+**Audit core-module surfaces against real node periodically** — list
+`Object.keys(require(m))` in both engines and diff. It is how the `URL`,
+`Buffer`-statics and `Stats.mode` bugs were found, and each was a member that
+existed-but-answered-wrongly or was absent while a package quietly concluded
+something false. When a member cannot be supported, make it REFUSE with the
+reason rather than leaving it absent or faking it (`fs.glob`, the privilege
+setters, brotli/zstd).
+**`URL` is ours, and everything HTTP parses through it** — JSC exposes none, so
+the bootstrap's class is the real one. Relative resolution must follow RFC 3986
+§5.2: protocol-relative, origin-relative, query-only, fragment-only, and
+dot-segment removal over the MERGED path. Do not reintroduce "trim the base
+after the last slash" — it turned `new URL('/root', 'https://x/a/b')` into
+`https://x/a//root` and never resolved `../`. Credentials stay in `href` and
+stay OUT of `origin` (measured).
 `fs.watch` (`NodeWatch.swift`) is kqueue through `DispatchSource`: a watch per
 subdirectory for recursive mode, and a watch per FILE inside a watched
 directory — that per-file watch is the only way kqueue can NAME a modification

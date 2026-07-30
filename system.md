@@ -93,6 +93,7 @@ so a TUI navigates and edits.
 | **Phase G — `http.createServer`** | A real HTTP/1.1 server on top of `net`: an incremental request parser (Content-Length and chunked bodies, pipelined requests, duplicate-header rules), `IncomingMessage` as a Readable, `ServerResponse` as a Writable, keep-alive, `Expect: 100-continue`, and `'upgrade'` for a WebSocket handshake. Framing matches node's on the WIRE, measured rather than assumed. **Real express runs on it** — installed by our own package manager, answering real node's client identically, JSON body parsing and 404 page included. `https.createServer` refuses, honestly: TLS needs a handshake we cannot put on a raw socket |
 | **Phase G — WebSockets, and the HTTP client on raw sockets** | `http.request` left URLSession for `net`, which is what makes three things possible: response bodies arrive INCREMENTALLY, request bodies can stream, and a 101 hands the socket over. Request bytes match node's per request. On top of that, **the real `ws` package works in both directions** — a real node ws client cannot tell our server from node's, and a real node ws server cannot tell our client from node's, closing handshake included. `https` stays on URLSession, where the system owns the TLS handshake |
 | **Phase G — `fs.watch`** | Real file watching (`NodeWatch.swift`) on kqueue via `DispatchSource`: files, directories, recursive trees, `watchFile`/`unwatchFile`, and the async-iterator form. A directory watch also watches the files inside it, which is the only way kqueue can NAME a modification. **chokidar works** — the watcher under webpack, vite, nodemon and `jest --watch` reports the same events on our engine as on node's. `Stats` grew its real fields in the process (see below) |
+| **Phase G — the core-module surface audit** | Every core module's exports diffed against real node's and the gaps filled where they matter: `fs` 81→105 of 106 (`Stats`/`Dirent` as real classes, `opendir`, `cp`, `writev`/`readv`, `statfs`, the access constants), `fs/promises` 13→32 of 32 (including `open` and a real `FileHandle`), `os` and `stream` and `buffer` and `dns` and `url` and `timers` complete, plus `events.on` as an async iterator, `util.parseArgs`, `process.uptime`/`loadEnvFile`, `assert.CallTracker`. It also found a bug that mattered: our `URL` resolved relative URLs by trimming the base after the last slash |
 
 ### Verification performed
 
@@ -1002,6 +1003,32 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **A surface audit, and the URL bug it turned up.** The proactive method again:
+  list what real node exports for each core module, diff against ours, and read
+  the difference. It moved `fs` from 81 to 105 of 106 members (only an internal
+  `_toUnixTimestamp` left), `fs/promises` from 13 to all 32, and completed `os`,
+  `stream`, `buffer`, `dns`, `url` and `timers` — including things packages
+  genuinely use and would have failed on: `Stats`/`Dirent` as real constructors
+  (`instanceof fs.Stats` is a check libraries make), `fs.promises.open` with a
+  real `FileHandle`, `opendir`, `cp`/`cpSync`, `writev`/`readv`, `statfs`, the
+  top-level `R_OK`/`W_OK` access constants, `events.on` as an async iterator,
+  `util.parseArgs`, `process.uptime`/`loadEnvFile`, `assert.CallTracker`.
+  The find that justified the exercise: **our `URL` resolved relative URLs by
+  trimming the base after the last slash** — so `new URL('/root',
+  'https://x/a/b')` gave `https://x/a//root`, and `../` was never resolved at
+  all. JSC exposes no URL, so that fallback IS the parser every HTTP request
+  goes through. It now follows RFC 3986 §5.2 (protocol-relative,
+  origin-relative, query-only, fragment-only, and dot-segment removal over the
+  merged path), verified against real node on ten resolution cases plus
+  credential handling — node keeps `user:pw@` in `href` but not in `origin`.
+- **What the audit deliberately left missing.** zstd and brotli (no library on
+  the device), `fs.glob`/`path.matchesGlob` (glob semantics are a corpus of edge
+  cases and the `glob` package already works here — a partial matcher would be
+  worse than none), node internals prefixed with `_`, and the privilege setters
+  (`setuid` and friends refuse with EPERM: single-user sandbox, no other user to
+  become). `crypto` is still 17 of 71 and is the next real piece of work —
+  CryptoKit has AES-GCM and ChaCha20-Poly1305, so ciphers, `pbkdf2` and `hkdf`
+  are all reachable.
 - **Watch events are the most platform-dependent surface in node, and the
   fixtures say so.** macOS drives them from FSEvents, Linux from inotify, and
   they disagree on the event TYPE for a write inside a watched directory

@@ -473,6 +473,23 @@ final class NodeEngine: @unchecked Sendable {
             guard let self else { return false }
             return (try? FileManager.default.moveItem(at: self.realURL(from), to: self.realURL(to))) != nil
         }
+        // statfs(2) — free space and block counts. Build tools check available space before
+        // writing large artifacts, and node exports it.
+        let statFilesystem: @convention(block) (String) -> Any = { [weak self] path in
+            guard let self else { return NSNull() }
+            var info = statfs()
+            guard statfs(self.realURL(path).path, &info) == 0 else { return NSNull() }
+            return [
+                "type": Int(info.f_type),
+                "bsize": Double(info.f_bsize),
+                "blocks": Double(info.f_blocks),
+                "bfree": Double(info.f_bfree),
+                "bavail": Double(info.f_bavail),
+                "files": Double(info.f_files),
+                "ffree": Double(info.f_ffree),
+            ] as [String: Any]
+        }
+        expose("statfs", statFilesystem)
         expose("readFile", readFile)
         expose("writeFile", writeFile)
         expose("stat", statFile)
@@ -1987,26 +2004,71 @@ final class NodeEngine: @unchecked Sendable {
       };
       if (typeof globalThis.URL === 'undefined') {
         // The slice Emscripten and fetch-y libraries touch: parse, href, protocol, pathname.
+        // JSC gives us no URL, so this fallback IS the URL every http request is parsed with —
+        // which is why relative resolution follows RFC 3986 §5.2 rather than trimming the base
+        // after the last slash. That shortcut turned `new URL('/root', 'https://x/a/b')` into
+        // "https://x/a//root", and `../` was never resolved at all.
+        function removeDotSegments(path) {
+          const out = [];
+          for (const piece of String(path).split('/')) {
+            if (piece === '.') continue;
+            if (piece === '..') { if (out.length > 1) out.pop(); continue; }
+            out.push(piece);
+          }
+          let joined = out.join('/');
+          if (/\/\.\.?$/.test(path) && !joined.endsWith('/')) joined += '/';
+          return joined;
+        }
         globalThis.URL = class URL {
           constructor(input, base) {
-            let text = String(input);
-            if (base && !/^[a-zA-Z][\w+.-]*:/.test(text)) {
-              const baseText = String(base && base.href ? base.href : base);
-              text = baseText.replace(/[^/]*$/, '') + text;
+            let text = String(input).trim();
+            const hasScheme = /^[a-zA-Z][\w+.-]*:/.test(text);
+            if (!hasScheme) {
+              if (base === undefined || base === null) {
+                throw Object.assign(new TypeError('Invalid URL: ' + input), { code: 'ERR_INVALID_URL', input: input });
+              }
+              const parent = base instanceof URL ? base : new URL(String(base && base.href ? base.href : base));
+              // The base for resolution keeps the credentials; `origin` deliberately does not
+              // (node reports origin without them, but carries them in href).
+              const root = parent.protocol + (parent.hostname ? '//' + parent._authority : '');
+              if (text.startsWith('//')) {
+                text = parent.protocol + text;                       // protocol-relative
+              } else if (text.startsWith('/')) {
+                text = root + removeDotSegments(text);                // origin-relative
+              } else if (text.startsWith('?')) {
+                text = root + parent.pathname + text;
+              } else if (text.startsWith('#')) {
+                text = root + parent.pathname + parent.search + text;
+              } else if (!text) {
+                text = root + parent.pathname + parent.search;
+              } else {
+                // Merge with the base's DIRECTORY, then resolve dot segments over the whole
+                // path — the step the old version skipped.
+                const directory = parent.pathname.replace(/[^/]*$/, '');
+                text = root + removeDotSegments(directory + text);
+              }
             }
-            this.href = text;
-            const match = text.match(/^([a-zA-Z][\w+.-]*:)(?:\/\/([^/?#:]*)(?::(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/) || [];
+            const match = text.match(/^([a-zA-Z][\w+.-]*:)(?:\/\/(?:([^/?#@]*)@)?([^/?#:]*)(?::(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/);
+            if (!match) {
+              throw Object.assign(new TypeError('Invalid URL: ' + input), { code: 'ERR_INVALID_URL', input: input });
+            }
             this.protocol = match[1] || '';
-            this.hostname = match[2] || '';
-            this.port = match[3] || '';
+            const credentials = match[2] || '';
+            this.username = credentials ? credentials.split(':')[0] : '';
+            this.password = credentials && credentials.indexOf(':') >= 0 ? credentials.slice(credentials.indexOf(':') + 1) : '';
+            this.hostname = match[3] || '';
+            this.port = match[4] || '';
             this.host = this.hostname + (this.port ? ':' + this.port : '');
-            this.pathname = match[4] || '';
-            this.search = match[5] || '';
-            this.hash = match[6] || '';
+            // A hierarchical URL always has a path; node reports '/' where the text has none.
+            const hierarchical = text.indexOf('//') === this.protocol.length;
+            this.pathname = match[5] || (hierarchical ? '/' : '');
+            this.search = match[6] || '';
+            this.hash = match[7] || '';
             this.origin = this.protocol + (this.hostname ? '//' + this.host : '');
+            this._authority = credentials ? credentials + '@' + this.host : this.host;
             this.searchParams = new URLSearchParams(this.search);
-            this.username = '';
-            this.password = '';
+            this.href = this.protocol + (this.hostname ? '//' + this._authority : '') +
+                        this.pathname + this.search + this.hash;
           }
           toString() { return this.href; }
           toJSON() { return this.href; }
@@ -2343,6 +2405,71 @@ final class NodeEngine: @unchecked Sendable {
           return [seconds, nanos];
         },
         memoryUsage: function(){ return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0 }; },
+        // Found by auditing process against real node's keys. `uptime` is the one packages
+        // actually call (loggers, benchmarks, health endpoints); the rest are here so a
+        // feature check does not read undefined and conclude something false.
+        uptime: function(){ return (Date.now() - globalThis.hrtimeBase) / 1000; },
+        emitWarning: function(warning, type, code) {
+          const text = warning instanceof Error ? warning.message : String(warning);
+          const label = (typeof type === 'string' ? type : 'Warning');
+          process.stderr.write('(mouse:' + process.pid + ') ' + label + ': ' + text + '\n');
+        },
+        argv0: 'node',
+        // No process table to signal into: only this process exists, and killing it is what
+        // exit() is for.
+        kill: function(pid, signal) {
+          if (Number(pid) === process.pid && (signal === 'SIGKILL' || signal === 'SIGTERM' || signal === undefined)) {
+            process.exit(signal === 'SIGKILL' ? 137 : 143);
+            return true;
+          }
+          const error = new Error('kill ESRCH: there is no other process on this device');
+          error.code = 'ESRCH';
+          throw error;
+        },
+        abort: function(){ process.exit(134); },
+        reallyExit: function(code){ process.exit(code || 0); },
+        getActiveResourcesInfo: function(){ return []; },
+        // node 20's .env reader. Small, and it saves a dependency for anything that wants one.
+        loadEnvFile: function(file) {
+          const fs = coreRequire('fs');   // `require` is per-module; the bootstrap has coreRequire
+          const text = fs.readFileSync(file === undefined ? '.env' : file, 'utf8');
+          for (const line of String(text).split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed[0] === '#') continue;
+            const at = trimmed.indexOf('=');
+            if (at < 0) continue;
+            const name = trimmed.slice(0, at).trim();
+            let value = trimmed.slice(at + 1).trim();
+            if ((value[0] === '"' && value.endsWith('"')) || (value[0] === "'" && value.endsWith("'"))) {
+              value = value.slice(1, -1);
+            }
+            if (process.env[name] === undefined) process.env[name] = value;
+          }
+        },
+        openStdin: function(){ return process.stdin; },
+        // Privilege changes in a single-user sandbox: there is no other user to become.
+        setuid: function(){ throw refusal('setuid'); },
+        setgid: function(){ throw refusal('setgid'); },
+        seteuid: function(){ throw refusal('seteuid'); },
+        setegid: function(){ throw refusal('setegid'); },
+        setgroups: function(){ throw refusal('setgroups'); },
+        initgroups: function(){ throw refusal('initgroups'); },
+        getgroups: function(){ return []; },
+        availableMemory: function(){ return 0; },
+        constrainedMemory: function(){ return 0; },
+        ref: function(){}, unref: function(){},
+        setSourceMapsEnabled: function(){},
+        sourceMapsEnabled: false,
+        getBuiltinModule: function(name) {
+          try { return coreRequire(String(name).replace(/^node:/, '')); } catch (error) { return undefined; }
+        },
+        mainModule: undefined,
+        moduleLoadList: [],
+        debugPort: 0,
+        config: { target_defaults: {}, variables: {} },
+        _exiting: false,
+        _events: {},
+        _eventsCount: 0,
         on: function(event, handler){
           const bucket = signalHandlers[event] || (processEvents[event] = processEvents[event] || []);
           bucket.push(handler);
@@ -2385,6 +2512,11 @@ final class NodeEngine: @unchecked Sendable {
         stderr: makeOutputStream(bridge.stderr),
         stdin: makeInputStream(),
       };
+      function refusal(name) {
+        const error = new Error('process.' + name + ' is not available: this is a single-user sandbox, there is no other user to become');
+        error.code = 'EPERM';
+        return error;
+      }
       globalThis.process = process;
       globalThis.hrtimeBase = Date.now();
 
@@ -2550,8 +2682,48 @@ final class NodeEngine: @unchecked Sendable {
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.default = EventEmitter;
         EventEmitter.once = function(emitter, name) {
-          return new Promise(function(resolve){ emitter.once(name, function(){ resolve(Array.from(arguments)); }); });
+          return new Promise(function(resolve, reject) {
+            emitter.once(name, function(){ resolve(Array.from(arguments)); });
+            if (name !== 'error' && emitter.once) emitter.once('error', reject);
+          });
         };
+        // `for await (const [value] of events.on(emitter, 'data'))` — the modern way to read
+        // an emitter, and it was missing entirely.
+        EventEmitter.on = function(emitter, name, options) {
+          const queue = [];
+          let waiting = null;
+          let failure = null;
+          let finished = false;
+          emitter.on(name, function() {
+            const value = Array.from(arguments);
+            if (waiting) { const settle = waiting; waiting = null; settle.resolve({ value: value, done: false }); }
+            else queue.push(value);
+          });
+          emitter.on('error', function(error) {
+            failure = error;
+            if (waiting) { const settle = waiting; waiting = null; settle.reject(error); }
+          });
+          const iterator = {
+            next: function() {
+              if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+              if (failure) return Promise.reject(failure);
+              if (finished) return Promise.resolve({ value: undefined, done: true });
+              return new Promise(function(resolve, reject){ waiting = { resolve: resolve, reject: reject }; });
+            },
+            return: function() { finished = true; return Promise.resolve({ value: undefined, done: true }); },
+            throw: function(error) { finished = true; return Promise.reject(error); },
+            [Symbol.asyncIterator]: function() { return this; },
+          };
+          return iterator;
+        };
+        EventEmitter.errorMonitor = Symbol('events.errorMonitor');
+        EventEmitter.captureRejectionSymbol = Symbol.for('nodejs.rejection');
+        EventEmitter.captureRejections = false;
+        EventEmitter.defaultMaxListeners = 10;
+        EventEmitter.usingDomains = false;
+        EventEmitter.init = function() {};
+        EventEmitter.getEventListeners = function(emitter, name) { return emitter.listeners(name); };
+        EventEmitter.setMaxListeners = function() {};
         return EventEmitter;
       };
 
@@ -2626,6 +2798,90 @@ final class NodeEngine: @unchecked Sendable {
           isString: v => typeof v === 'string',
           isObject: v => v !== null && typeof v === 'object',
           isDeepStrictEqual: function(a, b) { return JSON.stringify(a) === JSON.stringify(b); },
+          // The deprecated-but-still-used type checks. Packages that support old node call
+          // these directly, and an undefined one reads as "not that type".
+          isBoolean: v => typeof v === 'boolean',
+          isBuffer: v => Buffer.isBuffer(v),
+          isDate: v => v instanceof Date,
+          isError: v => v instanceof Error,
+          isNull: v => v === null,
+          isNullOrUndefined: v => v === null || v === undefined,
+          isNumber: v => typeof v === 'number',
+          isPrimitive: v => v === null || (typeof v !== 'object' && typeof v !== 'function'),
+          isRegExp: v => v instanceof RegExp,
+          isSymbol: v => typeof v === 'symbol',
+          isUndefined: v => v === undefined,
+          _extend: function(target, source) { return Object.assign(target, source); },
+          toUSVString: function(text) { return String(text).replace(/[\uD800-\uDFFF]/g, '\uFFFD'); },
+          log: function() {
+            const stamp = new Date().toISOString();
+            console.log.apply(console, [stamp].concat(Array.prototype.slice.call(arguments)));
+          },
+          debug: function(section) {
+            const enabled = String(process.env.NODE_DEBUG || '').split(/[ ,]/).indexOf(section) >= 0;
+            return enabled ? function() {
+              console.error.apply(console, [section.toUpperCase() + ' ' + process.pid + ':']
+                .concat(Array.prototype.slice.call(arguments)));
+            } : function(){};
+          },
+          debuglog: function(section) { return this.debug(section); },
+          getSystemErrorMap: function() { return new Map(); },
+          getSystemErrorMessage: function(code) { return 'system error ' + code; },
+          aborted: function(signal) {
+            return new Promise(function(resolve){
+              if (signal.aborted) { resolve(); return; }
+              signal.addEventListener('abort', function(){ resolve(); });
+            });
+          },
+          // node 18's argument parser. Increasingly what a CLI uses instead of a dependency.
+          parseArgs: function(config) {
+            config = config || {};
+            const args = config.args || process.argv.slice(2);
+            const options = config.options || {};
+            const values = {};
+            const positionals = [];
+            for (const name of Object.keys(options)) {
+              if (options[name].default !== undefined) values[name] = options[name].default;
+            }
+            function record(name, value) {
+              const spec = options[name] || {};
+              if (spec.multiple) (values[name] = values[name] || []).push(value);
+              else values[name] = value;
+            }
+            for (let i = 0; i < args.length; i++) {
+              const token = args[i];
+              if (token === '--') { positionals.push.apply(positionals, args.slice(i + 1)); break; }
+              if (token.startsWith('--')) {
+                const at = token.indexOf('=');
+                const name = at >= 0 ? token.slice(2, at) : token.slice(2);
+                const spec = options[name];
+                if (!spec && config.strict !== false) {
+                  const error = new Error("Unknown option '--" + name + "'");
+                  error.code = 'ERR_PARSE_ARGS_UNKNOWN_OPTION';
+                  throw error;
+                }
+                if (spec && spec.type === 'string') record(name, at >= 0 ? token.slice(at + 1) : args[++i]);
+                else record(name, at >= 0 ? token.slice(at + 1) !== 'false' : true);
+                continue;
+              }
+              if (token.length > 1 && token[0] === '-') {
+                for (const letter of token.slice(1)) {
+                  const name = Object.keys(options).find(key => options[key].short === letter);
+                  if (!name) {
+                    if (config.strict === false) continue;
+                    const error = new Error("Unknown option '-" + letter + "'");
+                    error.code = 'ERR_PARSE_ARGS_UNKNOWN_OPTION';
+                    throw error;
+                  }
+                  if (options[name].type === 'string') record(name, args[++i]);
+                  else record(name, true);
+                }
+                continue;
+              }
+              if (config.allowPositionals !== false) positionals.push(token);
+            }
+            return { values: values, positionals: positionals };
+          },
         };
       };
 
@@ -2647,6 +2903,11 @@ final class NodeEngine: @unchecked Sendable {
           uptime: function(){ return Math.floor(Date.now() / 1000) % 86400; },
           loadavg: function(){ return [0, 0, 0]; },
           networkInterfaces: function(){ return {}; },
+          devNull: '/dev/null',
+          // Process priority is not ours to change in a sandbox; 0 (default, unchangeable)
+          // is the truth here rather than a guess.
+          getPriority: function(){ return 0; },
+          setPriority: function(){},
           constants: {
             signals: { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6,
                        SIGFPE: 8, SIGKILL: 9, SIGBUS: 10, SIGSEGV: 11, SIGSYS: 12, SIGPIPE: 13,
@@ -2688,7 +2949,8 @@ final class NodeEngine: @unchecked Sendable {
           // undefined without complaining — chokidar gates every file on
           // `4 & parseInt(stats.mode)`, so a missing `mode` looked like "no read permission"
           // and silently hid every file in a watched directory.
-          return {
+          // A real Stats instance: `x instanceof fs.Stats` is a check libraries make.
+          return Object.assign(new Stats(), {
             isFile: function(){ return !!raw.file; },
             isDirectory: function(){ return !!raw.dir; },
             isSymbolicLink: function(){ return !!raw.link; },
@@ -2703,7 +2965,7 @@ final class NodeEngine: @unchecked Sendable {
             ctimeMs: raw.ctimeMs, birthtimeMs: raw.birthtimeMs,
             atime: new Date(raw.atimeMs), mtime: new Date(raw.mtimeMs),
             ctime: new Date(raw.ctimeMs), birthtime: new Date(raw.birthtimeMs),
-          };
+          });
         }
         // fs.watch: real, on kqueue (NodeWatch.swift). Every watching tool an IDE runs needs
         // it — `tsc --watch`, a dev server's HMR, nodemon — and a watcher is a ref'd handle,
@@ -2824,6 +3086,195 @@ final class NodeEngine: @unchecked Sendable {
         }
         // A NUMBER as the file argument means an open fd — resolvePath maps it to the
         // path (node semantics: fs.writeFileSync(fd, data) is legal and common).
+        // ---- the surface audit's findings, filled in ------------------------------------
+        // Diffed against real node's `Object.keys(require('fs'))`: each of these is a member a
+        // package can reach for, and an absent one is a wrong answer delivered quietly (the
+        // `stats.mode` bug was exactly that). Grouped by what they are, not alphabetically.
+
+        // Stats and Dirent as real CONSTRUCTORS: libraries check `instanceof fs.Stats`, and a
+        // plain object literal fails that check while looking identical.
+        function Stats() {}
+        function Dirent() {}
+        function Dir(path, entries) {
+          this.path = path;
+          this._entries = entries;
+          this._at = 0;
+          this._closed = false;
+        }
+        Dir.prototype.readSync = function() {
+          if (this._closed || this._at >= this._entries.length) return null;
+          return this._entries[this._at++];
+        };
+        Dir.prototype.read = function(callback) {
+          const entry = this.readSync();
+          if (callback) { process.nextTick(function(){ callback(null, entry); }); return; }
+          return Promise.resolve(entry);
+        };
+        Dir.prototype.closeSync = function() { this._closed = true; };
+        Dir.prototype.close = function(callback) {
+          this._closed = true;
+          if (callback) { process.nextTick(function(){ callback(null); }); return; }
+          return Promise.resolve();
+        };
+        Dir.prototype[Symbol.asyncIterator] = function() {
+          const dir = this;
+          return {
+            next: function() {
+              const entry = dir.readSync();
+              return Promise.resolve(entry ? { value: entry, done: false } : { value: undefined, done: true });
+            },
+            [Symbol.asyncIterator]: function() { return this; },
+          };
+        };
+
+        // Recursive copy. Build tools reach for this constantly (node only grew it in 16, so
+        // packages that target older node use their own — but the new ones use this).
+        function cpSync(from, to, options) {
+          options = options || {};
+          const source = resolvePath(from);
+          const target = resolvePath(to);
+          const raw = bridge.stat(source, !!options.dereference);
+          if (!raw) {
+            const error = new Error("ENOENT: no such file or directory, cp '" + from + "'");
+            error.code = 'ENOENT';
+            throw error;
+          }
+          if (options.filter && !options.filter(source, target)) return;
+          if (raw.dir) {
+            if (!options.recursive) {
+              const error = new Error("EISDIR: illegal operation on a directory, cp '" + from + "'");
+              error.code = 'ERR_FS_EISDIR';
+              throw error;
+            }
+            fs.mkdirSync(target, { recursive: true });
+            for (const name of bridge.readdir(source) || []) {
+              cpSync(source + '/' + name, target + '/' + name, options);
+            }
+            return;
+          }
+          const exists = !!bridge.stat(target, true);
+          if (exists && options.errorOnExist && options.force === false) {
+            const error = new Error("EEXIST: file already exists, cp '" + to + "'");
+            error.code = 'EEXIST';
+            throw error;
+          }
+          if (exists && options.force === false) return;
+          fs.copyFileSync(source, target);
+        }
+
+        // Vectored I/O on a descriptor: one syscall in node, a loop here, same observable
+        // result (bytesWritten and the buffers filled in order).
+        function writevSync(fd, buffers, position) {
+          let written = 0;
+          let at = position;
+          for (const buffer of buffers) {
+            const count = fs.writeSync(fd, buffer, 0, buffer.length, at === undefined || at === null ? null : at + written);
+            written += count;
+          }
+          return written;
+        }
+        function readvSync(fd, buffers, position) {
+          let read = 0;
+          let at = position;
+          for (const buffer of buffers) {
+            const count = fs.readSync(fd, buffer, 0, buffer.length, at === undefined || at === null ? null : at + read);
+            read += count;
+            if (count < buffer.length) break;
+          }
+          return read;
+        }
+
+        // A FileHandle is what fs.promises.open resolves to, and it is a distinct object from
+        // a numeric fd: everything hangs off the handle.
+        function FileHandle(fd, path) {
+          this.fd = fd;
+          this._path = path;
+        }
+        FileHandle.prototype.close = function() {
+          const fd = this.fd;
+          return new Promise(function(resolve, reject) {
+            try { fs.closeSync(fd); resolve(); } catch (error) { reject(error); }
+          });
+        };
+        FileHandle.prototype.readFile = function(options) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.readFileSync(fd, options); });
+        };
+        FileHandle.prototype.writeFile = function(data, options) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.writeFileSync(fd, data, options); });
+        };
+        FileHandle.prototype.appendFile = function(data, options) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.appendFileSync(fd, data, options); });
+        };
+        FileHandle.prototype.read = function(buffer, offset, length, position) {
+          const fd = this.fd;
+          // node also accepts a single options object.
+          if (buffer && !Buffer.isBuffer(buffer) && typeof buffer === 'object') {
+            const options = buffer;
+            buffer = options.buffer || Buffer.alloc(16384);
+            offset = options.offset || 0;
+            length = options.length === undefined ? buffer.length - offset : options.length;
+            position = options.position;
+          }
+          return Promise.resolve().then(function(){
+            const bytesRead = fs.readSync(fd, buffer, offset || 0,
+                                          length === undefined ? buffer.length : length,
+                                          position === undefined ? null : position);
+            return { bytesRead: bytesRead, buffer: buffer };
+          });
+        };
+        FileHandle.prototype.write = function(data, offset, length, position) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){
+            const bytesWritten = fs.writeSync(fd, data, offset, length, position);
+            return { bytesWritten: bytesWritten, buffer: data };
+          });
+        };
+        FileHandle.prototype.writev = function(buffers, position) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){
+            return { bytesWritten: writevSync(fd, buffers, position), buffers: buffers };
+          });
+        };
+        FileHandle.prototype.readv = function(buffers, position) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){
+            return { bytesRead: readvSync(fd, buffers, position), buffers: buffers };
+          });
+        };
+        FileHandle.prototype.stat = function() {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.fstatSync(fd); });
+        };
+        FileHandle.prototype.truncate = function(length) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.ftruncateSync(fd, length); });
+        };
+        FileHandle.prototype.sync = function() {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.fsyncSync(fd); });
+        };
+        FileHandle.prototype.datasync = function() {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.fdatasyncSync(fd); });
+        };
+        FileHandle.prototype.chmod = function(mode) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.fchmodSync(fd, mode); });
+        };
+        FileHandle.prototype.utimes = function(atime, mtime) {
+          const fd = this.fd;
+          return Promise.resolve().then(function(){ return fs.futimesSync(fd, atime, mtime); });
+        };
+        FileHandle.prototype.createReadStream = function(options) {
+          return fs.createReadStream(this._path, options);
+        };
+        FileHandle.prototype.createWriteStream = function(options) {
+          return fs.createWriteStream(this._path, options);
+        };
+
         const fs = {
           readFileSync: function(file, options) {
             const base64 = bridge.readFile(resolvePath(file));
@@ -2885,7 +3336,7 @@ final class NodeEngine: @unchecked Sendable {
             return entries.map(function(name) {
               const raw = bridge.stat(parent + '/' + name, false);
               const isDir = !!(raw && raw.dir);
-              return {
+              return Object.assign(new Dirent(), {
                 name: name,
                 parentPath: parent,
                 path: parent,
@@ -2896,7 +3347,7 @@ final class NodeEngine: @unchecked Sendable {
                 isCharacterDevice: function(){ return false; },
                 isFIFO: function(){ return false; },
                 isSocket: function(){ return false; },
-              };
+              });
             });
           },
           mkdirSync: function(dir) { bridge.mkdir(resolvePath(dir)); },
@@ -3145,12 +3596,118 @@ final class NodeEngine: @unchecked Sendable {
         fs.watch = watch;
         fs.watchFile = watchFile;
         fs.unwatchFile = unwatchFile;
+        // The class exports (instanceof checks) and the access-mode constants, which node
+        // exposes BOTH on fs.constants and at the top level — `fs.access(p, fs.R_OK)` is the
+        // form most code uses.
+        fs.Stats = Stats;
+        fs.Dirent = Dirent;
+        fs.Dir = Dir;
+        fs.F_OK = fs.constants.F_OK;
+        fs.R_OK = fs.constants.R_OK;
+        fs.W_OK = fs.constants.W_OK;
+        fs.X_OK = fs.constants.X_OK;
+        fs.cpSync = cpSync;
+        fs.cp = function(from, to, options, callback) {
+          if (typeof options === 'function') { callback = options; options = {}; }
+          try { cpSync(from, to, options); if (callback) process.nextTick(function(){ callback(null); }); }
+          catch (error) { if (callback) process.nextTick(function(){ callback(error); }); else throw error; }
+        };
+        fs.writevSync = writevSync;
+        fs.readvSync = readvSync;
+        fs.writev = function(fd, buffers, position, callback) {
+          if (typeof position === 'function') { callback = position; position = null; }
+          try {
+            const written = writevSync(fd, buffers, position);
+            process.nextTick(function(){ callback(null, written, buffers); });
+          } catch (error) { process.nextTick(function(){ callback(error); }); }
+        };
+        fs.readv = function(fd, buffers, position, callback) {
+          if (typeof position === 'function') { callback = position; position = null; }
+          try {
+            const read = readvSync(fd, buffers, position);
+            process.nextTick(function(){ callback(null, read, buffers); });
+          } catch (error) { process.nextTick(function(){ callback(error); }); }
+        };
+        fs.opendirSync = function(target, options) {
+          const entries = fs.readdirSync(target, { withFileTypes: true });
+          return new Dir(resolvePath(target), entries);
+        };
+        fs.opendir = function(target, options, callback) {
+          if (typeof options === 'function') { callback = options; options = {}; }
+          try {
+            const dir = fs.opendirSync(target, options);
+            if (callback) { process.nextTick(function(){ callback(null, dir); }); return; }
+            return Promise.resolve(dir);
+          } catch (error) {
+            if (callback) { process.nextTick(function(){ callback(error); }); return; }
+            return Promise.reject(error);
+          }
+        };
+        fs.statfsSync = function(target) {
+          const raw = bridge.statfs(resolvePath(target));
+          if (!raw) {
+            const error = new Error("ENOENT: no such file or directory, statfs '" + target + "'");
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return raw;
+        };
+        fs.statfs = function(target, options, callback) {
+          if (typeof options === 'function') { callback = options; options = {}; }
+          try {
+            const info = fs.statfsSync(target);
+            process.nextTick(function(){ callback(null, info); });
+          } catch (error) { process.nextTick(function(){ callback(error); }); }
+        };
+        fs.openAsBlob = function(target, options) {
+          return Promise.resolve().then(function(){
+            const data = fs.readFileSync(target);
+            return new Blob([data], { type: (options && options.type) || '' });
+          });
+        };
+        // The stream classes, so `instanceof fs.ReadStream` works. FileReadStream /
+        // FileWriteStream are node's legacy aliases for the same things.
+        fs.ReadStream = function ReadStream(target, options) { return fs.createReadStream(target, options); };
+        fs.WriteStream = function WriteStream(target, options) { return fs.createWriteStream(target, options); };
+        fs.FileReadStream = fs.ReadStream;
+        fs.FileWriteStream = fs.WriteStream;
+        // fs.glob is node 22's built-in matcher. Not implemented rather than
+        // half-implemented: glob semantics (**, braces, character classes, negation) are a
+        // corpus of edge cases, and the `glob` package already runs correctly on this engine.
+        fs.glob = refuseHere('glob');
+        fs.globSync = refuseHere('globSync');
+        function refuseHere(name) {
+          return function() {
+            const error = new Error('fs.' + name + ' is not available: glob semantics are a corpus of edge cases and a partial matcher would be worse than none — the `glob` package works on this engine');
+            error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+            throw error;
+          };
+        }
         // Deliberately NOT exporting FSWatcher: real node 22 does not (measured), and a
         // surface we invent is a surface that diverges.
         fs.promises = {};
         // fs.promises.watch is the async-iterator form, not a promise of a watcher.
         fs.promises.watch = function(target, options) { return watch(target, options); };
-        for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'readdir', 'mkdir', 'unlink', 'rename', 'copyFile', 'access', 'rm']) {
+        fs.promises.constants = fs.constants;
+        fs.promises.open = function(target, flags, mode) {
+          return Promise.resolve().then(function(){
+            const fd = fs.openSync(target, flags === undefined ? 'r' : flags, mode);
+            return new FileHandle(fd, target);
+          });
+        };
+        fs.promises.opendir = function(target, options) { return fs.opendir(target, options); };
+        fs.promises.cp = function(from, to, options) {
+          return Promise.resolve().then(function(){ return cpSync(from, to, options); });
+        };
+        fs.promises.statfs = function(target) {
+          return Promise.resolve().then(function(){ return fs.statfsSync(target); });
+        };
+        fs.promises.glob = fs.glob;
+        // Everything with a *Sync twin gets promisified, which is what node's promises API is.
+        for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'readdir',
+                            'mkdir', 'unlink', 'rename', 'copyFile', 'access', 'rm', 'rmdir',
+                            'realpath', 'readlink', 'symlink', 'link', 'chmod', 'chown',
+                            'lchmod', 'lchown', 'utimes', 'lutimes', 'mkdtemp', 'truncate']) {
           fs.promises[name] = function(...args) {
             return new Promise((resolve, reject) => {
               try { resolve(fs[name + 'Sync'].apply(null, args)); }
@@ -3173,6 +3730,39 @@ final class NodeEngine: @unchecked Sendable {
       };
 
       coreFactories.assert = function() {
+        // CallTracker and partialDeepStrictEqual, from the audit. CallTracker is how node's
+        // own tests assert a function ran N times; partialDeepStrictEqual checks a subset.
+        function CallTracker() {
+          const tracked = [];
+          this.calls = function(fn, exact) {
+            if (typeof fn === 'number') { exact = fn; fn = function(){}; }
+            if (exact === undefined) exact = 1;
+            const record = { fn: fn, exact: exact, actual: 0 };
+            tracked.push(record);
+            return function() { record.actual += 1; return fn.apply(this, arguments); };
+          };
+          this.report = function() {
+            return tracked.filter(r => r.actual !== r.exact).map(r => ({
+              message: 'Expected the function to be called ' + r.exact + ' times but it was called ' + r.actual + ' times.',
+              actual: r.actual, expected: r.exact, operator: r.fn.name || 'calls',
+            }));
+          };
+          this.getCalls = function(fn) { return tracked.filter(r => r.fn === fn); };
+          this.verify = function() {
+            const problems = this.report();
+            if (problems.length) throw Object.assign(new Error(problems.map(p => p.message).join('\n')),
+                                                     { code: 'ERR_ASSERTION' });
+          };
+        }
+        function partialMatch(actual, expected) {
+          if (expected === null || typeof expected !== 'object') return actual === expected;
+          if (actual === null || typeof actual !== 'object') return false;
+          if (Array.isArray(expected)) {
+            if (!Array.isArray(actual) || actual.length < expected.length) return false;
+            return expected.every((item, index) => partialMatch(actual[index], item));
+          }
+          return Object.keys(expected).every(key => partialMatch(actual[key], expected[key]));
+        }
         function assert(value, message) {
           if (!value) throw new Error(message || 'Assertion failed');
         }
@@ -3202,6 +3792,15 @@ final class NodeEngine: @unchecked Sendable {
           if (!regexp.test(value)) throw new Error(message || (value + ' does not match ' + regexp));
         };
         assert.strict = assert;
+        assert.CallTracker = CallTracker;
+        assert.Assert = function Assert(){ return assert; };
+        assert.partialDeepStrictEqual = function(actual, expected, message) {
+          if (!partialMatch(actual, expected)) {
+            throw Object.assign(new Error(message || 'Expected actual to partially match expected'),
+                                { code: 'ERR_ASSERTION', actual: actual, expected: expected,
+                                  operator: 'partialDeepStrictEqual' });
+          }
+        };
         return assert;
       };
 
@@ -3664,6 +4263,27 @@ final class NodeEngine: @unchecked Sendable {
         Stream.Stream = Stream;
         Stream.finished = finished;
         Stream.pipeline = pipeline;
+        // Helpers real libraries reach for: `compose` chains streams, `duplexPair` is how
+        // in-memory pipes get built, and the underscore ones are node internals that
+        // readable-stream and its dependents call directly.
+        Stream.compose = function() {
+          const parts = Array.prototype.slice.call(arguments);
+          if (!parts.length) throw new Error('stream.compose needs at least one stream');
+          let current = parts[0];
+          for (let i = 1; i < parts.length; i++) current = current.pipe(parts[i]);
+          return current;
+        };
+        Stream.duplexPair = function() {
+          const left = new Duplex({ read: function(){}, write: function(chunk, encoding, callback){ right.push(chunk); callback(); } });
+          const right = new Duplex({ read: function(){}, write: function(chunk, encoding, callback){ left.push(chunk); callback(); } });
+          return [left, right];
+        };
+        Stream.isDisturbed = function(stream) {
+          return !!(stream && (stream._everFlowed || stream._endEmitted || stream.destroyed));
+        };
+        Stream._isArrayBufferView = function(value) { return ArrayBuffer.isView(value); };
+        Stream._isUint8Array = function(value) { return value instanceof Uint8Array; };
+        Stream._uint8ArrayToBuffer = function(value) { return Buffer.from(value); };
         Stream.promises = {
           pipeline: function() {
             const parts = Array.prototype.slice.call(arguments);
@@ -3682,6 +4302,7 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories.constants = function() { return {}; };
       coreFactories.querystring = function() {
         return {
+          unescapeBuffer: function(text) { return Buffer.from(decodeURIComponent(String(text))); },
           parse: function(text) {
             const result = {};
             for (const pair of String(text).split('&')) {
@@ -3706,12 +4327,45 @@ final class NodeEngine: @unchecked Sendable {
           },
           fileURLToPath: function(url) { return String(url).replace('file://', ''); },
           pathToFileURL: function(p) { return { href: 'file://' + p }; },
+          URLSearchParams: globalThis.URLSearchParams,
+          // The legacy url API. Deprecated in node, still imported by older packages.
+          Url: function Url() {},
+          format: function(input) {
+            if (typeof input === 'string') return input;
+            if (input && input.href) return input.href;
+            const parts = input || {};
+            return (parts.protocol || '') + '//' + (parts.host || parts.hostname || '') +
+                   (parts.pathname || '') + (parts.search || '') + (parts.hash || '');
+          },
+          resolve: function(from, to) {
+            try { return new URL(to, from).href; } catch (error) { return to; }
+          },
+          resolveObject: function(from, to) {
+            try { return new URL(to, from); } catch (error) { return null; }
+          },
+          // IDNA needs a Unicode table we do not carry; ASCII names pass through unchanged,
+          // and a non-ASCII one says so rather than returning mojibake.
+          domainToASCII: function(name) {
+            const text = String(name);
+            if (/^[\x00-\x7F]*$/.test(text)) return text.toLowerCase();
+            return '';
+          },
+          domainToUnicode: function(name) { return String(name); },
+          fileURLToPathBuffer: function(url) { return Buffer.from(String(url).replace('file://', '')); },
+          urlToHttpOptions: function(url) {
+            return { protocol: url.protocol, hostname: url.hostname, port: url.port,
+                     path: (url.pathname || '') + (url.search || ''), href: url.href };
+          },
         };
       };
       coreFactories.process = function() { return process; };
       coreFactories.timers = function() {
         return { setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval,
-                 clearInterval: clearInterval, setImmediate: setImmediate, clearImmediate: clearImmediate };
+                 clearInterval: clearInterval, setImmediate: setImmediate, clearImmediate: clearImmediate,
+                 // node hangs the promises API off the module too, not just 'timers/promises'.
+                 promises: coreRequire('timers/promises'),
+                 active: function(){}, unenroll: function(){}, enroll: function(){},
+                 _unrefActive: function(){} };
       };
       coreFactories['timers/promises'] = function() {
         return {
@@ -3746,6 +4400,22 @@ final class NodeEngine: @unchecked Sendable {
           constants: { MAX_LENGTH: 0x7fffffff, MAX_STRING_LENGTH: 0x1fffffe8 },
           atob: globalThis.atob,
           btoa: globalThis.btoa,
+          // These live as globals already; node exports them from the module too, and a
+          // library that imports them from here would otherwise get undefined.
+          Blob: globalThis.Blob,
+          File: globalThis.File,
+          kStringMaxLength: 0x1fffffe8,
+          isUtf8: function(value) {
+            try { return Buffer.from(value).toString('utf8').indexOf('\uFFFD') < 0; }
+            catch (error) { return false; }
+          },
+          isAscii: function(value) {
+            const bytes = Buffer.from(value);
+            for (let i = 0; i < bytes.length; i++) if (bytes[i] > 127) return false;
+            return true;
+          },
+          resolveObjectURL: function() { return undefined; },
+          transcode: function(source, from, to) { return Buffer.from(source.toString(from), to); },
         };
       };
 
@@ -4852,6 +5522,9 @@ final class NodeEngine: @unchecked Sendable {
           createServer: defaultProtocol === 'https:'
             ? function() { throw new Error('https servers are not available: TLS needs a handshake we cannot put on a raw socket (http.createServer is real)'); }
             : function(options, handler) { return new Server(options, handler); },
+          maxHeaderSize: 16384,
+          setMaxIdleHTTPParsers: function(){},
+          _connectionListener: function(socket) { serveConnection(this, socket); },
           STATUS_CODES: STATUS_CODES,
           METHODS: ['ACL', 'BIND', 'CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'GET', 'HEAD',
                     'LINK', 'LOCK', 'M-SEARCH', 'MERGE', 'MKACTIVITY', 'MKCALENDAR', 'MKCOL',
@@ -4956,6 +5629,9 @@ final class NodeEngine: @unchecked Sendable {
             if (kind === 'AAAA') return resolveFamily(host, 6, callback);
             return unsupported(kind)(host, callback);
           },
+          resolveAny: unsupported('Any'), resolveCaa: unsupported('Caa'),
+          resolveTlsa: unsupported('Tlsa'),
+          lookupService: unsupported('Service'),
           resolveMx: unsupported('Mx'), resolveTxt: unsupported('Txt'),
           resolveSrv: unsupported('Srv'), resolveNs: unsupported('Ns'),
           resolveCname: unsupported('Cname'), resolvePtr: unsupported('Ptr'),
@@ -4966,7 +5642,17 @@ final class NodeEngine: @unchecked Sendable {
           setDefaultResultOrder: function() {},
           getDefaultResultOrder: function() { return 'verbatim'; },
           ADDRCONFIG: 1024, V4MAPPED: 2048, ALL: 4096,
+          // node exposes c-ares' error names as string constants; code compares
+          // `error.code === dns.NOTFOUND` rather than typing the literal.
           NOTFOUND: 'ENOTFOUND', NODATA: 'ENODATA', BADFAMILY: 'EBADFAMILY',
+          FORMERR: 'EFORMERR', SERVFAIL: 'ESERVFAIL', NOTIMP: 'ENOTIMP',
+          REFUSED: 'EREFUSED', BADQUERY: 'EBADQUERY', BADNAME: 'EBADNAME',
+          BADRESP: 'EBADRESP', CONNREFUSED: 'ECONNREFUSED', TIMEOUT: 'ETIMEOUT',
+          EOF: 'EOF', FILE: 'EFILE', NOMEM: 'ENOMEM', DESTRUCTION: 'EDESTRUCTION',
+          BADSTR: 'EBADSTR', BADFLAGS: 'EBADFLAGS', NONAME: 'ENONAME',
+          BADHINTS: 'EBADHINTS', NOTINITIALIZED: 'ENOTINITIALIZED',
+          LOADIPHLPAPI: 'ELOADIPHLPAPI', ADDRGETNETWORKPARAMS: 'EADDRGETNETWORKPARAMS',
+          CANCELLED: 'ECANCELLED',
         };
         dns.promises = {
           lookup: promisify(lookup, 2),
@@ -4976,7 +5662,8 @@ final class NodeEngine: @unchecked Sendable {
           getServers: function() { return Promise.resolve([]); },
         };
         for (const name of ['resolveMx', 'resolveTxt', 'resolveSrv', 'resolveNs', 'resolveCname',
-                            'resolvePtr', 'resolveSoa', 'resolveNaptr', 'reverse']) {
+                            'resolvePtr', 'resolveSoa', 'resolveNaptr', 'reverse',
+                            'resolveAny', 'resolveCaa', 'resolveTlsa', 'lookupService']) {
           dns.promises[name] = promisify(dns[name], 1);
         }
         // node's Resolver class, for libraries that construct their own.
@@ -5454,6 +6141,15 @@ final class NodeEngine: @unchecked Sendable {
           Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4,
           Z_BLOCK: 5, Z_TREES: 6, Z_OK: 0, Z_STREAM_END: 1, Z_DEFAULT_STRATEGY: 0,
           Z_DEFAULT_WINDOWBITS: 15, Z_DEFAULT_MEMLEVEL: 8, Z_DEFAULT_CHUNK: 16384,
+          // The error codes and bounds, from zlib.h — libraries compare against these by name
+          // when reporting why a stream failed.
+          Z_NEED_DICT: 2, Z_ERRNO: -1, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
+          Z_MEM_ERROR: -4, Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6,
+          Z_FILTERED: 1, Z_HUFFMAN_ONLY: 2, Z_RLE: 3, Z_FIXED: 4,
+          Z_MIN_WINDOWBITS: 8, Z_MAX_WINDOWBITS: 15, Z_MIN_CHUNK: 64, Z_MAX_CHUNK: Infinity,
+          Z_MIN_MEMLEVEL: 1, Z_MAX_MEMLEVEL: 9, Z_MIN_LEVEL: -1, Z_MAX_LEVEL: 9,
+          Z_DEFAULT_LEVEL: -1, ZLIB_VERNUM: 0x12f0,
+          DEFLATE: 1, INFLATE: 2, GZIP: 3, GUNZIP: 4, DEFLATERAW: 5, INFLATERAW: 6, UNZIP: 7,
         });
         Object.assign(zlib, zlib.constants);   // node mirrors the constants on the module
         return zlib;
@@ -5768,6 +6464,28 @@ final class NodeEngine: @unchecked Sendable {
           createServer: function(options, handler) { return new Server(options, handler); },
           createConnection: connect,
           connect: connect,
+          // From the audit. BlockList is a real filter (used by servers to refuse ranges);
+          // the autoSelectFamily knobs describe our behavior honestly — we resolve with
+          // AF_UNSPEC and connect the first address, which is not Happy Eyeballs.
+          BlockList: function BlockList() {
+            const rules = [];
+            this.addAddress = function(address){ rules.push(String(address)); };
+            this.addRange = function(start, end){ rules.push(String(start) + '-' + String(end)); };
+            this.addSubnet = function(net, prefix){ rules.push(String(net) + '/' + prefix); };
+            this.check = function(address){ return rules.indexOf(String(address)) >= 0; };
+            Object.defineProperty(this, 'rules', { get: function(){ return rules.slice(); } });
+          },
+          SocketAddress: function SocketAddress(options) {
+            options = options || {};
+            this.address = options.address || '127.0.0.1';
+            this.port = options.port || 0;
+            this.family = options.family || 'ipv4';
+            this.flowlabel = options.flowlabel || 0;
+          },
+          getDefaultAutoSelectFamily: function(){ return false; },
+          setDefaultAutoSelectFamily: function(){},
+          getDefaultAutoSelectFamilyAttemptTimeout: function(){ return 0; },
+          setDefaultAutoSelectFamilyAttemptTimeout: function(){},
           isIPv4: isIPv4,
           isIPv6: isIPv6,
           isIP: function(text) { return isIPv4(text) ? 4 : isIPv6(text) ? 6 : 0; },
