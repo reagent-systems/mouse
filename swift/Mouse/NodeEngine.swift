@@ -2481,8 +2481,15 @@ final class NodeEngine: @unchecked Sendable {
           fileDescriptors[fd] = { path: path, flags: flags, position: 0 };
           return fd;
         };
-        fs.writeSync = function(fd, data) {
-          const buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+        // writeSync(fd, buffer[, offset[, length[, position]]]) — honor the slice, or a
+        // program writing part of a scratch buffer would get the whole thing on disk.
+        fs.writeSync = function(fd, data, offset, length, position) {
+          let buffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+          if (Buffer.isBuffer(data) && typeof offset === 'number') {
+            const from = offset | 0;
+            const count = typeof length === 'number' ? length | 0 : buffer.length - from;
+            buffer = buffer.slice(from, from + count);
+          }
           if (fd === 1) { bridge.stdout(buffer.toString()); return buffer.length; }
           if (fd === 2) { bridge.stderr(buffer.toString()); return buffer.length; }
           fs.appendFileSync(descriptor(fd).path, buffer);
@@ -2499,8 +2506,82 @@ final class NodeEngine: @unchecked Sendable {
         };
         fs.closeSync = function(fd) { delete fileDescriptors[fd]; };
         fs.fsyncSync = function() {};
+        fs.fdatasyncSync = function() {};
         fs.fstatSync = function(fd) { return fs.statSync(descriptor(fd).path); };
-        fs.close = function(fd, callback) { fs.closeSync(fd); if (callback) setImmediate(callback); };
+        fs.ftruncateSync = function(fd, length) { fs.truncateSync(descriptor(fd).path, length); };
+        fs.truncateSync = function(file, length) {
+          const target = resolvePath(file);
+          const content = fs.readFileSync(target);
+          fs.writeFileSync(target, content.slice(0, length === undefined ? 0 : length | 0));
+        };
+        // Times and ownership aren't tracked by the workspace bridge — accept and ignore,
+        // like chmod. (tar extract calls these; failing would abort an otherwise fine
+        // extraction. Recorded in system.md rather than silently pretended to work.)
+        fs.utimesSync = function() {};
+        fs.futimesSync = function() {};
+        fs.lutimesSync = function() {};
+        fs.chownSync = function() {};
+        fs.fchownSync = function() {};
+        fs.lchownSync = function() {};
+        fs.fchmodSync = function() {};
+        fs.lchmodSync = function() {};
+        fs.mkdtempSync = function(prefix) {
+          const suffix = Math.floor(Math.random() * 0x100000000).toString(36)
+            + Math.floor(Math.random() * 0x100000000).toString(36);
+          const dir = String(prefix) + suffix.slice(0, 6);
+          fs.mkdirSync(dir);
+          return dir;
+        };
+        // Symlinks have no bridge primitive: say so instead of pretending.
+        function unsupported(name, code) {
+          return function() {
+            const error = new Error(code + ": " + name + " is not supported on this filesystem");
+            error.code = code;
+            throw error;
+          };
+        }
+        fs.symlinkSync = unsupported('symlink', 'EPERM');
+        fs.linkSync = unsupported('link', 'EPERM');
+        fs.readlinkSync = function(file) {
+          // node throws EINVAL when the target exists but isn't a link — ours never are.
+          const target = resolvePath(file);
+          const code = fs.existsSync(target) ? 'EINVAL' : 'ENOENT';
+          const error = new Error(code + ": " + (code === 'EINVAL' ? 'invalid argument' : 'no such file or directory') + ", readlink '" + file + "'");
+          error.code = code;
+          throw error;
+        };
+        // Every remaining sync primitive gets its ASYNC callback twin, mechanically: node's
+        // async forms are (…args, callback) and hand (error, value). tar and friends use the
+        // callback forms (fs.open/read/close/lstat/readlink) as much as the sync ones.
+        for (const name of ['open', 'read', 'write', 'close', 'fstat', 'fsync', 'fdatasync',
+                            'ftruncate', 'truncate', 'chmod', 'fchmod', 'lchmod', 'chown',
+                            'fchown', 'lchown', 'utimes', 'futimes', 'lutimes', 'mkdtemp',
+                            'readlink', 'symlink', 'link', 'rmdir', 'realpath']) {
+          if (fs[name] || !fs[name + 'Sync']) continue;
+          fs[name] = (function(sync) {
+            return function(...args) {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : function(){};
+              setImmediate(function() {
+                try { callback(null, sync.apply(fs, args)); }
+                catch (error) { callback(error); }
+              });
+            };
+          })(fs[name + 'Sync']);
+        }
+        // read/write hand the BUFFER back as the third callback argument (node's contract:
+        // (err, bytesRead, buffer) / (err, bytesWritten, buffer)) — the generic wrapper
+        // above only passes two, and callers like tar read that third slot.
+        for (const name of ['read', 'write']) {
+          const sync = fs[name + 'Sync'];
+          fs[name] = function(...args) {
+            const callback = typeof args[args.length - 1] === 'function' ? args.pop() : function(){};
+            const buffer = args[1];
+            setImmediate(function() {
+              try { callback(null, sync.apply(fs, args), buffer); }
+              catch (error) { callback(error); }
+            });
+          };
+        }
         // File streams ride the real stream module: a read stream pushes 64 KiB chunks
         // through the event loop; a write stream appends per chunk after an open truncate.
         fs.createReadStream = function(file, options) {

@@ -485,6 +485,30 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   (`r.close` on an internal object, inside its WriteEntry path) — recorded
   as the next symptom rather than guessed at. 52 node fixtures, full
   battery green
+- **The fs ASYNC API existed only in fragments — 29 functions missing.**
+  Chasing tar's next symptom, a direct diff of our `fs` against real
+  node's (both enumerated at runtime) showed the callback forms almost
+  entirely absent: `open`, `read`, `write`, `close`, `readlink`, `chmod`,
+  `chown`, `utimes`, `truncate`, `ftruncate`, `mkdtemp`, `fsync`,
+  `fdatasync`, `rmdir` and more. Filled systematically: new sync
+  primitives (`truncateSync`/`ftruncateSync` via read+rewrite,
+  `mkdtempSync`, and honest refusals — `symlinkSync`/`linkSync` throw
+  EPERM, `readlinkSync` throws EINVAL/ENOENT as node does for a
+  non-symlink, since the workspace bridge has no link primitive), then
+  every async twin generated mechanically from its `*Sync` (node's
+  `(…args, callback)` → `(error, value)` contract), with `read`/`write`
+  special-cased to hand the BUFFER back as the third callback argument as
+  node does. `writeSync` now honors `offset`/`length` so a program writing
+  a slice of a scratch buffer doesn't get the whole buffer on disk.
+  Times/ownership calls (`utimes`, `chown`, `fchmod`…) accept and ignore —
+  the bridge doesn't track them, and failing would abort otherwise-fine
+  extractions; noted here rather than pretended. Fixture
+  `fs-async-callbacks` pins the open→write→close→read round trip, the
+  three-argument callbacks, truncate, mkdtemp, and the readlink error code
+  against real node. tar STILL fails, now inside its own stream teardown
+  (guarded in minipass, so elsewhere in its bundle) — the fs gap it
+  revealed is fixed and independently valuable. 53 node fixtures, PHASE F,
+  TTY, e2e, Swift 6 build — green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
