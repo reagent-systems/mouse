@@ -100,6 +100,7 @@ so a TUI navigates and edits.
 | **Phase G — RSA on SecKey** | `NodeKeys.swift`: RSA sign/verify (PKCS1v15 and PSS), OAEP and PKCS1 encryption, and key generation, through Security framework — plus the small DER reader/writer that moves between SecKey's PKCS#1 and node's PKCS#8/SPKI. Cross-engine both ways, including re-signing an imported key to identical bytes (PKCS1v15 is deterministic) and opening the other engine's OAEP ciphertext. **`jsonwebtoken` now covers RS256 and PS256** as well as ES256 and HS256 — the four algorithms real JWTs actually use |
 | **Phase G — connection pooling** | A real keep-alive `Agent`: idle sockets are pooled per host:port, reused LIFO, and **unref'd while idle** so a warm pool never holds a program open. Four sequential requests now travel over one connection, the same count node reports — the last recorded divergence in the HTTP client is closed. Pooling immediately exposed a server-side gap it was right to expose: `keepAliveTimeout` was stored and never enforced, so an idle connection was never dropped and `server.close()` waited on a peer with nothing left to say |
 | **Phase G — streaming responses** | The URLSession transport moved to its DELEGATE form, so `fetch` and `https.request` deliver the head first and then each chunk as it lands. Server-sent events now arrive as they are sent — three events half a second apart read as three reads spread over time, matching real node — which is the case that matters most here: **an agent CLI streaming tokens from an API**. `Response.body` is a live `ReadableStream`; `text()`/`json()` drain it once |
+| **Phase G — the `WebSocket` global, and `wss://`** | The standard `WebSocket` (which node 22 also exposes) on URLSession's WebSocket task — the one path to **TLS WebSockets** here, since `wss://` needs a handshake we cannot put on a raw socket. Text and binary frames, `binaryType`, `addEventListener`, clean close codes, and `CloseEvent`/`MessageEvent`. Behaves exactly as node 22's does against the same `ws` server. The `ws` PACKAGE keeps riding our own sockets for `ws://`, in both directions |
 
 ### Verification performed
 
@@ -1009,6 +1010,22 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **`wss://` is reachable after all, through the system's own WebSocket task.**
+  I had written this off as structural: TLS needs a handshake we cannot put on a
+  raw socket, so the `ws` package (which builds its client on `http.request`)
+  can only do `ws://`. But URLSession has a native WebSocket task, and node 22
+  exposes a standard `WebSocket` global — so that global now rides it, which
+  brings encrypted WebSockets to any code using the standard API. Text and
+  binary frames, `binaryType` (`arraybuffer` or Buffer), `addEventListener`, the
+  close code and `wasClean`, plus `CloseEvent`/`MessageEvent`.
+  One ordering detail cost a fixture and was worth the fix: I first detected
+  `open` with a ping round-trip, which RACES the first inbound frame — a server
+  that greets immediately made `message` arrive before `open`, where node always
+  fires `open` first. It now comes from the delegate's handshake callback, and
+  messages arriving before that are held and released in order, so the guarantee
+  holds even against an instant greeting.
+  Verified against node 22's own global talking to the same `ws` server: same
+  events, same order, same close code.
 - **Streaming responses, the last buffering left in the stack.** `fetch` and
   `https.request` rode URLSession's completion-handler API, which hands over a
   FINISHED body — so an agent CLI reading server-sent events got every token at
@@ -1170,9 +1187,11 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   the fixture settles first rather than having us invent an event.
 - **One divergence left in the HTTP client, and it is structural.**
   `https.request` stays on URLSession, because TLS is a handshake we cannot put
-  on a raw socket. What that costs is now only the UPGRADE path — there is no
-  101 handover through URLSession — since responses stream and connections pool
-  on both transports. The one-connection-per-request difference that used to sit
+  on a raw socket. What that costs is only the 101 handover for a library that
+  builds its own protocol on `http.request` — the `ws` package over `wss://`,
+  specifically. Encrypted WebSockets themselves ARE available through the
+  standard `WebSocket` global (URLSession's own task), and responses stream and
+  connections pool on both transports. The one-connection-per-request difference that used to sit
   here is gone (the agent pools, and the fixture counts connections), and so is
   the complete-body limitation (the transport streams).
 - **A divergence recorded rather than papered over.** Node reports a
@@ -1584,7 +1603,7 @@ D  web toolchain          tsc, bundling, Preview container     PARTLY DONE — t
                           watches on the engine (see §0); bundling + Preview remain
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, DSA/DH, worker_threads, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, DSA/DH, worker_threads, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

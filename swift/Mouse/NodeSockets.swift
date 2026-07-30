@@ -419,6 +419,10 @@ final class SocketTable: @unchecked Sendable {
         deliver { handler(id, event) }
     }
 
+    /// An id from the same sequence, for a handle the table does not own (the WebSocket
+    /// global's tasks live in the engine but must not collide with socket ids).
+    func claimExternalID() -> Int { claimID() }
+
     private func claimID() -> Int {
         idLock.lock()
         defer { idLock.unlock() }

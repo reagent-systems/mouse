@@ -34,7 +34,8 @@ carry breaking changes.
   means **express apps serve requests from the phone** — and the HTTP client
   moved onto raw sockets too, so response bodies stream in as they arrive and
   protocol upgrades work: **real WebSockets** through the genuine `ws`
-  package, in both directions. **File watching is real too** (`fs.watch` on
+  package, in both directions — plus the standard `WebSocket` global, which
+  reaches `wss://` endpoints. **File watching is real too** (`fs.watch` on
   kqueue), so `chokidar` — what every `--watch` mode is built on — reports the
   same events as under real node. Full-screen programs get a real TTY: keystrokes,
   arrows/F-keys/Ctrl-combos, bracketed paste, resize as `SIGWINCH`, and

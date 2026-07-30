@@ -112,6 +112,15 @@ final class NodeEngine: @unchecked Sendable {
             handlesLock.lock(); openHandles -= 1; handlesLock.unlock()
             wakeup.signal()
         })
+    /// Live `URLSessionWebSocketTask`s by id — the WebSocket global's handles.
+    private var webSocketTasks: [Int: URLSessionWebSocketTask] = [:]
+    private func finishWebSocket(_ id: Int) {
+        enqueueJob { [weak self] in
+            guard let self, webSocketTasks[id] != nil else { return }
+            webSocketTasks[id] = nil
+            outstanding -= 1
+        }
+    }
     private var watchersUsed = false
     private var socketsUsed = false
     private var hasOpenHandles: Bool {
@@ -630,6 +639,71 @@ final class NodeEngine: @unchecked Sendable {
             session.dataTask(with: request).resume()
         }
         expose("httpStream", httpStream)
+
+        // -- WebSocket, the one TLS-capable path ------------------------------------------
+        // `ws://` works through our own sockets (the `ws` package proves it), but `wss://`
+        // needs a TLS handshake we cannot put on a raw socket. URLSession has a native
+        // WebSocket task, so the standard `WebSocket` global rides that — which is also what
+        // node 22 exposes. Frames, masking and the close handshake belong to the system here.
+        let wsOpen: @convention(block) (String, [String], JSValue) -> Int32 = { [weak self] urlText, protocols, callback in
+            guard let self, let url = URL(string: urlText) else { return 0 }
+            let carried = Carried(callback)
+            let deliver: @Sendable (String, Any) -> Void = { [weak self] event, payload in
+                self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
+            }
+            let id = sockets.claimExternalID()
+            outstanding += 1
+            // `open` comes from the DELEGATE's handshake callback, not from a ping round-trip:
+            // a ping races the first inbound frame, so the server's greeting could arrive
+            // before the open event — node fires open first, always. The gate below also holds
+            // messages until open has been delivered, so the order cannot invert.
+            let opener = WebSocketOpener(deliver: deliver)
+            let session = URLSession(configuration: .default, delegate: opener, delegateQueue: nil)
+            let task = protocols.isEmpty ? session.webSocketTask(with: url)
+                                         : session.webSocketTask(with: url, protocols: protocols)
+            opener.session = session
+            webSocketTasks[id] = task
+            // A receive call yields ONE message and must be reissued — the loop is the read
+            // side, and it ends when the socket does.
+            @Sendable func receiveNext() {
+                task.receive { [weak self] result in
+                    switch result {
+                    case let .success(message):
+                        switch message {
+                        case let .data(data): opener.message(["binary": true, "data": data.base64EncodedString()])
+                        case let .string(text): opener.message(["binary": false, "data": text])
+                        @unknown default: break
+                        }
+                        receiveNext()
+                    case let .failure(error):
+                        // A normal close arrives here as an error too; the close event carries
+                        // whichever code the peer sent.
+                        let code = task.closeCode == .invalid ? 1006 : task.closeCode.rawValue
+                        deliver("close", ["code": code, "reason": error.localizedDescription])
+                        self?.finishWebSocket(id)
+                    }
+                }
+            }
+            task.resume()
+            receiveNext()
+            return Int32(id)
+        }
+        let wsSend: @convention(block) (Int32, String, Bool) -> Void = { [weak self] id, payload, isText in
+            guard let task = self?.webSocketTasks[Int(id)] else { return }
+            let message: URLSessionWebSocketTask.Message = isText
+                ? .string(payload)
+                : .data(Data(base64Encoded: payload) ?? Data())
+            task.send(message) { _ in }
+        }
+        let wsClose: @convention(block) (Int32, Int32, String) -> Void = { [weak self] id, code, reason in
+            guard let self, let task = webSocketTasks[Int(id)] else { return }
+            let closeCode = URLSessionWebSocketTask.CloseCode(rawValue: Int(code)) ?? .normalClosure
+            task.cancel(with: closeCode, reason: reason.data(using: .utf8))
+            finishWebSocket(Int(id))
+        }
+        expose("wsOpen", wsOpen)
+        expose("wsSend", wsSend)
+        expose("wsClose", wsClose)
 
         // -- net: real TCP through SocketTable ---------------------------------------------
         // One dispatcher shape for every socket: `callback(event, payload)`. The JS side
@@ -5123,6 +5197,107 @@ final class NodeEngine: @unchecked Sendable {
         static error() { return new Response(null, { status: 0, type: 'error' }); }
         static redirect(url, status) { return new Response(null, { status: status || 302, headers: { location: String(url) } }); }
       };
+      // ---- the WebSocket global -------------------------------------------------------
+      // node 22 exposes `WebSocket` globally, and browser-shaped libraries reach for it. Ours
+      // rides URLSession's WebSocket task, which is the ONLY path to `wss://` on this device —
+      // TLS is a handshake we cannot put on a raw socket. Plain `ws://` also works through the
+      // `ws` package on our own sockets; this is the standard API, and the encrypted one.
+      globalThis.WebSocket = class WebSocket {
+        constructor(url, protocols) {
+          this.url = String(url);
+          this.readyState = WebSocket.CONNECTING;
+          this.binaryType = 'blob';       // the WHATWG default; node uses 'nodebuffer'
+          this.protocol = '';
+          this.extensions = '';
+          this.bufferedAmount = 0;
+          this.onopen = null;
+          this.onmessage = null;
+          this.onclose = null;
+          this.onerror = null;
+          this._listeners = {};
+          const list = protocols === undefined ? []
+            : (Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]);
+          const self = this;
+          this._id = bridge.wsOpen(this.url, list, function(event, payload) {
+            if (event === 'open') {
+              self.readyState = WebSocket.OPEN;
+              self._fire('open', { type: 'open' });
+              return;
+            }
+            if (event === 'message') {
+              const data = payload.binary
+                ? (self.binaryType === 'arraybuffer'
+                    ? (function(b){ return b.buffer.slice(b.byteOffset, b.byteOffset + b.length); })(Buffer.from(payload.data, 'base64'))
+                    : Buffer.from(payload.data, 'base64'))
+                : payload.data;
+              self._fire('message', { type: 'message', data: data });
+              return;
+            }
+            if (event === 'error') {
+              self._fire('error', { type: 'error', message: payload });
+              return;
+            }
+            if (event === 'close') {
+              self.readyState = WebSocket.CLOSED;
+              self._fire('close', { type: 'close', code: payload.code, reason: payload.reason,
+                                    wasClean: payload.code === 1000 });
+            }
+          });
+          if (!this._id) {
+            throw Object.assign(new TypeError('Invalid WebSocket URL: ' + this.url), { code: 'ERR_INVALID_URL' });
+          }
+        }
+        _fire(name, event) {
+          const handler = this['on' + name];
+          if (typeof handler === 'function') handler.call(this, event);
+          for (const listener of (this._listeners[name] || []).slice()) listener.call(this, event);
+        }
+        addEventListener(name, listener) {
+          (this._listeners[name] = this._listeners[name] || []).push(listener);
+        }
+        removeEventListener(name, listener) {
+          const list = this._listeners[name] || [];
+          const at = list.indexOf(listener);
+          if (at >= 0) list.splice(at, 1);
+        }
+        send(data) {
+          if (this.readyState !== WebSocket.OPEN) {
+            throw Object.assign(new Error('WebSocket is not open'), { code: 'ERR_WEBSOCKET_NOT_OPEN' });
+          }
+          if (typeof data === 'string') { bridge.wsSend(this._id, data, true); return; }
+          const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data.buffer ? new Uint8Array(data.buffer) : data);
+          bridge.wsSend(this._id, bytes.toString('base64'), false);
+        }
+        close(code, reason) {
+          if (this.readyState === WebSocket.CLOSED || this.readyState === WebSocket.CLOSING) return;
+          this.readyState = WebSocket.CLOSING;
+          bridge.wsClose(this._id, code === undefined ? 1000 : Number(code), String(reason || ''));
+        }
+        ping() {}   // node's extension; the system task keeps the connection alive itself
+      };
+      globalThis.WebSocket.CONNECTING = 0;
+      globalThis.WebSocket.OPEN = 1;
+      globalThis.WebSocket.CLOSING = 2;
+      globalThis.WebSocket.CLOSED = 3;
+      // The event classes node exports alongside it.
+      globalThis.CloseEvent = class CloseEvent {
+        constructor(type, options) {
+          options = options || {};
+          this.type = type;
+          this.code = options.code === undefined ? 1000 : options.code;
+          this.reason = options.reason || '';
+          this.wasClean = !!options.wasClean;
+        }
+      };
+      globalThis.MessageEvent = class MessageEvent {
+        constructor(type, options) {
+          options = options || {};
+          this.type = type;
+          this.data = options.data;
+          this.origin = options.origin || '';
+          this.lastEventId = options.lastEventId || '';
+        }
+      };
       globalThis.navigator = globalThis.navigator || {
         userAgent: 'Mouse/1.0 (iOS; JavaScriptCore)',
         platform: 'iPhone',
@@ -6173,6 +6348,9 @@ final class NodeEngine: @unchecked Sendable {
             ? function() { throw new Error('https servers are not available: TLS needs a handshake we cannot put on a raw socket (http.createServer is real)'); }
             : function(options, handler) { return new Server(options, handler); },
           maxHeaderSize: 16384,
+          WebSocket: globalThis.WebSocket,
+          CloseEvent: globalThis.CloseEvent,
+          MessageEvent: globalThis.MessageEvent,
           setMaxIdleHTTPParsers: function(){},
           _connectionListener: function(socket) { serveConnection(this, socket); },
           STATUS_CODES: STATUS_CODES,
@@ -7855,5 +8033,39 @@ private final class StreamCollector: NSObject, URLSessionDataDelegate, @unchecke
         finished()
         session.finishTasksAndInvalidate()
         self.session = nil
+    }
+}
+
+/// The handshake side of a WebSocket. `open` must be reported when URLSession says the upgrade
+/// completed — a ping round-trip races the first inbound frame, and node fires `open` before
+/// any message, always. Messages that arrive before that callback are held here and released
+/// in order, so the guarantee holds even when the peer greets instantly.
+private final class WebSocketOpener: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    private let deliver: (String, Any) -> Void
+    private let lock = NSLock()
+    private var opened = false
+    private var held: [Any] = []
+    var session: URLSession?
+
+    init(deliver: @escaping (String, Any) -> Void) {
+        self.deliver = deliver
+    }
+
+    func message(_ payload: Any) {
+        lock.lock()
+        if !opened { held.append(payload); lock.unlock(); return }
+        lock.unlock()
+        deliver("message", payload)
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                    didOpenWithProtocol protocolName: String?) {
+        lock.lock()
+        opened = true
+        let pending = held
+        held = []
+        lock.unlock()
+        deliver("open", protocolName ?? "")
+        for payload in pending { deliver("message", payload) }
     }
 }

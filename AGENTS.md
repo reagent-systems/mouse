@@ -168,6 +168,14 @@ watch mode must compile, detect an edit through our watcher, recompile, and
 report the same diagnostics as real node. That last one is the phase-D loop
 (edit → recompile → diagnostics) and the heaviest consumer of `fs.watch` there
 is; if it breaks, suspect the watcher or `Stats` before suspecting tsc.
+The `WebSocket` GLOBAL rides URLSession's WebSocket task — the only TLS-capable
+path here — while the `ws` PACKAGE rides our own sockets for `ws://`. Keep both.
+`open` must come from the delegate's handshake callback, never from a ping
+round-trip: a ping races the first inbound frame, so a server that greets
+instantly delivered `message` before `open`, and node always fires `open` first.
+Messages arriving before the handshake callback are held and released in order —
+do not remove that gate. Verify against node 22's own global against the same
+`ws` server.
 STREAMING responses must be verified by TIMING, not content: send events with a
 delay and assert the reads are SPREAD OVER TIME in both engines. A fixture that
 compares only the concatenated body passes just as happily against a transport
