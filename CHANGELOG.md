@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Fixed
+- Terminal: leaving the alternate screen restores what was there. `ESC[?1049h`/`ESC[?1049l`
+  is a save/restore pair, but entering cleared without saving and leaving cleared again — so
+  quitting `less`, `top` or any full-screen program wiped the terminal instead of returning the
+  user to their work. The cursor is restored too, and wide characters survive with their column
+  spans intact.
 - Terminal: wide characters occupy two columns. CJK, Kana, Hangul, fullwidth forms and emoji
   were given one cell each, so every TUI drawing aligned or boxed output with non-Latin text
   came out progressively crooked. A wide character now reserves a continuation cell, wraps whole

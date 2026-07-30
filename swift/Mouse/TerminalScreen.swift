@@ -133,19 +133,43 @@ final class TerminalScreen {
 
     // MARK: - Alt screen
 
+    /// The normal screen, held while a full-screen program owns the alternate one.
+    private var normalGrid: [[TerminalCell]]? = nil
+    private var normalCursor: (row: Int, column: Int, style: CellStyle)? = nil
+
+    /// `ESC [ ? 1049 h` — save the normal screen and the cursor, then hand over a cleared one.
     func enterAlternate() {
         guard !isAlternate else { return }
         isAlternate = true
+        normalGrid = grid
+        normalCursor = (cursorRow, cursorColumn, style)
         clearAll()
         moveCursor(row: 0, column: 0)
         isDirty = true
     }
 
+    /// `ESC [ ? 1049 l` — put the normal screen BACK, which is the whole point of the pair.
+    /// This used to clear instead of restoring, so quitting `less` or `top` left the terminal
+    /// blank rather than showing the work that was there before it launched.
     func leaveAlternate() {
         guard isAlternate else { return }
         isAlternate = false
-        clearAll()
-        moveCursor(row: 0, column: 0)
+        // A resize while the alternate screen was up leaves the saved grid the wrong shape;
+        // a cleared screen is the honest fallback there.
+        if let saved = normalGrid, saved.count == rows, saved.first?.count == columns {
+            grid = saved
+        } else {
+            clearAll()
+        }
+        if let cursor = normalCursor {
+            cursorRow = min(cursor.row, rows - 1)
+            cursorColumn = min(cursor.column, columns - 1)
+            style = cursor.style
+        } else {
+            moveCursor(row: 0, column: 0)
+        }
+        normalGrid = nil
+        normalCursor = nil
         isDirty = true
     }
 
