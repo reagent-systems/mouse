@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`vm` contexts are real.** `createContext`, `runInContext`, `runInNewContext`,
+  `compileFunction` and `Script.prototype.runInContext` work against a genuine separate global —
+  a second `JSContext` in the engine's virtual machine, with the sandbox's keys bound as live
+  accessors so reads and writes stay live in both directions. 18 behaviours match node.
+- Node layer: **jest runs**, reporting the same passes, failures, pending tests and counts as
+  real node, with each test file executing inside a vm context. Set `cache: false` — with jest's
+  haste-map cache enabled the run does not settle here, which is an open lead.
 - Node layer: `require.resolve.paths(request)` — the directories that would be searched.
 - Node layer: the `module` core module is real, growing from three exports to node's surface:
   `_cache`, `_extensions`, `_nodeModulePaths`, `_resolveFilename`, `_load`, `_resolveLookupPaths`,

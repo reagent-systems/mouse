@@ -57,6 +57,10 @@ final class NodeEngine: @unchecked Sendable {
     private var tty: TTY?
     private let queue = DispatchQueue(label: "mouse.node", qos: .userInitiated)
     private var context: JSContext!
+    private var virtualMachine: JSVirtualMachine!
+    /// `vm` contexts, each a separate global in the same virtual machine.
+    private var vmContexts: [Int: JSContext] = [:]
+    private var vmNextID = 1
     private var out = ""
     private var err = ""
     private var exitCode: Int32? = nil
@@ -260,7 +264,11 @@ final class NodeEngine: @unchecked Sendable {
         if source.hasPrefix("#!") {   // executables carry shebangs; the wrapper won't parse them
             source = source.drop(while: { $0 != "\n" }).isEmpty ? "" : String(source.drop(while: { $0 != "\n" }))
         }
-        context = JSContext()!
+        // One virtual machine for the engine AND every `vm` context it creates: JSValues can
+        // only cross between contexts that share a VM, which is what makes a contextified
+        // sandbox possible at all.
+        virtualMachine = JSVirtualMachine()!
+        context = JSContext(virtualMachine: virtualMachine)!
         context.name = "mouse-node"
         var fatal: String? = nil
         var fatalValue: JSValue? = nil
@@ -499,6 +507,44 @@ final class NodeEngine: @unchecked Sendable {
         return unsafeBitCast(symbol, to: SetRejectionCallback.self)
     }()
 
+    /// Runs inside each `vm` context. Binds the sandbox's keys as live accessors on the guest
+    /// global, and copies back any global the script CREATES — node shows those on the sandbox
+    /// too, and a plain accessor cannot intercept a property that did not exist yet.
+    private static let vmContextSetup = """
+    (function(){
+      let sandbox = null;
+      const bound = new Set();
+      function bind(key) {
+        if (bound.has(key)) return;
+        bound.add(key);
+        Object.defineProperty(globalThis, key, {
+          configurable: true, enumerable: true,
+          get: function(){ return sandbox[key]; },
+          set: function(value){ sandbox[key] = value; },
+        });
+      }
+      globalThis.__vmBind = function(target) {
+        sandbox = target;
+        for (const key of Object.getOwnPropertyNames(sandbox)) bind(key);
+      };
+      globalThis.__vmSyncBack = function() {
+        if (!sandbox) return;
+        for (const key of Object.getOwnPropertyNames(globalThis)) {
+          if (bound.has(key) || key.startsWith('__vm')) continue;
+          // Only what the script itself introduced: the guest's own built-ins are not the
+          // sandbox's business.
+          const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+          if (!descriptor || !descriptor.enumerable) continue;
+          sandbox[key] = globalThis[key];
+          delete globalThis[key];
+          bind(key);
+        }
+        // A key added to the SANDBOX from outside becomes a global on the next run.
+        for (const key of Object.getOwnPropertyNames(sandbox)) bind(key);
+      };
+    })();
+    """
+
     private func installRejectionHook() {
         guard let install = Self.setRejectionCallback,
               let hook = context.objectForKeyedSubscript("__mouseOnUnhandledRejection"),
@@ -553,6 +599,51 @@ final class NodeEngine: @unchecked Sendable {
             self.exitCode = 1
         }
         expose("unhandledRejection", unhandledRejection)
+
+        // -- vm contexts --
+        // node's contextified sandbox is an object with its own GLOBAL: code run against it
+        // sees the sandbox's properties as globals, writes land back on the object, and none of
+        // the host's globals leak in. A second JSContext in the shared virtual machine gives
+        // exactly that, once the sandbox's keys are installed as live accessors on the guest
+        // global — get/set forwarding, so reads and writes stay live in both directions rather
+        // than being copied at the boundary.
+        let vmCreate: @convention(block) (JSValue?) -> Int = { [weak self] sandbox in
+            guard let self, let sandbox else { return 0 }
+            let guest = JSContext(virtualMachine: self.virtualMachine)!
+            guest.name = "mouse-vm"
+            // Errors are marshalled back through the run bridge, not printed here.
+            guest.exceptionHandler = { _, _ in }
+            guest.evaluateScript(Self.vmContextSetup)
+            guest.objectForKeyedSubscript("__vmBind")?.call(withArguments: [sandbox])
+            let id = self.vmNextID
+            self.vmNextID += 1
+            self.vmContexts[id] = guest
+            return id
+        }
+        expose("vmCreate", vmCreate)
+
+        let vmRun: @convention(block) (Int, String, String) -> Any = { [weak self] id, code, filename in
+            guard let self, let guest = self.vmContexts[id] else {
+                return ["__vmThrow": "vm context has been released"]
+            }
+            var thrown: JSValue? = nil
+            guest.exceptionHandler = { _, exception in thrown = exception }
+            let result = guest.evaluateScript(code, withSourceURL: URL(string: "mouse-vm://" + (filename.hasPrefix("/") ? filename : "/" + filename)))
+            // Globals CREATED inside the run are new properties on the guest global; node shows
+            // them on the sandbox, so they are copied over and given accessors from now on.
+            guest.objectForKeyedSubscript("__vmSyncBack")?.call(withArguments: [])
+            if let thrown {
+                guest.exceptionHandler = { _, _ in }
+                return ["__vmThrow": thrown]
+            }
+            return result ?? JSValue(undefinedIn: guest)!
+        }
+        expose("vmRun", vmRun)
+
+        let vmRelease: @convention(block) (Int) -> Void = { [weak self] id in
+            self?.vmContexts.removeValue(forKey: id)
+        }
+        expose("vmRelease", vmRelease)
 
         // -- monotonic clock --
         // `process.hrtime`, `hrtime.bigint` and `performance.now` all read a MONOTONIC clock:
@@ -9762,51 +9853,81 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.vm = function() {
-        // Half of this module is real and half was a stub that LIED: `createContext` returned
-        // the sandbox unchanged, so a feature check saw a working vm, and then `runInContext`
-        // was simply absent and threw a bare TypeError from inside the caller. That is the
-        // shape this project refuses — a capability must either work or say what is missing.
+        // A contextified sandbox is a SECOND JSContext in the engine's virtual machine: its own
+        // global, its own built-ins, none of this engine's globals visible inside, and values
+        // crossing freely because the two contexts share a VM. The sandbox's keys are live
+        // accessors on the guest global, so a read sees the current value and a write lands on
+        // the object — node's semantics, not a copy at the boundary.
         //
-        // What is missing is specific, and not impossible: a real context needs a SECOND
-        // JSContext in the same JSVirtualMachine (so values can cross between them) plus a
-        // live sandbox — node's contextified object is a proxy whose writes are visible on
-        // both sides, where copying at call boundaries would not be. That is a real piece of
-        // work, not a platform limit. It is what blocks jest, whose environment runs every
-        // test file inside a vm context.
-        const contextReason = 'vm contexts are not available: a real one needs a second ' +
-          'JSContext in the same JSVirtualMachine plus a live (proxied) sandbox, which is not ' +
-          'built yet. vm.runInThisContext and new vm.Script(...).runInThisContext() do work — ' +
-          'they evaluate in THIS context, which needs no sandbox';
-        const contextified = new WeakSet();
-        function refuseContext(name) {
-          return function() {
-            const error = new Error(name + ': ' + contextReason);
-            error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+        // This module used to be half real and half a lie: `createContext` handed back the
+        // sandbox unchanged so a feature check passed, and `runInContext` was simply absent.
+        const handles = new WeakMap();
+        function handleFor(contextObject, name) {
+          const handle = handles.get(contextObject);
+          if (handle === undefined) {
+            const error = new TypeError('The "contextifiedObject" argument must be a vm.Context');
+            error.code = 'ERR_INVALID_ARG_TYPE';
             throw error;
-          };
+          }
+          return handle;
+        }
+        function run(handle, code, options) {
+          const filename = (options && (options.filename || options.name)) || 'evalmachine.<anonymous>';
+          const result = bridge.vmRun(handle, String(code), String(filename));
+          // A throw inside the guest crosses as a marker; rethrowing here puts it in the
+          // caller's frame, where a try/catch around runInContext expects it.
+          if (result && typeof result === 'object' && result.__vmThrow !== undefined) {
+            throw result.__vmThrow;
+          }
+          return result;
+        }
+        function createContext(sandbox) {
+          const target = sandbox === undefined || sandbox === null ? {} : sandbox;
+          if (handles.has(target)) return target;
+          const handle = bridge.vmCreate(target);
+          if (!handle) throw new Error('vm: could not create a context');
+          handles.set(target, handle);
+          return target;
+        }
+        class Script {
+          constructor(code, options) {
+            this._code = String(code);
+            this._options = options || {};
+          }
+          runInThisContext() { return (0, eval)(this._code); }
+          runInContext(contextObject, options) {
+            return run(handleFor(contextObject), this._code, options || this._options);
+          }
+          runInNewContext(sandbox, options) {
+            const context = createContext(sandbox);
+            return run(handles.get(context), this._code, options || this._options);
+          }
         }
         return {
+          createContext: createContext,
+          isContext: function(value) { return handles.has(value); },
           runInThisContext: function(code) { return (0, eval)(String(code)); },
-          // `createContext` keeps working: it returns the object node returns, and webpack
-          // genuinely depends on it — refusing here removed a capability that was real. What
-          // it CANNOT do is give that object a separate global, so the operations that need
-          // one refuse by name instead of throwing a bare TypeError from the caller's frame.
-          createContext: function(sandbox) {
-            const context = sandbox || {};
-            contextified.add(context);
-            return context;
+          runInContext: function(code, contextObject, options) {
+            return run(handleFor(contextObject), code, options);
           },
-          isContext: function(value) { return contextified.has(value); },
-          runInContext: refuseContext('vm.runInContext'),
-          runInNewContext: refuseContext('vm.runInNewContext'),
-          compileFunction: refuseContext('vm.compileFunction'),
-          measureMemory: refuseContext('vm.measureMemory'),
-          Script: class Script {
-            constructor(code) { this._code = String(code); }
-            runInThisContext() { return (0, eval)(this._code); }
-            runInContext() { refuseContext('script.runInContext')(); }
-            runInNewContext() { refuseContext('script.runInNewContext')(); }
+          runInNewContext: function(code, sandbox, options) {
+            const context = createContext(sandbox);
+            return run(handles.get(context), code, options);
           },
+          compileFunction: function(code, params, options) {
+            // node compiles the body into a function, optionally inside a parsing context.
+            const names = (params || []).map(String).join(', ');
+            const source = '(function anonymous(' + names + '\n) {\n' + String(code) + '\n})';
+            if (options && options.parsingContext) {
+              return run(handleFor(options.parsingContext), source, options);
+            }
+            return (0, eval)(source);
+          },
+          measureMemory: function() {
+            return Promise.resolve({ total: { jsMemoryEstimate: 0, jsMemoryRange: [0, 0] } });
+          },
+          Script: Script,
+          constants: { USE_MAIN_CONTEXT_DEFAULT_LOADER: 0 },
         };
       };
       coreFactories.perf_hooks = function() {
