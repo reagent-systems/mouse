@@ -127,6 +127,22 @@ final class NodeEngine: @unchecked Sendable {
             outstanding -= 1
         }
     }
+    /// A forked child's message channel back to its parent. nil when there is none, which is
+    /// what makes `process.send` undefined — the standard way a program asks "was I forked?".
+    private var ipcSink: ((String) -> Void)?
+    /// Give this engine an IPC channel before `run`.
+    func attachIPC(_ sink: @escaping (String) -> Void) { ipcSink = sink }
+    /// The channel holds the event loop open, as node's does — otherwise a forked child runs its
+    /// script, finds nothing pending, and exits before the first message arrives.
+    private var channelHoldsLoop = false
+    /// A message from the parent, delivered as `process.on('message')` on the JS thread.
+    func deliverMessage(_ json: String) {
+        enqueueJob { [weak self] in
+            guard let self, let context = self.context else { return }
+            context.objectForKeyedSubscript("__mouseDeliverMessage")?.call(withArguments: [json])
+        }
+    }
+
     /// This engine's stdout/stderr/stdin are a pipe to a parent, not a terminal.
     private var stdioIsPipe = false
     /// Mark stdio as a pipe before `run` — a spawned child does this.
@@ -248,6 +264,7 @@ final class NodeEngine: @unchecked Sendable {
         }
 
         installNativeBridge(argv: argv, cwd: cwd, stdin: stdin)
+        if ipcSink != nil { channelHoldsLoop = true; outstanding += 1 }
         context.evaluateScript(Self.bootstrap)
 
         let dir = virtualDirname(path)
@@ -593,6 +610,20 @@ final class NodeEngine: @unchecked Sendable {
             semaphore.wait()
             return ["stdout": box.value.out, "stderr": box.value.err, "status": Int(box.value.status)]
         }
+        // The child's end of the channel. Only reachable when one exists, which is the point.
+        let ipcSend: @convention(block) (String) -> Void = { [weak self] json in
+            self?.ipcSink?(json)
+        }
+        // `process.disconnect()` gives the handle back; without it a child that finished its
+        // work would hang on a channel nobody is using.
+        let ipcDisconnect: @convention(block) () -> Void = { [weak self] in
+            guard let self, channelHoldsLoop else { return }
+            channelHoldsLoop = false
+            outstanding -= 1
+            wakeup.signal()
+        }
+        expose("ipcSend", ipcSend)
+        expose("ipcDisconnect", ipcDisconnect)
         expose("shellExec", shellExec)
 
         // -- a LIVE child process ----------------------------------------------------------
@@ -602,9 +633,17 @@ final class NodeEngine: @unchecked Sendable {
         // over the pipes. A node child is a SECOND engine on its own queue, with its stdout and
         // stderr wired into this one's event loop and its stdin fed from ours — the same
         // machinery a terminal program uses, pointed at a pipe instead of a screen.
-        let spawnNode: @convention(block) (String, [String], String, JSValue) -> Int32 = {
-            [weak self] script, argv, cwd, callback in
+        // The IPC flag travels as a STRING ("ipc" or ""): a Bool in the middle of this block's
+        // signature did not marshal through JSC, and the symptom was brutal — the callback
+        // landed in the wrong slot, so a child's very first write threw and it exited 1 with no
+        // output at all.
+        // `mode` is "" | "ipc" | "eval" | "eval-ipc": the eval forms mean `script` IS the source
+        // rather than a path to it, which is how `node -e` reaches a child.
+        let spawnNode: @convention(block) (String, [String], String, String, JSValue) -> Int32 = {
+            [weak self] script, argv, cwd, mode, callback in
             guard let self else { return 0 }
+            let wantsIPC = mode.contains("ipc")
+            let isEval = mode.hasPrefix("eval")
             let carried = Carried(callback)
             let id = sockets.claimExternalID()
             outstanding += 1
@@ -620,12 +659,19 @@ final class NodeEngine: @unchecked Sendable {
                 rows: 24, columns: 80,
                 rawModeChanged: { _ in }))
             child.markStdioAsPipe()
+            if wantsIPC {
+                // fork(): the child's `process.send` reaches the parent as a 'message' event.
+                child.attachIPC { [weak self] json in
+                    self?.enqueueJob { carried.value.call(withArguments: ["message", json]) }
+                }
+            }
             children[id] = child
             refedChildren.insert(id)
-            let source = (try? String(contentsOf: realURL(script), encoding: .utf8)) ?? script
+            let source = isEval ? script : ((try? String(contentsOf: realURL(script), encoding: .utf8)) ?? script)
             Task.detached { [weak self] in
-                let result = await child.run(source: source, path: script,
-                                             argv: ["node", script] + argv, cwd: cwd, stdin: "")
+                let result = await child.run(source: source, path: isEval ? "/[eval]" : script,
+                                             argv: ["node"] + (isEval ? [] : [script]) + argv,
+                                             cwd: cwd, stdin: "")
                 self?.enqueueJob {
                     guard let self else { return }
                     if !result.out.isEmpty { carried.value.call(withArguments: ["stdout", result.out]) }
@@ -651,6 +697,10 @@ final class NodeEngine: @unchecked Sendable {
         // `child.unref()` must genuinely release the handle. esbuild keeps its service alive
         // with a ping loop and unrefs the child so the loop does not hold the PROGRAM open —
         // with a no-op unref, `transform()` resolved and then nothing ever exited.
+        let spawnMessage: @convention(block) (Int32, String) -> Void = { [weak self] id, json in
+            self?.children[Int(id)]?.deliverMessage(json)
+        }
+        expose("spawnMessage", spawnMessage)
         let spawnRef: @convention(block) (Int32, Bool) -> Void = { [weak self] id, refed in
             guard let self, children[Int(id)] != nil else { return }
             if refed, !refedChildren.contains(Int(id)) {
@@ -1339,6 +1389,7 @@ final class NodeEngine: @unchecked Sendable {
         // latin1 — one codepoint per byte, lossless in both directions — while a terminal keeps
         // UTF-8, which is what a screen wants.
         context.setObject(stdioIsPipe, forKeyedSubscript: "__stdioBinary" as NSString)
+        context.setObject(ipcSink != nil, forKeyedSubscript: "__hasIPC" as NSString)
         context.setObject(tty?.rows ?? 24, forKeyedSubscript: "__ttyRows" as NSString)
         context.setObject(tty?.columns ?? 80, forKeyedSubscript: "__ttyColumns" as NSString)
     }
@@ -3193,6 +3244,32 @@ final class NodeEngine: @unchecked Sendable {
         return error;
       }
       globalThis.process = process;
+      // A forked child's channel. `process.send` is left UNDEFINED without one, because
+      // `if (process.send)` is how a program asks whether it was forked — defining a stub would
+      // make every worker library take its IPC path and then talk into nothing.
+      if (__hasIPC) {
+        process.send = function(message, sendHandle, options, callback) {
+          const done = typeof callback === 'function' ? callback
+                     : (typeof options === 'function' ? options
+                     : (typeof sendHandle === 'function' ? sendHandle : null));
+          bridge.ipcSend(JSON.stringify(message === undefined ? null : message));
+          if (done) process.nextTick(function(){ done(null); });
+          return true;
+        };
+        process.connected = true;
+        process.disconnect = function() {
+          process.connected = false;
+          bridge.ipcDisconnect();
+          for (const handler of (processEvents.disconnect || []).slice()) handler();
+        };
+        process.channel = { ref: function(){}, unref: function(){} };
+      }
+      globalThis.__mouseDeliverMessage = function(json) {
+        let message = null;
+        try { message = JSON.parse(json); } catch (error) { message = json; }
+        for (const handler of (processEvents.message || []).slice()) handler(message);
+      };
+
       globalThis.hrtimeBase = Date.now();
 
       // ---- timers ----
@@ -5221,16 +5298,20 @@ final class NodeEngine: @unchecked Sendable {
           },
           // fork() is spawn of a node script by definition; the IPC channel is what we cannot
           // give it, so it says so rather than handing back a child whose .send() vanishes.
+          // fork() is spawn of a node script WITH a message channel — which is the only thing
+          // that distinguishes it, and the thing worker libraries detect.
           fork: function(modulePath, argv, options) {
-            const child = spawnNodeChild([String(modulePath)].concat(argv || []), options || {});
-            child.send = function() {
-              throw Object.assign(new Error('child.send is not available: fork gives a live child but no IPC channel on this device — use stdin/stdout, which are real'),
-                                  { code: 'ERR_IPC_CHANNEL_CLOSED' });
-            };
-            child.connected = false;
-            return child;
+            if (!Array.isArray(argv)) { options = argv || {}; argv = []; }
+            return spawnNodeChild([String(modulePath)].concat(argv.map(String)),
+                                  Object.assign({}, options, { ipc: true }));
           },
         };
+
+        function spawnEvalChild(code, argv, options, printResult) {
+          // `-p` prints the expression's value, which is `-e` with a console.log wrapped round it.
+          const source = printResult ? 'console.log(' + code + ')' : code;
+          return spawnNodeChild(['\u0000eval', source].concat(argv), options);
+        }
 
         function spawnThroughShell(command, argv, options) {
           const EventEmitter = coreRequire('events');
@@ -5255,8 +5336,13 @@ final class NodeEngine: @unchecked Sendable {
         function spawnNodeChild(argv, options) {
           const EventEmitter = coreRequire('events');
           const { Readable, Writable } = coreRequire('stream');
-          const script = String(argv[0] || '');
-          const rest = argv.slice(1).map(String);
+          let script = String(argv[0] || '');
+          let rest = argv.slice(1).map(String);
+          // `node -e 'code'` and `--eval`: the code IS the program, not a path to one.
+          if (script === '-e' || script === '--eval' || script === '-p' || script === '--print') {
+            return spawnEvalChild(String(argv[1] || ''), argv.slice(2).map(String), options,
+                                  script === '-p' || script === '--print');
+          }
           const child = new EventEmitter();
           child.stdout = new Readable({ read: function(){} });
           child.stderr = new Readable({ read: function(){} });
@@ -5265,13 +5351,26 @@ final class NodeEngine: @unchecked Sendable {
           child.killed = false;
           child.spawnfile = 'node';
           child.spawnargs = ['node'].concat(argv.map(String));
+          const wantsIPC = !!(options && options.ipc);
+          // The eval marker is a sentinel argv[0] the recursive call above sets — it can never
+          // collide with a real path.
+          let isEval = false;
+          if (script === '\u0000eval') { isEval = true; script = rest.shift() || ''; }
+          const mode = (isEval ? 'eval' : '') + (wantsIPC ? (isEval ? '-ipc' : 'ipc') : '');
           const id = bridge.spawnNode(script, rest, String((options && options.cwd) || '/'),
-                                      function(event, payload) {
+                                      mode, function(event, payload) {
             // latin1 both ways: the child wrote bytes, and these are those bytes.
             if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload), 'latin1')); return; }
             if (event === 'stderr') { child.stderr.push(Buffer.from(String(payload), 'latin1')); return; }
+            if (event === 'message') {
+              let message = null;
+              try { message = JSON.parse(String(payload)); } catch (error) { message = payload; }
+              child.emit('message', message);
+              return;
+            }
             if (event === 'exit') {
               child.exitCode = payload;
+              child.connected = false;
               child.stdout.push(null);
               child.stderr.push(null);
               // node emits 'exit' first, then 'close' once the stdio is drained.
@@ -5295,9 +5394,21 @@ final class NodeEngine: @unchecked Sendable {
             bridge.spawnKill(id);
             return true;
           };
+          if (wantsIPC) {
+            child.connected = true;
+            child.send = function(message, sendHandle, options, callback) {
+              const done = typeof callback === 'function' ? callback
+                         : (typeof options === 'function' ? options
+                         : (typeof sendHandle === 'function' ? sendHandle : null));
+              bridge.spawnMessage(id, JSON.stringify(message === undefined ? null : message));
+              if (done) process.nextTick(function(){ done(null); });
+              return true;
+            };
+            child.channel = { ref: function(){}, unref: function(){} };
+          }
           child.unref = function(){ bridge.spawnRef(id, false); return child; };
           child.ref = function(){ bridge.spawnRef(id, true); return child; };
-          child.disconnect = function(){};
+          child.disconnect = function(){ child.connected = false; child.emit('disconnect'); };
           return child;
         }
         return child_process;

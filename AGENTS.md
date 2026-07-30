@@ -176,6 +176,17 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**`process.send` must be UNDEFINED without an IPC channel** — `if (process.send)`
+is how a worker library asks whether it was forked, so a stub sends every one of
+them down its IPC path to talk into nothing. An open channel HOLDS the child's
+event loop open (node's does), and `disconnect()` gives that handle back.
+**Bridge blocks: keep a `JSValue` callback in the last slot and avoid a `Bool`
+before it** — `(String, [String], String, Bool, JSValue)` did not marshal through
+JSC, the callback landed in the wrong argument, and the only symptom was a child
+exiting 1 with no output. Pass flags as strings.
+**Bootstrap code that touches `process` must sit AFTER `process` exists** — a
+gated block placed earlier hit a temporal dead zone and silently killed the rest
+of the bootstrap, visible only in the one configuration that took that branch.
 **Use `__toBytes` for anything a caller hands you as data.** Never
 `Buffer.isBuffer(x) ? x : Buffer.from(String(x))` — that stringifies a plain
 `Uint8Array` into `"7,0,0,0"`, and it was in TEN writers (sockets, HTTP bodies,

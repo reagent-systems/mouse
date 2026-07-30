@@ -105,6 +105,7 @@ so a TUI navigates and edits.
 | **Phase G — a live child process** | `spawn('node', …)` is a real process now: a SECOND engine on its own queue, with streaming stdout/stderr, a writable stdin, `kill`, and exit/close events — verified against real node on an INTERLEAVED exchange, where each request depends on the previous answer (a collect-then-report child cannot pass that). `fork` gives the same child and refuses only its IPC channel. Non-node commands still run through msh, which is the right shape for `git status` |
 | **Phase G — byte-exact child stdio** | A piped child's stdio carries BYTES now: latin1 transport both ways, `fs.write` on fd 1/2 accepting any `ArrayBufferView` and reporting the true byte count, `fs.read` on fd 0 WAITING for data with exactly one callback per read, `fs.constants` filled from 4 entries to node's 55, and a piped child correctly reporting `isTTY: false`. Verified against real node on a Go-style child that reads with `fs.read(0)` rather than events — identical bytes, counts and EOF |
 | **Phase D — esbuild-wasm runs** | **A whole compiler in WebAssembly transforms AND bundles on the engine, byte-identical to real node.** The last two pieces were one shared byte coercion (ten places stringified a plain `Uint8Array` instead of taking its bytes) and a REAL `child.unref()` — esbuild keeps its service alive with a ping loop and unrefs the child, so a no-op unref meant `transform()` resolved and then nothing ever exited |
+| **Phase G — `fork` has a real channel** | `process.send`/`child.send` with `message` events both ways, an open channel that holds the child's loop open (as node's does), `disconnect` that gives the handle back, and `process.send` left UNDEFINED without a channel — which is how every worker library asks whether it was forked. Plus `node -e` in a child. Verified against real node on a two-way job exchange, including that a plain `spawn` correctly has NO channel |
 
 ### Verification performed
 
@@ -1042,6 +1043,26 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
+- **`fork` has a real IPC channel now, and three details made it behave.**
+  `process.send` and `child.send` carry messages both ways as JSON, `message`
+  events fire on both ends, and a plain `spawn` still has NO channel — which
+  matters more than it sounds, because `if (process.send)` is exactly how a worker
+  library asks whether it was forked. A stub would send every such library down its
+  IPC path to talk into nothing, so the absence is the feature.
+  Three things had to be right, and each was wrong first:
+  1. **The block signature.** A `Bool` in the middle of
+     `(String, [String], String, Bool, JSValue)` did not marshal through JSC: the
+     callback landed in the wrong slot, so the child's first write threw and it
+     exited 1 with no output whatsoever. The flag travels as a string now.
+  2. **Where the JS ran.** The `if (__hasIPC)` block sat 200 lines before `process`
+     existed, so it hit a temporal dead zone and killed the rest of the bootstrap —
+     visible ONLY in a forked child, because only a forked child took that branch.
+     The symptom was `fs.writeSync` being undefined, which pointed nowhere near it.
+  3. **An open channel holds the loop.** node keeps a forked child alive while its
+     channel is open; ours ran its script, found nothing pending and exited before
+     the first message arrived. `disconnect()` gives the handle back.
+  `node -e 'code'` in a child came out of the same fixture: our spawn treated
+  argv[0] as a path, so `-e` was read as a filename and the child printed nothing.
 - **esbuild-wasm RUNS: a whole compiler in wasm, transforming and bundling
   byte-identically to node.** The last two faults, after the five stdio ones:
   1. **Ten places stringified a plain `Uint8Array`.** The shape
@@ -1725,7 +1746,7 @@ D  web toolchain          tsc, bundling, Preview container     MOSTLY DONE — t
                           (see §0); the Preview container remains
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, live node children + child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch, webpack, JWTs; gaps: byte-exact pipes, TLS server, DSA/DH, worker_threads, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, live node children + child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch, webpack, JWTs; gaps: TLS server, DSA/DH, worker_threads, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
