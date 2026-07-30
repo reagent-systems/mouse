@@ -1074,6 +1074,35 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **A fourth detector, for options ACCEPTED AND IGNORED — and it found the worst bugs
+  of the session.** The previous sweep's lesson (a dropped options argument is a silent
+  no-op) generalises into a detector: exercise each option whose effect is OBSERVABLE and
+  compare with node, so being ignored shows up as a wrong answer rather than as silence.
+  Three earlier sweeps could not see this class at all — the function exists, the
+  signature accepts the option, and the option does nothing. **Seven of fourteen were
+  wrong on the first run, and two were destructive:**
+  1. **`fs.writeFileSync(path, data, {flag: 'a'})` TRUNCATED the file** it was asked to
+     append to. Silent data loss, in the most ordinary call in the API.
+  2. **`fs.rmSync(dir)` without `recursive` deleted the whole tree.** node refuses with
+     ERR_FS_EISDIR precisely so this cannot happen by accident. Unasked-for destruction is
+     the worst possible shape for an ignored option.
+  3. `{mode: 0o600}` ignored on writeFile and mkdir, so a program writing a secret got a
+     world-readable file. Needed a `chmodPath` bridge — there was none.
+  4. `fs.readdirSync(dir, {recursive: true})` listed only the top level.
+  5. `new Writable({highWaterMark})` compared against a HARDCODED 16, so a stream
+     configured for backpressure never reported any and a producer could not be slowed.
+  6. `zlib` `{level}` was dropped, so `{level: 0}` (store, do not compress) compressed.
+  7. `rmdirSync` deleted a non-empty directory where node raises ENOTEMPTY.
+  Two of the fixes needed care beyond passing the option along. `highWaterMark` had to be
+  measured BEFORE `_flushWrites()`, because that shifts the entry out as soon as it hands
+  it to `_write` — the write is still in flight, so measuring after reports an empty
+  buffer and never signals backpressure. And `flag` needed the `x` (exclusive) family as
+  well as `a`, since `wx` must raise EEXIST rather than overwrite.
+  Everything that touches fs, streams or zlib was re-run: 87 fixtures, http, express, ws,
+  webpack (byte-identical), esbuild-wasm, spawn, fork, and the phase-F package manager.
+  The general lesson, now in AGENTS.md: **a green test suite says nothing about options it
+  never passed.** Every previous sweep asked "does this exist?"; this one asked "does it
+  do anything?", and that is a different question with much worse answers.
 - **A third sweep, over the GLOBALS — and it found a decoder that could not stream.**
   Module exports and instance shapes had been swept; nothing had looked at `globalThis`,
   where the web-standard surface modern packages reach for directly lives. 49 of node's

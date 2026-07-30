@@ -1642,7 +1642,9 @@ final class NodeEngine: @unchecked Sendable {
         expose("randomUUID", randomUUID)
 
         // -- zlib: real deflate/inflate over libz (windowBits picks gzip/zlib/raw) ---------
-        let zlibTransform: @convention(block) (String, String) -> String? = { mode, base64 in
+        // `level` was accepted and dropped, so `{level: 0}` (store, do not compress) compressed
+        // anyway. Found by a sweep for options that are silently ignored.
+        let zlibTransform: @convention(block) (String, String, Int32) -> String? = { mode, base64, level in
             guard let input = Data(base64Encoded: base64) else { return nil }
             let deflating: Bool
             let windowBits: Int32
@@ -1655,9 +1657,17 @@ final class NodeEngine: @unchecked Sendable {
             case "gunzip", "inflate", "unzip": deflating = false; windowBits = 15 + 32
             default: return nil
             }
-            return Self.zlibCode(input, deflating: deflating, windowBits: windowBits)?.base64EncodedString()
+            return Self.zlibCode(input, deflating: deflating, windowBits: windowBits,
+                                 level: level)?.base64EncodedString()
         }
         expose("zlibTransform", zlibTransform)
+        // `mode` on writeFile/mkdir was ignored, so a program writing a secret with mode 0o600
+        // got a world-readable file. POSIX chmod, on the real path behind the virtual one.
+        let chmodPath: @convention(block) (String, Int32) -> Bool = { [weak self] path, mode in
+            guard let self else { return false }
+            return chmod(realURL(path).path, mode_t(mode)) == 0
+        }
+        expose("chmodPath", chmodPath)
         // Incremental coding: open a live stream, push chunks, close. Same windowBits map as
         // the one-shot path.
         let zlibOpen: @convention(block) (String) -> Int = { [weak self] mode in
@@ -1819,11 +1829,14 @@ final class NodeEngine: @unchecked Sendable {
 
     /// One-shot deflate or inflate with explicit windowBits (15=zlib, 15+16=gzip, -15=raw,
     /// 15+32=auto-detect on inflate). libz, not Compression — same reason as GitCore.
-    private static func zlibCode(_ input: Data, deflating: Bool, windowBits: Int32) -> Data? {
+    /// `level` is node's compression level: -1 for the default, 0 to store without compressing,
+    /// 1..9 for fastest..smallest. It used to be dropped on the floor.
+    private static func zlibCode(_ input: Data, deflating: Bool, windowBits: Int32,
+                                 level: Int32 = -1) -> Data? {
         var stream = z_stream()
         let streamSize = Int32(MemoryLayout<z_stream>.size)
         let initStatus = deflating
-            ? deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, zlibVersion(), streamSize)
+            ? deflateInit2_(&stream, level, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, zlibVersion(), streamSize)
             : inflateInit2_(&stream, windowBits, zlibVersion(), streamSize)
         guard initStatus == Z_OK else { return nil }
         defer { if deflating { deflateEnd(&stream) } else { inflateEnd(&stream) } }
@@ -4636,17 +4649,33 @@ final class NodeEngine: @unchecked Sendable {
             const encoding = toEncoding(options);
             return encoding ? buffer.toString(encoding) : buffer;
           },
+          // `flag` and `mode` were accepted and dropped. Both mattered: flag:'a' TRUNCATED the
+          // file it was asked to append to (silent data loss), and an ignored mode:0o600 left a
+          // secret world-readable. A sweep for silently-ignored options found them.
           writeFileSync: function(file, data, options) {
-            const buffer = __toBytes(data);
-            if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), false)) {
+            const flag = String((options && options.flag) || (typeof options === 'string' ? 'w' : 'w'));
+            const buffer = __toBytes(data, typeof options === 'string' ? options
+                                           : (options && options.encoding) || undefined);
+            const path = resolvePath(file);
+            // 'x' means exclusive: fail if the path is already there.
+            if (flag.indexOf('x') >= 0 && fs.existsSync(file)) {
+              throw Object.assign(new Error("EEXIST: file already exists, open '" + file + "'"),
+                                  { code: 'EEXIST', syscall: 'open', path: file });
+            }
+            const append = flag[0] === 'a';
+            if (!bridge.writeFile(path, buffer.toString('base64'), append)) {
               throw new Error("EACCES: cannot write '" + file + "'");
             }
+            if (options && options.mode !== undefined) bridge.chmodPath(path, Number(options.mode));
           },
-          appendFileSync: function(file, data) {
-            const buffer = __toBytes(data);
-            if (!bridge.writeFile(resolvePath(file), buffer.toString('base64'), true)) {
+          appendFileSync: function(file, data, options) {
+            const buffer = __toBytes(data, typeof options === 'string' ? options
+                                           : (options && options.encoding) || undefined);
+            const path = resolvePath(file);
+            if (!bridge.writeFile(path, buffer.toString('base64'), true)) {
               throw new Error("EACCES: cannot append '" + file + "'");
             }
+            if (options && options.mode !== undefined) bridge.chmodPath(path, Number(options.mode));
           },
           existsSync: function(file) {
             try { return !!bridge.stat(resolvePath(file), true); } catch (error) { return false; }
@@ -4679,6 +4708,22 @@ final class NodeEngine: @unchecked Sendable {
               error.code = 'ENOENT';
               throw error;
             }
+            // `recursive` (node 20+) was ignored, so a deep tree listed only its top level.
+            if (options && options.recursive) {
+              const found = [];
+              const walk = function(relative) {
+                const absolute = relative ? parent + '/' + relative : parent;
+                const names = bridge.readdir(absolute) || [];
+                for (const name of names) {
+                  const child = relative ? relative + '/' + name : name;
+                  found.push(child);
+                  const raw = bridge.stat(absolute + '/' + name, false);
+                  if (raw && raw.dir) walk(child);
+                }
+              };
+              walk('');
+              if (!options.withFileTypes) return found;
+            }
             if (!options || !options.withFileTypes) return entries;
             // Dirent objects — glob's path-scurry walks these; strings would silently match
             // nothing (isDirectory() undefined reads as "not a directory, not a file").
@@ -4699,9 +4744,42 @@ final class NodeEngine: @unchecked Sendable {
               });
             });
           },
-          mkdirSync: function(dir) { bridge.mkdir(resolvePath(dir)); },
-          rmdirSync: function(dir) { bridge.remove(resolvePath(dir)); },
-          rmSync: function(target) { bridge.remove(resolvePath(target)); },
+          mkdirSync: function(dir, options) {
+            const path = resolvePath(dir);
+            bridge.mkdir(path);
+            const mode = options && typeof options === 'object' ? options.mode : undefined;
+            if (mode !== undefined) bridge.chmodPath(path, Number(mode));
+          },
+          rmdirSync: function(dir, options) {
+            // node refuses a non-empty directory here; deleting one anyway is not a convenience.
+            if (!(options && options.recursive)) {
+              let entries = null;
+              try { entries = bridge.readdir(resolvePath(dir)); } catch (error) { entries = null; }
+              if (entries && entries.length) {
+                throw Object.assign(new Error("ENOTEMPTY: directory not empty, rmdir '" + dir + "'"),
+                                    { code: 'ENOTEMPTY', syscall: 'rmdir', path: dir });
+              }
+            }
+            bridge.remove(resolvePath(dir));
+          },
+          rmSync: function(target, options) {
+            const recursive = !!(options && options.recursive);
+            const force = !!(options && options.force);
+            const raw = bridge.stat(resolvePath(target), true);
+            if (!raw) {
+              if (force) return;                       // `force` silences a missing path
+              throw Object.assign(new Error("ENOENT: no such file or directory, rm '" + target + "'"),
+                                  { code: 'ENOENT', syscall: 'rm', path: target });
+            }
+            // Without `recursive`, node refuses a DIRECTORY outright — it does not quietly delete
+            // the tree. This used to remove everything under it, which is the worst kind of
+            // silently-ignored option: unasked-for destruction.
+            if (raw.dir && !recursive) {
+              throw Object.assign(new Error("ERR_FS_EISDIR: Path is a directory: rm '" + target + "'"),
+                                  { code: 'ERR_FS_EISDIR', syscall: 'rm', path: target });
+            }
+            bridge.remove(resolvePath(target));
+          },
           unlinkSync: function(file) {
             if (!bridge.remove(resolvePath(file))) {
               const error = new Error("ENOENT: no such file or directory, unlink '" + file + "'");
@@ -5805,6 +5883,12 @@ final class NodeEngine: @unchecked Sendable {
           if (options.final) self._final = options.final;
           if (options.destroy && !self._destroy) self._destroy = options.destroy;
           self._writableObjectMode = !!options.objectMode;
+          // `highWaterMark` was accepted and dropped: write() compared against a hardcoded 16,
+          // so a stream configured for backpressure never reported any. node counts BYTES outside
+          // object mode (default 16384) and objects inside it (default 16).
+          self._writableHighWaterMark = options.highWaterMark !== undefined
+            ? Number(options.highWaterMark)
+            : (options.objectMode ? 16 : 16384);
         }
         const writableMethods = {
           _write(chunk, encoding, callback) { callback(); },
@@ -5812,9 +5896,25 @@ final class NodeEngine: @unchecked Sendable {
             if (typeof encoding === 'function') { callback = encoding; encoding = null; }
             if (this._writableEnded) { this.emit('error', new Error('write after end')); return false; }
             this._wbuf.push([chunk, encoding || 'utf8', callback]);
-            this._flushWrites();
-            const ok = this._wbuf.length < 16;
+            // Measured BEFORE flushing, because _flushWrites shifts the entry out as soon as it
+            // hands it to _write — the write is still in flight at that point, so measuring after
+            // reports an empty buffer and never signals backpressure.
+            const mark = this._writableHighWaterMark === undefined ? 16 : this._writableHighWaterMark;
+            let buffered;
+            if (this._writableObjectMode) {
+              buffered = this._wbuf.length;
+            } else {
+              buffered = 0;
+              for (const entry of this._wbuf) {
+                const value = entry[0];
+                buffered += value && value.length !== undefined ? value.length : 1;
+              }
+            }
+            // At or above the mark means "stop writing until 'drain'", which is what returning
+            // false tells the caller.
+            const ok = buffered < mark;
             if (!ok) this._needDrain = true;
+            this._flushWrites();
             return ok;
           },
           // cork/uncork: node buffers writes while corked so a caller can coalesce several
@@ -9618,11 +9718,12 @@ final class NodeEngine: @unchecked Sendable {
 
       coreFactories.zlib = function() {
         const { Transform } = coreRequire('stream');
-        function run(mode, data) {
+        function run(mode, data, options) {
           const input = Buffer.isBuffer(data) ? data
             : data instanceof Uint8Array ? Buffer.from(data)
             : Buffer.from(String(data));
-          const result = bridge.zlibTransform(mode, input.toString('base64'));
+          const level = options && options.level !== undefined ? Number(options.level) : -1;
+          const result = bridge.zlibTransform(mode, input.toString('base64'), level);
           if (result === null || result === undefined) {
             const error = new Error('zlib: ' + mode + ': invalid input');
             error.code = 'Z_DATA_ERROR';
@@ -9632,11 +9733,11 @@ final class NodeEngine: @unchecked Sendable {
         }
         const zlib = { constants: { Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1 } };
         for (const mode of ['gzip', 'gunzip', 'deflate', 'inflate', 'deflateRaw', 'inflateRaw', 'unzip']) {
-          zlib[mode + 'Sync'] = function(data) { return run(mode, data); };
+          zlib[mode + 'Sync'] = function(data, options) { return run(mode, data, options); };
           zlib[mode] = function(data, options, callback) {
-            if (typeof options === 'function') callback = options;
+            if (typeof options === 'function') { callback = options; options = undefined; }
             setImmediate(function(){
-              try { callback(null, run(mode, data)); } catch (error) { callback(error); }
+              try { callback(null, run(mode, data, options)); } catch (error) { callback(error); }
             });
           };
           // Stream forms buffer to the flush — honest one-shot coding behind the stream API.

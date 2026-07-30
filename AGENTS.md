@@ -465,6 +465,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A green suite says nothing about options it never passed.** Sweeping for existence
+  (exports, prototypes, globals) cannot see an option that is accepted and dropped: the
+  function is there, the signature takes it, nothing happens. Exercise each option whose
+  effect is OBSERVABLE and diff against the reference. That detector found seven wrong out
+  of fourteen on its first run, two of them destructive — a `flag:'a'` that truncated, and
+  an `rmSync` that deleted a tree node refuses to touch. Ask "does it DO anything?", not
+  just "does it exist?".
 - **An ignored options argument is a silent no-op.** `TextDecoder.decode(view, options)`
   accepted the second argument and dropped it, so `{stream: true}` looked supported and
   corrupted split characters. When a signature takes options, either honour them or throw

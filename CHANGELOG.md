@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: seven silently-ignored options now work. Two were destructive:
+  `fs.writeFileSync(..., {flag:'a'})` truncated the file instead of appending, and
+  `fs.rmSync(dir)` without `recursive` deleted the whole tree where node refuses. Also
+  fixed: `{mode}` on writeFile/mkdir (a secret was left world-readable),
+  `fs.readdirSync({recursive:true})`, `rmdirSync` on a non-empty directory,
+  `new Writable({highWaterMark})` (backpressure was never signalled), and zlib `{level}`.
 - Node layer: `TextDecoderStream` and `TextEncoderStream` exist, and `TextDecoder` can
   actually stream — it ignored its options argument, so `{stream: true}` was a silent
   no-op and a character split across chunks decoded to replacement characters. Adds
