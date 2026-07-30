@@ -102,6 +102,7 @@ so a TUI navigates and edits.
 | **Phase G — streaming responses** | The URLSession transport moved to its DELEGATE form, so `fetch` and `https.request` deliver the head first and then each chunk as it lands. Server-sent events now arrive as they are sent — three events half a second apart read as three reads spread over time, matching real node — which is the case that matters most here: **an agent CLI streaming tokens from an API**. `Response.body` is a live `ReadableStream`; `text()`/`json()` drain it once |
 | **Phase G — the `WebSocket` global, and `wss://`** | The standard `WebSocket` (which node 22 also exposes) on URLSession's WebSocket task — the one path to **TLS WebSockets** here, since `wss://` needs a handshake we cannot put on a raw socket. Text and binary frames, `binaryType`, `addEventListener`, clean close codes, and `CloseEvent`/`MessageEvent`. Behaves exactly as node 22's does against the same `ws` server. The `ws` PACKAGE keeps riding our own sockets for `ws://`, in both directions |
 | **Phase D — webpack bundles, and WebAssembly works** | **webpack 5 bundles a real project on the engine, byte-identical to real node's output, minified by terser, and the bundle runs.** That is the bundling half of phase D. Two bugs paid for it: `require(".")` did not resolve, and `Buffer.from(arrayBuffer)` COPIED where node shares — which silently broke every wasm interop, webpack's own hashes included. Fixing it revealed that **WebAssembly runs here** (JSC's interpreter-mode wasm), so wasm packages are viable without waiting for the JIT |
+| **Phase G — a live child process** | `spawn('node', …)` is a real process now: a SECOND engine on its own queue, with streaming stdout/stderr, a writable stdin, `kill`, and exit/close events — verified against real node on an INTERLEAVED exchange, where each request depends on the previous answer (a collect-then-report child cannot pass that). `fork` gives the same child and refuses only its IPC channel. Non-node commands still run through msh, which is the right shape for `git status` |
 
 ### Verification performed
 
@@ -1012,6 +1013,22 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **A live child process, and how far it got esbuild.** `child_process.spawn` meant
+  "run a command through msh and collect its output" — correct for `git status`,
+  useless for a long-lived peer. A node child is now a SECOND engine on its own
+  queue: its stdout and stderr stream into this one's event loop, its stdin is fed
+  from ours, `kill` terminates it, and `exit`/`close` carry the code. The fixture
+  proves it is genuinely live rather than replayed: the parent's next request
+  depends on the child's previous answer, so an implementation that collected
+  output and reported it at the end could not produce that transcript. Ours matches
+  real node's exactly, exit code and all. `fork` gives the same child and refuses
+  only its IPC channel, which is the part we cannot give it.
+  esbuild-wasm gets further and still fails, with a NEW and more precise reason:
+  **our pipes carry text, and esbuild's service protocol is binary.** The child
+  spawns, the service starts, and the length-prefixed packets do not survive a
+  round trip through String. So the next named gap is byte-exact stdio for a
+  piped child — not "wasm", not "spawn", which is the kind of narrowing that only
+  comes from actually running the thing.
 - **The esbuild-wasm claim, retested — it loads but cannot run, and the reason is
   not wasm.** Every "wasm works" claim here predates today's
   `Buffer.from(arrayBuffer)` fix, so they were all made against a broken memory
@@ -1648,7 +1665,7 @@ D  web toolchain          tsc, bundling, Preview container     MOSTLY DONE — t
                           (see §0); the Preview container remains
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, DSA/DH, worker_threads, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, live node children + child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch, webpack, JWTs; gaps: byte-exact pipes, TLS server, DSA/DH, worker_threads, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

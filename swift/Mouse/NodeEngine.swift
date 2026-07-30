@@ -112,6 +112,9 @@ final class NodeEngine: @unchecked Sendable {
             handlesLock.lock(); openHandles -= 1; handlesLock.unlock()
             wakeup.signal()
         })
+    /// Child engines by id — a spawned node process is one of these.
+    private var children: [Int: NodeEngine] = [:]
+
     /// Live `URLSessionWebSocketTask`s by id — the WebSocket global's handles.
     private var webSocketTasks: [Int: URLSessionWebSocketTask] = [:]
     private func finishWebSocket(_ id: Int) {
@@ -156,6 +159,21 @@ final class NodeEngine: @unchecked Sendable {
             guard let self, let context = self.context else { return }
             let function = context.objectForKeyedSubscript("__mouseDeliverInput")
             function?.call(withArguments: [text])
+        }
+    }
+
+    /// Stop a running program from outside — what `child.kill()` means for a spawned child.
+    /// The loop notices on its next turn and unwinds with 130, as an interrupted program does.
+    func terminate() {
+        cancelled = true
+        wakeup.signal()
+    }
+
+    /// No more input is coming — the writing end of the pipe closed.
+    func endInput() {
+        enqueueJob { [weak self] in
+            guard let self, let context = self.context else { return }
+            context.objectForKeyedSubscript("__mouseEndInput")?.call(withArguments: [])
         }
     }
 
@@ -569,6 +587,60 @@ final class NodeEngine: @unchecked Sendable {
             return ["stdout": box.value.out, "stderr": box.value.err, "status": Int(box.value.status)]
         }
         expose("shellExec", shellExec)
+
+        // -- a LIVE child process ----------------------------------------------------------
+        // `child_process.spawn` used to mean "run a command through msh and collect its
+        // output", which is right for `git status` and useless for a long-lived peer:
+        // esbuild-wasm spawns node running its own service script and speaks a binary protocol
+        // over the pipes. A node child is a SECOND engine on its own queue, with its stdout and
+        // stderr wired into this one's event loop and its stdin fed from ours — the same
+        // machinery a terminal program uses, pointed at a pipe instead of a screen.
+        let spawnNode: @convention(block) (String, [String], String, JSValue) -> Int32 = {
+            [weak self] script, argv, cwd, callback in
+            guard let self else { return 0 }
+            let carried = Carried(callback)
+            let id = sockets.claimExternalID()
+            outstanding += 1
+            let child = NodeEngine(root: root, env: env, shell: shell)
+            // Output crosses back as event-loop jobs on OUR thread, like every other event.
+            child.attachTTY(TTY(
+                write: { [weak self] text in
+                    self?.enqueueJob { carried.value.call(withArguments: ["stdout", text]) }
+                },
+                writeError: { [weak self] text in
+                    self?.enqueueJob { carried.value.call(withArguments: ["stderr", text]) }
+                },
+                rows: 24, columns: 80,
+                rawModeChanged: { _ in }))
+            children[id] = child
+            let source = (try? String(contentsOf: realURL(script), encoding: .utf8)) ?? script
+            Task.detached { [weak self] in
+                let result = await child.run(source: source, path: script,
+                                             argv: ["node", script] + argv, cwd: cwd, stdin: "")
+                self?.enqueueJob {
+                    guard let self else { return }
+                    if !result.out.isEmpty { carried.value.call(withArguments: ["stdout", result.out]) }
+                    if !result.err.isEmpty { carried.value.call(withArguments: ["stderr", result.err]) }
+                    carried.value.call(withArguments: ["exit", Int(result.status)])
+                    self.children[id] = nil
+                    self.outstanding -= 1
+                }
+            }
+            return Int32(id)
+        }
+        let spawnWrite: @convention(block) (Int32, String) -> Void = { [weak self] id, text in
+            self?.children[Int(id)]?.deliverInput(text)
+        }
+        let spawnEnd: @convention(block) (Int32) -> Void = { [weak self] id in
+            self?.children[Int(id)]?.endInput()
+        }
+        let spawnKill: @convention(block) (Int32) -> Void = { [weak self] id in
+            self?.children[Int(id)]?.terminate()
+        }
+        expose("spawnNode", spawnNode)
+        expose("spawnWrite", spawnWrite)
+        expose("spawnEnd", spawnEnd)
+        expose("spawnKill", spawnKill)
 
         // -- HTTP over URLSession: fire on any thread, complete as an event-loop job --
         let httpRequest: @convention(block) (String, String, [String: String], String, JSValue) -> Void = { [weak self] urlText, method, headers, bodyBase64, callback in
@@ -2873,6 +2945,12 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.__mouseDeliverInput = function(text) {
         process.stdin._push(text);
       };
+      globalThis.__mouseEndInput = function() {
+        // EOF on stdin: a child reading to completion ends here, which is what `child.stdin.end()`
+        // means on the other side of the pipe.
+        if (process.stdin.push) process.stdin.push(null);
+        process.stdin.emit('end');
+      };
       globalThis.__mouseResize = function(rows, columns) {
         process.stdout.rows = rows; process.stdout.columns = columns;
         process.stderr.rows = rows; process.stderr.columns = columns;
@@ -5000,25 +5078,93 @@ final class NodeEngine: @unchecked Sendable {
             const encoding = options && options.encoding;
             return encoding && encoding !== 'buffer' ? result.stdout.toString() : result.stdout;
           },
+          // A NODE child is a live process: its own engine, its own event loop, real pipes.
+          // Anything else runs through msh and reports what it produced, which is the right
+          // shape for `git status` and the only shape msh can offer.
           spawn: function(command, argv, options) {
-            const EventEmitter = coreRequire('events');
-            const child = new EventEmitter();
-            child.stdout = new EventEmitter();
-            child.stderr = new EventEmitter();
-            child.pid = 1;
-            child.kill = function(){};
-            setImmediate(function() {
-              const parts = [command].concat((argv || []).map(shellQuote));
-              const r = runShell(parts.join(' '));
-              if (r.stdout) child.stdout.emit('data', Buffer.from(r.stdout));
-              if (r.stderr) child.stderr.emit('data', Buffer.from(r.stderr));
-              child.stdout.emit('end');
-              child.emit('close', r.status, null);
-              child.emit('exit', r.status, null);
-            });
+            argv = argv || [];
+            options = options || {};
+            const isNode = /(^|\/)node$/.test(String(command)) || String(command) === process.execPath;
+            return isNode ? spawnNodeChild(argv, options) : spawnThroughShell(command, argv, options);
+          },
+          // fork() is spawn of a node script by definition; the IPC channel is what we cannot
+          // give it, so it says so rather than handing back a child whose .send() vanishes.
+          fork: function(modulePath, argv, options) {
+            const child = spawnNodeChild([String(modulePath)].concat(argv || []), options || {});
+            child.send = function() {
+              throw Object.assign(new Error('child.send is not available: fork gives a live child but no IPC channel on this device — use stdin/stdout, which are real'),
+                                  { code: 'ERR_IPC_CHANNEL_CLOSED' });
+            };
+            child.connected = false;
             return child;
           },
         };
+
+        function spawnThroughShell(command, argv, options) {
+          const EventEmitter = coreRequire('events');
+          const child = new EventEmitter();
+          child.stdout = new EventEmitter();
+          child.stderr = new EventEmitter();
+          child.stdin = { write: function(){ return true; }, end: function(){}, on: function(){} };
+          child.pid = 1;
+          child.kill = function(){};
+          setImmediate(function() {
+            const parts = [command].concat((argv || []).map(shellQuote));
+            const r = runShell(parts.join(' '));
+            if (r.stdout) child.stdout.emit('data', Buffer.from(r.stdout));
+            if (r.stderr) child.stderr.emit('data', Buffer.from(r.stderr));
+            child.stdout.emit('end');
+            child.emit('close', r.status, null);
+            child.emit('exit', r.status, null);
+          });
+          return child;
+        }
+
+        function spawnNodeChild(argv, options) {
+          const EventEmitter = coreRequire('events');
+          const { Readable, Writable } = coreRequire('stream');
+          const script = String(argv[0] || '');
+          const rest = argv.slice(1).map(String);
+          const child = new EventEmitter();
+          child.stdout = new Readable({ read: function(){} });
+          child.stderr = new Readable({ read: function(){} });
+          child.exitCode = null;
+          child.signalCode = null;
+          child.killed = false;
+          child.spawnfile = 'node';
+          child.spawnargs = ['node'].concat(argv.map(String));
+          const id = bridge.spawnNode(script, rest, String((options && options.cwd) || '/'),
+                                      function(event, payload) {
+            if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload))); return; }
+            if (event === 'stderr') { child.stderr.push(Buffer.from(String(payload))); return; }
+            if (event === 'exit') {
+              child.exitCode = payload;
+              child.stdout.push(null);
+              child.stderr.push(null);
+              // node emits 'exit' first, then 'close' once the stdio is drained.
+              child.emit('exit', payload, null);
+              process.nextTick(function(){ child.emit('close', payload, null); });
+            }
+          });
+          child.pid = id;
+          child.stdin = new Writable({
+            write: function(chunk, encoding, callback) {
+              bridge.spawnWrite(id, Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk));
+              callback();
+            },
+            final: function(callback) { bridge.spawnEnd(id); callback(); },
+          });
+          child.kill = function(signal) {
+            child.killed = true;
+            child.signalCode = signal || 'SIGTERM';
+            bridge.spawnKill(id);
+            return true;
+          };
+          child.unref = function(){ return child; };
+          child.ref = function(){ return child; };
+          child.disconnect = function(){};
+          return child;
+        }
         return child_process;
       };
 

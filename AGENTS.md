@@ -176,6 +176,13 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+A NODE child from `child_process.spawn` is a SECOND NodeEngine on its own queue,
+with live pipes; anything else runs through msh and reports collected output.
+Verify a child with an INTERLEAVED exchange — each request depending on the
+previous answer — because a collect-then-report implementation passes any
+transcript that does not require interleaving. Pipes currently carry TEXT: a
+binary protocol (esbuild's service) does not survive the round trip, which is the
+next named gap, and `fork`'s IPC channel refuses rather than pretending.
 **A "wasm package works" claim needs the package RUN, not imported.** Every such
 claim made before `Buffer.from(arrayBuffer)` shared memory was against a broken
 path: webpack's hashes re-earned it, esbuild-wasm did not (it needs a live child
