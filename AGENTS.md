@@ -176,6 +176,10 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**A "wasm package works" claim needs the package RUN, not imported.** Every such
+claim made before `Buffer.from(arrayBuffer)` shared memory was against a broken
+path: webpack's hashes re-earned it, esbuild-wasm did not (it needs a live child
+process — see below). Loading is not running.
 **WebAssembly RUNS on this engine** (JSC, interpreter mode) — wasm packages work
 today; the WebView JIT would buy speed, not capability. Keep the webpack proof
 green: it bundles byte-identically to real node and exercises wasm hashing,

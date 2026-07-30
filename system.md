@@ -567,8 +567,9 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
 - **Batch 7: postcss, handlebars, esbuild-wasm load; archiver writes a
   real ZIP. Two node-shape fixes.** postcss parses and re-emits CSS,
   handlebars compiles and renders templates, and **esbuild-wasm loads**
-  (version 0.28.1, `transform` present — the wasm bundler for phase D
-  lands on the engine). archiver v8 (pure ESM, class exports) produces a
+  (version 0.28.1, `transform` present). That last claim was re-tested
+  once wasm memory sharing was fixed and is CORRECTED below: it loads,
+  but it cannot run — see "the esbuild-wasm claim, retested". archiver v8 (pure ESM, class exports) produces a
   **valid ZIP through our incremental zlib**: 50 bytes, correct `PK`
   magic. Two real fixes: (1) **node's EventEmitter is a constructor
   FUNCTION, not a class** — readable-stream (under archiver and much of
@@ -1011,6 +1012,21 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **The esbuild-wasm claim, retested — it loads but cannot run, and the reason is
+  not wasm.** Every "wasm works" claim here predates today's
+  `Buffer.from(arrayBuffer)` fix, so they were all made against a broken memory
+  path and had to be re-earned. webpack's hashes earned it. esbuild-wasm does
+  not: on our engine it fails at `child.stdin.on` — because its NODE path
+  `spawn`s a child process (node running esbuild's own service script) and speaks
+  a binary protocol over live stdin/stdout pipes. Our `child_process` bridges to
+  msh and hands back COLLECTED output; there is no long-lived child with
+  streaming stdio, so `child.stdin` does not exist.
+  So the missing capability is precisely named: **a live child process**, not
+  WebAssembly (which webpack proves works, byte-identically). The browser entry
+  point (`initialize({ wasmModule })`) is refused by esbuild itself in node — in
+  both engines, which is how the harness found its own bug first.
+  README and CHANGELOG listed esbuild-wasm beside packages that genuinely run;
+  that has been corrected rather than left flattering.
 - **webpack bundles on the engine — and WebAssembly works, which I did not know.**
   webpack 5 built a real multi-file project (ESM syntax, a JSON import, a nested
   directory) in production mode on our engine, and the emitted bundle is
