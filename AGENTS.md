@@ -470,6 +470,14 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **The RUNNER needs the same proof as the gates.** `verify.sh` grades on a
+  verdict line, and two flaws in that grading made real failures invisible: a
+  case-sensitive match behind a case-insensitive grep (so "3 lines differ" read
+  as a pass), and an absent verdict counted as neither pass nor failure. A
+  verdict is now taken only from TOP-LEVEL lines — indented detail is a
+  harness's own content, and grading on it failed jest for legitimately printing
+  `failed=1`. After changing the runner, break something on purpose and confirm
+  the total moves.
 - **Prove a new gate FAILS before trusting that it passes.** Break the thing it
   watches — revert the fix, force the constant, corrupt the input — and check the
   gate goes red for the right reason, then restore. A gate that cannot fail is
