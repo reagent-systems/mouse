@@ -3540,6 +3540,23 @@ final class NodeEngine: @unchecked Sendable {
         }
         const path = {
           sep: '/',
+          // Refused on evidence rather than caution. `fs.glob` is real (same matcher, verified
+          // against node on a real tree), but node's `path.matchesGlob` — which it marks
+          // EXPERIMENTAL — disagrees with itself: literal compares are case-SENSITIVE
+          // ('A.JS' vs 'a.js' is false) while a pattern containing '*' compares
+          // case-INSENSITIVELY ('A.JS' vs '*.js' is true), and a trailing slash on the path is
+          // stripped for a literal ('a/' matches 'a') but not for '**' ('a/' matches 'a/**'
+          // where a bare 'a' does not). A 1824-case corpus put the disagreement at 17 cases in
+          // exactly those two families. Matching that means encoding contradictions that may
+          // vanish in any node release, so this says no and names why.
+          matchesGlob: function() {
+            throw Object.assign(
+              new Error('path.matchesGlob is not available: node\'s own implementation is ' +
+                        'experimental and self-inconsistent (case sensitivity depends on whether ' +
+                        'the pattern contains *, and a trailing slash is stripped for literals ' +
+                        'but not for **). fs.glob and fs.globSync are real and match node'),
+              { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          },
           delimiter: ':',
           normalize: function(p) {
             if (!p.length) return '.';
@@ -4713,8 +4730,182 @@ final class NodeEngine: @unchecked Sendable {
         // fs.glob is node 22's built-in matcher. Not implemented rather than
         // half-implemented: glob semantics (**, braces, character classes, negation) are a
         // corpus of edge cases, and the `glob` package already runs correctly on this engine.
-        fs.glob = refuseHere('glob');
-        fs.globSync = refuseHere('globSync');
+        // Glob matching. The refusal here said a partial matcher would be worse than none, which
+        // is a fair judgement about risk rather than a claim of impossibility — so it is settled
+        // the way this repo settles that question elsewhere (msh against /bin/sh, the screen
+        // against pyte): build it, then prove it on a corpus big enough that "partial" is a
+        // measured claim. Every rule below was read off real node, including the ones that
+        // surprised me: matching is CASE-INSENSITIVE on darwin, `**` refuses dot segments, and
+        // `a/**` does not match a bare `a`.
+        function expandBraces(pattern) {
+          const open = pattern.indexOf('{');
+          if (open < 0) return [pattern];
+          // Find this brace's partner, skipping nested groups.
+          let depth = 0, close = -1;
+          for (let i = open; i < pattern.length; i++) {
+            if (pattern[i] === '\\') { i += 1; continue; }
+            if (pattern[i] === '{') depth += 1;
+            else if (pattern[i] === '}') { depth -= 1; if (depth === 0) { close = i; break; } }
+          }
+          if (close < 0) return [pattern];        // unbalanced: a literal brace
+          const head = pattern.slice(0, open), tail = pattern.slice(close + 1);
+          const body = pattern.slice(open + 1, close);
+          const parts = [];
+          let depth2 = 0, current = '';
+          for (let i = 0; i < body.length; i++) {
+            const ch = body[i];
+            if (ch === '\\') { current += ch + (body[i + 1] || ''); i += 1; continue; }
+            if (ch === '{') depth2 += 1;
+            if (ch === '}') depth2 -= 1;
+            if (ch === ',' && depth2 === 0) { parts.push(current); current = ''; continue; }
+            current += ch;
+          }
+          parts.push(current);
+          const out = [];
+          for (const part of parts) {
+            for (const expanded of expandBraces(head + part + tail)) out.push(expanded);
+          }
+          return out;
+        }
+
+        /// One path segment's pattern as a regex body. `atStart` carries the dot rule: a wildcard
+        /// at the start of a segment must not match a leading dot.
+        function segmentRegex(segment) {
+          let out = '';
+          let index = 0;
+          let sawWildcardFirst = false;
+          while (index < segment.length) {
+            const ch = segment[index];
+            if (ch === '\\') {
+              const next = segment[index + 1];
+              if (next === undefined) { out += '\\\\'; index += 1; continue; }
+              out += next.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              index += 2;
+              continue;
+            }
+            if (ch === '*') {
+              if (index === 0) sawWildcardFirst = true;
+              out += '[^/]*';
+              index += 1;
+              continue;
+            }
+            if (ch === '?') {
+              if (index === 0) sawWildcardFirst = true;
+              out += '[^/]';
+              index += 1;
+              continue;
+            }
+            if (ch === '[') {
+              // A class: ! or ^ negates, and a ] immediately after those is literal.
+              let cursor = index + 1;
+              let negated = false;
+              if (segment[cursor] === '!' || segment[cursor] === '^') { negated = true; cursor += 1; }
+              let body = '';
+              if (segment[cursor] === ']') { body += '\\]'; cursor += 1; }
+              while (cursor < segment.length && segment[cursor] !== ']') {
+                const inner = segment[cursor];
+                if (inner === '\\') { body += '\\' + (segment[cursor + 1] || ''); cursor += 2; continue; }
+                // A '-' keeps its meaning inside a class; everything else that matters is escaped.
+                body += inner === '-' ? '-' : inner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                cursor += 1;
+              }
+              if (cursor >= segment.length) {
+                // Unterminated: a literal '['.
+                out += '\\[';
+                index += 1;
+                continue;
+              }
+              if (index === 0) sawWildcardFirst = true;
+              out += '[' + (negated ? '^' : '') + body + ']';
+              index = cursor + 1;
+              continue;
+            }
+            out += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            index += 1;
+          }
+          // The dot rule, and only when the segment can match something: `*` never matches
+          // `.hidden`, but the literal `.hidden` does.
+          return (sawWildcardFirst ? '(?!\\.)' : '') + out;
+        }
+
+        // One or more segments, none of them starting with a dot.
+        const deepSegments = '(?:(?!\\.)[^/]+/)*(?!\\.)[^/]+';
+
+        function globRegex(pattern) {
+          const segments = String(pattern).split('/');
+          let body = '';
+          for (let i = 0; i < segments.length; i++) {
+            const segment = segments[i];
+            const last = i === segments.length - 1;
+            if (segment === '**') {
+              if (last) {
+                // A TRAILING ** also matches nothing at all, so `src/**` includes `src` itself —
+                // node's glob does that, and the optional leading slash is what expresses it.
+                if (body.endsWith('/')) body = body.slice(0, -1);
+                body += body.length ? '(?:/' + deepSegments + ')?' : deepSegments;
+                continue;
+              }
+              // Consuming the following slash is what lets `**/b` match a bare `b`.
+              body += '(?:(?!\\.)[^/]+/)*';
+              continue;
+            }
+            body += segmentRegex(segment);
+            if (!last) body += '/';
+          }
+          return new RegExp('^' + body + '$');
+        }
+
+        const globCache = {};
+        function matchesGlob(target, pattern) {
+          const key = String(pattern);
+          if (!globCache[key]) {
+            globCache[key] = expandBraces(key).map(globRegex);
+          }
+          const text = String(target);
+          return globCache[key].some(function(expression){ return expression.test(text); });
+        }
+        globalThis.__matchesGlob = matchesGlob;
+
+        /// fs.glob walks the tree under cwd and reports the paths that match, which is node's
+        /// shape: results are relative to cwd unless `options.cwd` says otherwise.
+        function globWalk(pattern, options) {
+          options = options || {};
+          const root = options.cwd ? String(options.cwd) : process.cwd();
+          // `exclude` is refused rather than guessed: node hands the callback a bare entry NAME
+          // for some entries ('c.js', 'e.js', 'deep') and a relative PATH for others ('src/deep',
+          // 'lib'), depending on where the walk is. A filter that silently disagrees about which
+          // files it saw is worse than one that says it cannot.
+          if (options.exclude !== undefined) {
+            throw Object.assign(
+              new Error('fs.glob\'s `exclude` option is not available: node passes it a bare ' +
+                        'entry name for nested entries and a relative path for others, so a ' +
+                        'filter here would disagree about what it was shown. Filter the ' +
+                        'returned list instead'),
+              { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          }
+          const found = [];
+          const walk = function(relative) {
+            const absolute = relative ? (root.replace(/\/$/, '') + '/' + relative) : root;
+            let entries;
+            try { entries = fs.readdirSync(absolute, { withFileTypes: true }); }
+            catch (error) { return; }
+            for (const entry of entries) {
+              const child = relative ? relative + '/' + entry.name : entry.name;
+              if (matchesGlob(child, pattern)) found.push(child);
+              if (entry.isDirectory()) walk(child);
+            }
+          };
+          walk('');
+          return found;
+        }
+
+        fs.globSync = function(pattern, options) { return globWalk(pattern, options); };
+        fs.glob = function(pattern, options, callback) {
+          if (typeof options === 'function') { callback = options; options = undefined; }
+          let found, failure = null;
+          try { found = globWalk(pattern, options); } catch (error) { failure = error; }
+          process.nextTick(function(){ callback(failure, failure ? undefined : found); });
+        };
         function refuseHere(name) {
           return function() {
             const error = new Error('fs.' + name + ' is not available: glob semantics are a corpus of edge cases and a partial matcher would be worse than none — the `glob` package works on this engine');

@@ -465,6 +465,14 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **"A partial X is worse than none" is a hypothesis with a number attached.** Build
+  the thing, run a corpus against the reference, and count. Doing that for glob
+  vindicated the refusal for `path.matchesGlob` (17 disagreements in 1824 cases, all of
+  them node contradicting itself) and dissolved it for `fs.glob` (exact agreement) —
+  a split no amount of reading the code would have found.
+- **When the reference implementation is inconsistent, refuse and say so.** Encoding
+  another implementation's contradictions is not compatibility, it is a bug you now
+  own — especially when the API is marked experimental and may change.
 - **A caveat you reason your way to is a guess; measure it.** The previous boundary
   recorded "I/O callbacks are not trampolined" from reading the code. Testing six
   routes out of the host showed four already worked and two were broken — so the

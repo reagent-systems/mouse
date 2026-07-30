@@ -1074,6 +1074,33 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **`fs.glob` ships; `path.matchesGlob` keeps its refusal, now with numbers.** The
+  refusal said "glob semantics are a corpus of edge cases and a partial matcher would
+  be worse than none". That is a judgement about RISK, not a claim of impossibility —
+  so it got measured the way this repo measures such things (msh against `/bin/sh`, the
+  screen against pyte): a matcher, then a corpus of 1824 pattern x path cases against
+  real node.
+  1807 agreed. The 17 that did not fall into two families, and in both of them NODE
+  contradicts itself: literal comparison is case-SENSITIVE (`'A.JS'` vs `'a.js'` is
+  false) while a pattern containing `*` compares case-INSENSITIVELY (`'A.JS'` vs
+  `'*.js'` is true); and a trailing slash on the path is stripped for a literal
+  (`'a/'` matches `'a'`) but not for `**` (`'a/'` matches `'a/**'` where a bare `'a'`
+  does not). `path.matchesGlob` is marked EXPERIMENTAL in node, and matching it means
+  encoding contradictions that could vanish in any release — so it stays refused, with
+  those specifics as the reason instead of a general worry.
+  `fs.glob`/`globSync` have no such trouble: on a real tree, every pattern tried
+  returns node's exact file list, including the rules that are easy to get wrong —
+  dotfiles excluded, directories included by `*`, and `src/**` matching `src` ITSELF
+  (which is the opposite of what `path.matchesGlob` does with the same pattern, and is
+  how the two APIs were told apart).
+  `exclude` is refused for the same measured reason: node hands the callback a bare
+  entry NAME for nested entries (`'c.js'`, `'e.js'`, `'deep'`) and a relative PATH for
+  others (`'src/deep'`, `'lib'`). A filter that silently disagrees about which files it
+  was shown is worse than one that says it cannot. Found only because the first fixture
+  asserted a filter that quietly did nothing in node.
+  The transferable bit: "a partial X is worse than none" is a hypothesis with a number
+  attached. Measuring it both vindicated the refusal for one API and dissolved it for
+  the other, which no amount of reasoning from the code would have separated.
 - **scrypt, and a refusal that was true but pointed the wrong way.** It said "scrypt
   has no system implementation here", which is a fact — neither CryptoKit nor
   CommonCrypto has scrypt — and also beside the point, because scrypt is not a

@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `fs.glob`/`fs.globSync` are real — brace expansion, `**`, character
+  classes and node's dotfile rules, returning node's exact file lists on a real tree.
+  `path.matchesGlob` and glob's `exclude` option stay refused, each naming a measured
+  inconsistency in node's own experimental implementation rather than a general worry.
 - Node layer: `crypto.scrypt`/`scryptSync` are real (`swift/Mouse/NodeScrypt.swift`).
   scrypt is not a primitive — it is PBKDF2-HMAC-SHA256 around a Salsa20/8 memory-hard
   mix — so it needed no system implementation. Matches RFC 7914's published vectors
