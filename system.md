@@ -1074,6 +1074,21 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The tick guarantee finished, and the caveat I wrote for it was wrong in BOTH
+  directions.** The previous boundary said I/O-event callbacks were not trampolined.
+  Testing six different routes out of the host showed four were already correct —
+  `fs`, `http`, child exit and socket data reach user code through JS-side tick or
+  immediate deferral, so they inherit the trampoline — and two were genuinely broken:
+  **dns completions and fs.watch events ran promises before ticks**, because those
+  bridges call JavaScript straight from their own handler with nothing in between.
+  Fixed by wrapping the callback ONCE at registration (`__wrapInvoke`) rather than at
+  call time, which also keeps the host-side handler from capturing the engine to reach
+  the trampoline. Then all nine bridges that call JavaScript from a handler got the
+  same wrapper, so the guarantee is uniform instead of resting on whether some
+  downstream JS layer happens to defer. Verified 6/6 against real node on every route.
+  Worth keeping: a caveat written from reasoning rather than measurement was wrong
+  about which half was broken. The fixture now checks six routes because "the ones I
+  happened to test" is exactly how this guarantee ended up half-true the first time.
 - **`BroadcastChannel` and `receiveMessageOnPort`: two more refusals whose reasons
   were wrong, and wrong in the same way as cluster's.** They sat under a comment
   saying everything below "needs SHARED MEMORY between contexts", and neither does.
@@ -1124,8 +1139,7 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   when the outermost JS frame returns, so ticks queued inside a callback now win
   either way round. Found by a test written for something else entirely, which is the
   second time this window that a new fixture caught a pre-existing bug in a claim I
-  had already written down. Still not trampolined: I/O-event callbacks, which arrive
-  as host jobs through per-bridge closures rather than one call site.
+  had already written down.
 - **`options.env` now actually reaches a spawned child.** It was silently dropped
   before: every child inherited the parent's environment. node REPLACES the
   environment when `env` is given (the caller spreads `process.env` in if it wants

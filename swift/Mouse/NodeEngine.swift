@@ -448,6 +448,17 @@ final class NodeEngine: @unchecked Sendable {
         trampoline.call(withArguments: [callback, arguments])
     }
 
+    /// Wrap a JS callback so that calling it drains the tick queue before the stack unwinds.
+    /// Done at registration rather than at call time on purpose: the handlers that fire these
+    /// live on the host side and must not capture the engine to reach the trampoline.
+    private func trampolined(_ callback: JSValue) -> JSValue {
+        guard let wrap = context.objectForKeyedSubscript("__wrapInvoke"), !wrap.isUndefined,
+              let wrapped = wrap.call(withArguments: [callback]), !wrapped.isUndefined else {
+            return callback
+        }
+        return wrapped
+    }
+
     private func drainTicks() {
         guard exitCode == nil else { return }
         context.evaluateScript("globalThis.__drainTicks && globalThis.__drainTicks()")
@@ -676,7 +687,7 @@ final class NodeEngine: @unchecked Sendable {
             guard let self else { return 0 }
             let wantsIPC = mode.contains("ipc")
             let isEval = mode.hasPrefix("eval")
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             let id = sockets.claimExternalID()
             outstanding += 1
             // `options.env` finally reaches the child. A caller that passes env expects exactly
@@ -776,7 +787,7 @@ final class NodeEngine: @unchecked Sendable {
         let httpRequest: @convention(block) (String, String, [String: String], String, JSValue) -> Void = { [weak self] urlText, method, headers, bodyBase64, callback in
             guard let self else { return }
             guard let url = URL(string: urlText) else {
-                let carried = Carried(callback)
+                let carried = Carried(trampolined(callback))
                 self.enqueueJob { carried.value.call(withArguments: [["error": "invalid URL: \(urlText)"]]) }
                 return
             }
@@ -785,7 +796,7 @@ final class NodeEngine: @unchecked Sendable {
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
             self.outstanding += 1
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             URLSession.shared.dataTask(with: request) { data, response, error in
                 self.enqueueJob {
                     self.outstanding -= 1
@@ -817,7 +828,7 @@ final class NodeEngine: @unchecked Sendable {
         let httpStream: @convention(block) (String, String, [String: String], String, JSValue) -> Void = {
             [weak self] urlText, method, headers, bodyBase64, callback in
             guard let self else { return }
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             guard let url = URL(string: urlText) else {
                 enqueueJob { carried.value.call(withArguments: ["error", "invalid URL: \(urlText)"]) }
                 return
@@ -849,7 +860,7 @@ final class NodeEngine: @unchecked Sendable {
         // node 22 exposes. Frames, masking and the close handshake belong to the system here.
         let wsOpen: @convention(block) (String, [String], JSValue) -> Int32 = { [weak self] urlText, protocols, callback in
             guard let self, let url = URL(string: urlText) else { return 0 }
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             let deliver: @Sendable (String, Any) -> Void = { [weak self] event, payload in
                 self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
             }
@@ -912,7 +923,7 @@ final class NodeEngine: @unchecked Sendable {
         // switches on the name, so adding an event costs nothing here. All of these run on
         // the JS thread already (SocketTable delivers through `enqueueJob`).
         func dispatcher(_ callback: JSValue) -> SocketTable.Handler {
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             @Sendable func plain(_ address: SocketTable.Address) -> [String: Any] {
                 ["address": address.address, "port": address.port, "family": address.family]
             }
@@ -990,7 +1001,7 @@ final class NodeEngine: @unchecked Sendable {
         let netResolve: @convention(block) (String, Int32, JSValue) -> Void = { [weak self] host, family, callback in
             guard let self else { return }
             socketsUsed = true
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             sockets.resolve(host: host, family: Int(family)) { found, code in
                 let list = found.map { ["address": $0.address, "family": $0.family == "IPv6" ? 6 : 4] as [String: Any] }
                 carried.value.call(withArguments: [list, code ?? ""])
@@ -1009,7 +1020,7 @@ final class NodeEngine: @unchecked Sendable {
         let dgramSend: @convention(block) (Int32, String, String, Int32, JSValue) -> Void = {
             [weak self] id, base64, host, port, callback in
             guard let self, let data = Data(base64Encoded: base64) else { return }
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             sockets.sendDatagram(id: Int(id), data: data, host: host, port: Int(port)) { code in
                 carried.value.call(withArguments: [code ?? ""])
             }
@@ -1036,7 +1047,7 @@ final class NodeEngine: @unchecked Sendable {
         let fsWatch: @convention(block) (String, Bool, JSValue) -> Int32 = { [weak self] path, recursive, callback in
             guard let self else { return 0 }
             watchersUsed = true
-            let carried = Carried(callback)
+            let carried = Carried(trampolined(callback))
             guard let id = watchers.watch(path: realURL(path).path, recursive: recursive, handler: { event in
                 switch event {
                 case let .rename(name): carried.value.call(withArguments: ["rename", name])
@@ -3069,6 +3080,14 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.__invoke = function(fn, args) {
         try { return fn.apply(null, args || []); }
         finally { globalThis.__drainTicks(); }
+      };
+      // For host callbacks the loop does not invoke itself. A bridge that calls JavaScript from
+      // its own handler (dns completions, watch events) wraps the callback ONCE here, at
+      // registration, so the handler can call it without knowing any of this.
+      globalThis.__wrapInvoke = function(fn) {
+        return function() {
+          return globalThis.__invoke(fn, Array.prototype.slice.call(arguments));
+        };
       };
       // ---- stdio streams (real TTY semantics when the host attached one) ----
       const signalHandlers = { SIGINT: [], SIGTERM: [], SIGWINCH: [] };

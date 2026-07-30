@@ -465,6 +465,15 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A caveat you reason your way to is a guess; measure it.** The previous boundary
+  recorded "I/O callbacks are not trampolined" from reading the code. Testing six
+  routes out of the host showed four already worked and two were broken — so the
+  caveat was wrong about which half. If a limitation is worth writing down, it is
+  worth one test first.
+- **Cover the ROUTES, not the ones you happened to think of.** A guarantee about "every
+  callback" needs a fixture per distinct path out of the host (fs, dns, watch, http,
+  child, socket). The first version of the tick guarantee passed its fixture and was
+  still half-true, because the fixture only exercised timers.
 - **A hang is a worse bug than an error.** When a network path can fail, check that
   it produces an event a caller can act on. Two of this layer's http defects were
   silent waits, and both were invisible to fixtures that only asserted happy paths.

@@ -13,7 +13,9 @@ carry breaking changes.
   as node has them, so `receiveMessageOnPort` works on a global channel's port.
 - Node layer: `process.nextTick` now really does run before promise reactions. It is
   scheduled as a microtask, so it previously won only when registered first; every
-  host-invoked callback now drains the tick queue before the stack unwinds.
+  host-invoked callback now drains the tick queue before the stack unwinds — the
+  loop's phases plus all nine bridges that call JavaScript from their own handler.
+  `dns.lookup` completions and `fs.watch` events were running promises first.
 - Node layer: MessagePort deliveries run in their own event loop phase (after
   nextTick and promises, before immediates), which is where node runs them.
 - Node layer: `BroadcastChannel` (global and via `worker_threads`),
