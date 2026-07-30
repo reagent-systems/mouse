@@ -465,6 +465,13 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Separate assertions from investigations.** A harness collection accumulates both: tests
+  that must pass, and sweeps that list differences by design. Counting them together means a
+  real regression hides among the expected failures. Mark the diagnostics and report them
+  apart — an assertion that always fails is noise wearing a test's clothes.
+- **Record each harness's build inputs; do not retype them.** Guessing a source list produced
+  a false BUILD FAILED twice here, which reads exactly like a regression. One runner that
+  knows the source sets makes a full verification a single command.
 - **Only the host knows what the host knows.** JS inferred "no TTY means nothing will write
   to stdin", which is false for a spawned child whose parent writes later. When a fact lives
   on the Swift side, pass it in explicitly instead of deducing it from a proxy.

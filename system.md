@@ -1074,6 +1074,26 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **A verification runner, because guessing a harness's sources faked a failure twice.** The
+  shell harness and then the tty harness both reported BUILD FAILED from my own wrong file
+  list, and a build failure that is really a typo is the most expensive noise there is: it
+  looks exactly like a regression. `verify.sh` now knows the three source sets (node,
+  node+terminal for the screen harnesses, node+shell+git for msh) so a full run is one command.
+  Builds go in PARALLEL — each harness recompiles the whole engine, so serially a full run is
+  about an hour — while the RUNS stay serial, because several bind ports or spawn children and
+  would fight each other rather than test anything.
+  **The first version reported three passes from binaries an earlier run had left behind.** The
+  inline `xargs` body overflowed the command line, every build silently did nothing, and the
+  stale executables answered — the exact trap this session put in AGENTS.md, reproduced inside
+  the tool written to prevent it. Builds moved into `build-one.sh`, which deletes the binary
+  and the results file before it starts.
+  **Full run: 53 harnesses, 45 assertions passing, 0 regressions.** Five "failures" turned out
+  to be INVESTIGATIONS rather than assertions — the 1824-case corpus documenting why
+  `path.matchesGlob` is refused, the probe written to decide whether `process.stdout` was worth
+  rebuilding, sweeps that list differences by design. They fail every run by construction, and
+  five expected failures is precisely how a real one hides, so the runner now reports them
+  separately and does not count them. An assertion that always fails is not a test; it is noise
+  wearing a test's clothes.
 - **Every stream-LIKE object against ONE contract — `for await` on stdin threw.** The
   previous lesson ("a behaviour can live in more than one place") turned into a sweep:
   fourteen stream-like objects the engine hands out, checked against the same API. The
