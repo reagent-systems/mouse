@@ -24,8 +24,9 @@ carry breaking changes.
   ChaCha20-Poly1305 ciphers, `pbkdf2`, `hkdf`, and RSA/EC/Ed25519 signing, all interoperable with
   node's — `jsonwebtoken` issues RS256, PS256, ES256 and HS256 tokens real node
   accepts), `zlib` (libz), `readline`,
-  `child_process` bridged into `msh`, the **fetch API** with streaming
-  response bodies, and **real TCP** (`net`): outbound connections, servers
+  `child_process` bridged into `msh`, the **fetch API** whose response bodies genuinely
+  stream (server-sent events arrive as they are sent, not all at once at the
+  end), and **real TCP** (`net`): outbound connections, servers
   that listen and accept, honest backpressure and half-close — verified in
   both directions against real node, so a node client cannot tell our
   server from node's. On top of that, **`http.createServer`** — keep-alive,

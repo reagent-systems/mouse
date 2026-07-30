@@ -597,6 +597,40 @@ final class NodeEngine: @unchecked Sendable {
         }
         expose("httpRequest", httpRequest)
 
+        // -- the same transport, delivered INCREMENTALLY ------------------------------------
+        // URLSession's completion-handler form hands over a finished body, which is fine for a
+        // JSON call and wrong for a stream: an agent CLI reading server-sent events from an
+        // HTTPS API got every token at once. The delegate form reports the head, then each
+        // chunk as it arrives, then the end — which is what `fetch` and `https.request` now
+        // ride. TLS stays where the system owns it; only the delivery changed.
+        let httpStream: @convention(block) (String, String, [String: String], String, JSValue) -> Void = {
+            [weak self] urlText, method, headers, bodyBase64, callback in
+            guard let self else { return }
+            let carried = Carried(callback)
+            guard let url = URL(string: urlText) else {
+                enqueueJob { carried.value.call(withArguments: ["error", "invalid URL: \(urlText)"]) }
+                return
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = method
+            for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+            if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
+            outstanding += 1
+            let collector = StreamCollector(
+                deliver: { [weak self] event, payload in
+                    self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
+                },
+                finished: { [weak self] in
+                    self?.enqueueJob { self?.outstanding -= 1 }
+                })
+            // A delegate session must be invalidated or it retains its delegate forever;
+            // StreamCollector does that when the task completes.
+            let session = URLSession(configuration: .default, delegate: collector, delegateQueue: nil)
+            collector.session = session
+            session.dataTask(with: request).resume()
+        }
+        expose("httpStream", httpStream)
+
         // -- net: real TCP through SocketTable ---------------------------------------------
         // One dispatcher shape for every socket: `callback(event, payload)`. The JS side
         // switches on the name, so adding an event costs nothing here. All of these run on
@@ -4988,9 +5022,8 @@ final class NodeEngine: @unchecked Sendable {
         Object.defineProperty(target, 'body', {
           configurable: true,
           get: function() {
-            // One-shot stream over the buffered bytes: the bridge returns a complete
-            // response, so there is no incremental HTTP streaming yet (a bridge feature,
-            // recorded in system.md) — but the READER contract is real.
+            // A one-shot stream over bytes already in hand. A response that is still ARRIVING
+            // uses defineStreamBody instead, which hands over the live stream.
             return new ReadableStream({ start: function(controller) {
               if (bytes.length) controller.enqueue(new Uint8Array(bytes));
               controller.close();
@@ -5006,6 +5039,41 @@ final class NodeEngine: @unchecked Sendable {
           return Promise.resolve(copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.length));
         };
         target.blob = function() { target.bodyUsed = true; return Promise.resolve(new Blob([bytes])); };
+      }
+      // A body that is still arriving: `body` IS the live stream, and the one-shot readers
+      // (text/json/bytes) drain it — once, like node, since a stream cannot be read twice.
+      function defineStreamBody(target, stream) {
+        target.bodyUsed = false;
+        target._streaming = true;
+        let drained = null;
+        Object.defineProperty(target, 'body', {
+          configurable: true,
+          get: function() { return stream; },
+        });
+        function drain() {
+          if (drained) return drained;
+          target.bodyUsed = true;
+          const reader = stream.getReader();
+          const chunks = [];
+          drained = (function pump() {
+            return reader.read().then(function(result) {
+              if (result.done) return Buffer.concat(chunks);
+              chunks.push(Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value));
+              return pump();
+            });
+          })();
+          return drained;
+        }
+        target.text = function() { return drain().then(function(bytes){ return bytes.toString(); }); };
+        target.json = function() { return drain().then(function(bytes){ return JSON.parse(bytes.toString()); }); };
+        target.bytes = function() { return drain().then(function(bytes){ return new Uint8Array(bytes); }); };
+        target.arrayBuffer = function() {
+          return drain().then(function(bytes) {
+            const copy = Buffer.from(bytes);
+            return copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.length);
+          });
+        };
+        target.blob = function() { return drain().then(function(bytes){ return new Blob([bytes]); }); };
       }
       globalThis.Request = class Request {
         constructor(input, options) {
@@ -5030,11 +5098,20 @@ final class NodeEngine: @unchecked Sendable {
           this.url = options.url || '';
           this.redirected = !!options.redirected;
           this.type = options.type || 'default';
+          // A ReadableStream body stays a stream — that is what makes a streaming response
+          // readable as it arrives instead of after it finishes.
+          if (body && typeof body.getReader === 'function') { defineStreamBody(this, body); return; }
           defineBody(this, body === undefined || body === null ? Buffer.alloc(0)
                      : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))));
         }
         get ok() { return this.status >= 200 && this.status < 300; }
         clone() {
+          if (this._streaming) {
+            // node tees the stream here; teeing needs a tee, which our ReadableStream does not
+            // have. Saying so beats handing back a response whose body is already spent.
+            throw Object.assign(new Error('cannot clone a response whose body is still streaming: read it once, or buffer it with text()/arrayBuffer() first'),
+                                { code: 'ERR_INVALID_STATE' });
+          }
           return new Response(this._bytes, { status: this.status, statusText: this.statusText,
                                              headers: this.headers, url: this.url });
         }
@@ -5083,13 +5160,44 @@ final class NodeEngine: @unchecked Sendable {
         if (signal && signal.aborted) {
           return Promise.reject(signal.reason || Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
         }
-        const inFlight = rawRequest(request.url, request.method, headers, bodyBase64).then(function(result) {
-          const bodyBuffer = Buffer.from(result.body || '', 'base64');
-          return new Response(bodyBuffer, {
-            status: result.status,
-            statusText: String(result.status),
-            headers: result.headers,
-            url: request.url,
+        // The response settles when the HEAD arrives, not when the body finishes: that is the
+        // whole point of a stream, and it is what lets an SSE reader see tokens as they are
+        // sent instead of all at once when the connection ends.
+        const inFlight = new Promise(function(resolve, reject) {
+          let controller = null;
+          let settled = false;
+          const pending = [];
+          const stream = new ReadableStream({
+            start: function(c) {
+              controller = c;
+              for (const chunk of pending) controller.enqueue(chunk);
+              pending.length = 0;
+            },
+          });
+          bridge.httpStream(request.url, request.method, headers, bodyBase64, function(event, payload) {
+            if (event === 'head') {
+              settled = true;
+              resolve(new Response(stream, {
+                status: payload.status,
+                statusText: String(payload.status),
+                headers: payload.headers,
+                url: request.url,
+              }));
+              return;
+            }
+            if (event === 'data') {
+              const chunk = Buffer.from(payload, 'base64');
+              if (controller) controller.enqueue(chunk); else pending.push(chunk);
+              return;
+            }
+            if (event === 'end') {
+              if (controller) controller.close();
+              return;
+            }
+            // An error before the head fails the fetch; after it, the stream is what fails.
+            const error = Object.assign(new Error('fetch failed: ' + payload), { cause: new Error(String(payload)) });
+            if (!settled) reject(error);
+            else if (controller) controller.error(error);
           });
         });
         if (!signal) return inFlight;
@@ -5104,8 +5212,9 @@ final class NodeEngine: @unchecked Sendable {
       };
       function makeHttpModule(defaultProtocol) {
         // https keeps riding URLSession: TLS is a handshake we cannot put on a raw socket, and
-        // the system already owns a correct one. Its limits are URLSession's — a response
-        // arrives complete rather than incrementally, and there is no upgrade path.
+        // the system already owns a correct one. Its response STREAMS now (the delegate form of
+        // the transport), so the remaining difference from the plaintext path is upgrades —
+        // there is no 101 handover through URLSession.
         function tlsRequest(url, options, callback) {
           const EventEmitter = coreRequire('events');
           const clientRequest = new EventEmitter();
@@ -5121,23 +5230,31 @@ final class NodeEngine: @unchecked Sendable {
             if (chunk) body += chunk;
             const headers = {};
             for (const key of Object.keys(options.headers || {})) headers[key] = String(options.headers[key]);
-            rawRequest(url, options.method || 'GET', headers, body ? Buffer.from(body).toString('base64') : '')
-              .then(function(result) {
-                const response = new EventEmitter();
-                response.statusCode = result.status;
-                response.headers = result.headers;
+            let response = null;
+            let encoding = null;
+            bridge.httpStream(url, options.method || 'GET', headers,
+                              body ? Buffer.from(body).toString('base64') : '',
+                              function(event, payload) {
+              if (event === 'head') {
+                const { Readable } = coreRequire('stream');
+                response = new Readable({ read: function(){} });
+                response.statusCode = payload.status;
+                response.statusMessage = '';
+                response.headers = payload.headers;
+                response.rawHeaders = Object.keys(payload.headers)
+                  .reduce(function(all, key){ all.push(key, payload.headers[key]); return all; }, []);
                 response.httpVersion = '1.1';
-                response.setEncoding = function(){ return response; };
-                response.resume = function(){ return response; };
+                response.complete = false;
+                response.setEncoding = function(name) { encoding = name; response._readableEncoding = name; return response; };
                 if (callback) callback(response);
                 clientRequest.emit('response', response);
-                setImmediate(function() {
-                  const buffer = Buffer.from(result.body || '', 'base64');
-                  if (buffer.length) response.emit('data', buffer);
-                  response.emit('end');
-                });
-              })
-              .catch(function(error) { clientRequest.emit('error', error); });
+                return;
+              }
+              if (!response) return;
+              if (event === 'data') { response.push(Buffer.from(payload, 'base64')); return; }
+              if (event === 'end') { response.complete = true; response.push(null); return; }
+              response.destroy(new Error(String(payload)));
+            });
           };
           return clientRequest;
         }
@@ -7689,4 +7806,54 @@ final class NodeEngine: @unchecked Sendable {
       globalThis.__coreModule = coreRequire;
     })();
     """#
+}
+
+/// URLSession's delegate side of a streaming response: the head once, each chunk as it lands,
+/// then the end. This is what makes server-sent events actually stream — the completion-handler
+/// API only ever hands over a finished body.
+///
+/// It reports through closures rather than touching the engine directly, so the engine's rule
+/// holds: nothing here runs on the JS thread, and every callback is delivered as an event-loop
+/// job by whoever constructed it.
+private final class StreamCollector: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let deliver: (String, Any) -> Void
+    private let finished: () -> Void
+    /// Retained so it can be invalidated: a delegate session holds its delegate until then.
+    var session: URLSession?
+    private var reportedHead = false
+
+    init(deliver: @escaping (String, Any) -> Void, finished: @escaping () -> Void) {
+        self.deliver = deliver
+        self.finished = finished
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let http = response as? HTTPURLResponse
+        var headerMap: [String: String] = [:]
+        for (name, value) in http?.allHeaderFields ?? [:] {
+            headerMap[String(describing: name).lowercased()] = String(describing: value)
+        }
+        reportedHead = true
+        deliver("head", ["status": http?.statusCode ?? 0, "headers": headerMap])
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        deliver("data", data.base64EncodedString())
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            // A failure before the head means the request never got off the ground; after it,
+            // the stream was cut — either way the JS side needs to stop waiting.
+            deliver("error", error.localizedDescription)
+        } else {
+            deliver("end", NSNull())
+        }
+        finished()
+        session.finishTasksAndInvalidate()
+        self.session = nil
+    }
 }

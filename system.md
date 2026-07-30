@@ -99,6 +99,7 @@ so a TUI navigates and edits.
 | **Phase G — signing, and JWTs** | ECDSA over P-256/384/521 and Ed25519 through CryptoKit: `createSign`/`createVerify`, one-shot `sign`/`verify`, `generateKeyPair`, `createPrivateKey`/`createPublicKey`, and DER *or* JOSE raw (`ieee-p1363`) signature encoding. Real node verifies our signatures and we verify node's, for all four key types, with tampered messages rejected. **`jsonwebtoken` works cross-engine** on ES256 and HS256 — and it found three bugs nothing else had, including a base64url decoding fault that silently dropped bytes |
 | **Phase G — RSA on SecKey** | `NodeKeys.swift`: RSA sign/verify (PKCS1v15 and PSS), OAEP and PKCS1 encryption, and key generation, through Security framework — plus the small DER reader/writer that moves between SecKey's PKCS#1 and node's PKCS#8/SPKI. Cross-engine both ways, including re-signing an imported key to identical bytes (PKCS1v15 is deterministic) and opening the other engine's OAEP ciphertext. **`jsonwebtoken` now covers RS256 and PS256** as well as ES256 and HS256 — the four algorithms real JWTs actually use |
 | **Phase G — connection pooling** | A real keep-alive `Agent`: idle sockets are pooled per host:port, reused LIFO, and **unref'd while idle** so a warm pool never holds a program open. Four sequential requests now travel over one connection, the same count node reports — the last recorded divergence in the HTTP client is closed. Pooling immediately exposed a server-side gap it was right to expose: `keepAliveTimeout` was stored and never enforced, so an idle connection was never dropped and `server.close()` waited on a peer with nothing left to say |
+| **Phase G — streaming responses** | The URLSession transport moved to its DELEGATE form, so `fetch` and `https.request` deliver the head first and then each chunk as it lands. Server-sent events now arrive as they are sent — three events half a second apart read as three reads spread over time, matching real node — which is the case that matters most here: **an agent CLI streaming tokens from an API**. `Response.body` is a live `ReadableStream`; `text()`/`json()` drain it once |
 
 ### Verification performed
 
@@ -1008,6 +1009,22 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **Streaming responses, the last buffering left in the stack.** `fetch` and
+  `https.request` rode URLSession's completion-handler API, which hands over a
+  FINISHED body — so an agent CLI reading server-sent events got every token at
+  once, when the connection ended. That is the exact case this whole layer
+  exists to serve. Both now ride the delegate form: the head is reported first
+  (the `fetch` promise settles there, which is the point of a stream), then each
+  chunk as it lands, then the end. `Response.body` is a live `ReadableStream`
+  fed by those chunks, and the one-shot readers (`text`, `json`, `arrayBuffer`)
+  drain it once, as node's do. `https.request`'s response is a real Readable
+  that emits `data` as bytes arrive.
+  Proven by TIMING rather than content: three events sent half a second apart
+  must arrive as three reads spread over time, in both engines — a fixture that
+  only compared the concatenated text would have passed before the fix.
+  `Response.clone()` on a still-streaming body refuses with the reason (node
+  tees the stream; teeing needs a tee our `ReadableStream` does not have), which
+  beats handing back a response whose body is already spent.
 - **Connection pooling, and the server bug it uncovered.** The HTTP client now
   has node's `Agent`: sockets are kept per host:port after a response completes,
   reused LIFO (the warm one is likeliest to still be up), discarded when the peer
@@ -1153,10 +1170,11 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   the fixture settles first rather than having us invent an event.
 - **One divergence left in the HTTP client, and it is structural.**
   `https.request` stays on URLSession, because TLS is a handshake we cannot put
-  on a raw socket — so an https request keeps URLSession's limits (complete
-  bodies, no upgrade) while plaintext http has neither. The
-  one-connection-per-request difference that used to sit here is GONE: the agent
-  pools now, and the fixture asserts the connection count matches node's.
+  on a raw socket. What that costs is now only the UPGRADE path — there is no
+  101 handover through URLSession — since responses stream and connections pool
+  on both transports. The one-connection-per-request difference that used to sit
+  here is gone (the agent pools, and the fixture counts connections), and so is
+  the complete-body limitation (the transport streams).
 - **A divergence recorded rather than papered over.** Node reports a
   server's `'connection'` before the connecting client's `'connect'`; we
   report the reverse, because a loopback handshake completes inside

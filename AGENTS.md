@@ -168,6 +168,13 @@ watch mode must compile, detect an edit through our watcher, recompile, and
 report the same diagnostics as real node. That last one is the phase-D loop
 (edit → recompile → diagnostics) and the heaviest consumer of `fs.watch` there
 is; if it breaks, suspect the watcher or `Stats` before suspecting tsc.
+STREAMING responses must be verified by TIMING, not content: send events with a
+delay and assert the reads are SPREAD OVER TIME in both engines. A fixture that
+compares only the concatenated body passes just as happily against a transport
+that buffers everything, which is how the URLSession path hid this for so long.
+`fetch` settles when the HEAD arrives, not when the body finishes — that is the
+point of a stream — and `Response.body` is the live stream while `text()`/`json()`
+drain it once. `clone()` on a streaming body refuses (node tees; we have no tee).
 RSA (`NodeKeys.swift`) rides Security framework's `SecKey`, which speaks PKCS#1
 while node speaks PKCS#8/SPKI — the DER reader/writer there exists ONLY for that
 unwrap and rewrap, and it must keep returning nil on malformed input rather than
