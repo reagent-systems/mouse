@@ -465,6 +465,12 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Audit the verification itself.** Two harness bugs in two boundaries each reported a
+  working engine as broken. When that happens twice, sweep the harnesses the way you would
+  sweep the code: every expected-output block, every capture. A harness that lies costs more
+  than a bug — it sends you to a defect that is not there, or hides one that is. And prefer
+  removing a trap to documenting it: the fragile helper was replaced everywhere, and the
+  suite passing unchanged is what proves the replacement equivalent.
 - **`2>&1 >/dev/null` does NOT capture stderr.** It points stderr at the old stdout and sends
   stdout to the void. Use `> out.txt 2> err.txt`. The first console sweep compared against an
   empty stderr file and reported every line as broken.

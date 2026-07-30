@@ -1074,6 +1074,21 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **An audit of the VERIFICATION ITSELF, after two harness bugs in two boundaries.** The
+  rule this session keeps proving — when the same defect appears twice, sweep the class —
+  applied to the test infrastructure rather than the engine. The console boundary was
+  reported as broken twice by a harness that was itself wrong (`2>&1 >/dev/null` capturing
+  nothing, and an indentation trick eating table padding), and a harness that lies costs more
+  than a bug: it sends the next hour to a defect that does not exist, or worse, hides one that
+  does.
+  Swept all 24 expected-output blocks in the fixture suite and all 50 harnesses for the
+  four-space corruption. **Exactly one was ever at risk** — the console fixture, already
+  fixed — and the other 23 blocks contain no four-space runs, so nothing was silently
+  asserting the wrong thing. That "I checked and it was fine" is the point of the sweep.
+  The trap is now removed rather than documented: a `stripIndent()` that removes exactly one
+  leading indent per line replaces `replacingOccurrences(of: "    ")` at all 25 sites. 95
+  fixtures pass unchanged with the new primitive, which is what proves it equivalent for
+  every existing expectation, and no harness can silently corrupt an expectation again.
 - **The console audit — sixteen methods missing, and `debug` on the wrong stream.** In a
   terminal IDE every console method is a visible feature. `dir`, `table`, `group`,
   `groupEnd`, `count`, `time`, `assert`, `clear` and eight more were **absent from the global
