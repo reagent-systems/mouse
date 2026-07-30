@@ -533,6 +533,24 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   does) THREW instead of yielding U+FFFD; the decoder is now lenient like
   node's (fixture `utf8-lenient-decode`). 55 node fixtures, full battery
   green
+- **INCREMENTAL ZLIB — and tar now works end to end.** The named next
+  feature, built: a `ZlibStream` class keeps a live `z_stream` (heap
+  allocated, `deflateInit2_`/`inflateInit2_`, ended on close) behind a
+  handle, with `zlibOpen`/`zlibPush`/`zlibClose` on the bridge. Each coder
+  stream (`createGunzip`, `createGzip`, the class forms, and minizlib's
+  internal `_processChunk`) now feeds THE SAME z_stream and takes output as
+  it becomes available, instead of buffering everything for a one-shot
+  call — which could never work for streaming inflate, since a partial
+  gzip member isn't decodable alone. Z_BUF_ERROR mid-stream is treated as
+  "no progress yet", not failure. **tar creates AND extracts**: `tar.create`
+  writes a real .tgz and `tar.extract` restores both files with correct
+  contents. Fixture `zlib-incremental` pins both directions — compressed
+  bytes fed 64 at a time through `createGunzip`, and text fed 700 at a time
+  through `createGzip` then verified with the one-shot decoder — plus the
+  three existing zlib fixtures still match. 56 node fixtures, PHASE F,
+  TTY, e2e, Swift 6 build — all green. The loop's "stream depth" item is
+  now genuinely deep: real Readable/Writable/Transform semantics AND real
+  streaming compression underneath them
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

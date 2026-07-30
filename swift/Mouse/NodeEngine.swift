@@ -558,6 +558,39 @@ final class NodeEngine: @unchecked Sendable {
             return Self.zlibCode(input, deflating: deflating, windowBits: windowBits)?.base64EncodedString()
         }
         expose("zlibTransform", zlibTransform)
+        // Incremental coding: open a live stream, push chunks, close. Same windowBits map as
+        // the one-shot path.
+        let zlibOpen: @convention(block) (String) -> Int = { [weak self] mode in
+            guard let self else { return 0 }
+            let deflating: Bool
+            let windowBits: Int32
+            switch mode {
+            case "gzip": deflating = true; windowBits = 15 + 16
+            case "deflate": deflating = true; windowBits = 15
+            case "deflateRaw": deflating = true; windowBits = -15
+            case "inflateRaw": deflating = false; windowBits = -15
+            case "gunzip", "inflate", "unzip": deflating = false; windowBits = 15 + 32
+            default: return 0
+            }
+            guard let stream = ZlibStream(deflating: deflating, windowBits: windowBits) else { return 0 }
+            let handle = self.nextZlibHandle
+            self.nextZlibHandle += 1
+            self.zlibStreams[handle] = stream
+            return handle
+        }
+        expose("zlibOpen", zlibOpen)
+        let zlibPush: @convention(block) (Int, String, Bool) -> String? = { [weak self] handle, base64, finish in
+            guard let self, let stream = self.zlibStreams[handle] else { return nil }
+            let input = base64.isEmpty ? Data() : (Data(base64Encoded: base64) ?? Data())
+            guard let output = stream.push(input, finish: finish) else { return nil }
+            return output.base64EncodedString()
+        }
+        expose("zlibPush", zlibPush)
+        let zlibClose: @convention(block) (Int) -> Void = { [weak self] handle in
+            guard let self else { return }
+            self.zlibStreams.removeValue(forKey: handle)?.close()
+        }
+        expose("zlibClose", zlibClose)
         let createRequireBlock: @convention(block) (String) -> Any = { [weak self] fromPath in
             guard let self else { return NSNull() }
             var from = fromPath
@@ -575,6 +608,73 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(tty?.rows ?? 24, forKeyedSubscript: "__ttyRows" as NSString)
         context.setObject(tty?.columns ?? 80, forKeyedSubscript: "__ttyColumns" as NSString)
     }
+
+    /// A live libz stream: the state that makes INCREMENTAL coding possible. The one-shot
+    /// path can't serve `zlib.createGunzip()` fed chunk-by-chunk (minizlib under tar does
+    /// exactly that) — a partial member isn't decodable on its own, so each chunk must feed
+    /// the same z_stream and take whatever output is ready.
+    private final class ZlibStream {
+        let stream: UnsafeMutablePointer<z_stream>
+        let deflating: Bool
+        var closed = false
+
+        init?(deflating: Bool, windowBits: Int32) {
+            self.deflating = deflating
+            stream = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
+            stream.initialize(to: z_stream())
+            let size = Int32(MemoryLayout<z_stream>.size)
+            let status = deflating
+                ? deflateInit2_(stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, zlibVersion(), size)
+                : inflateInit2_(stream, windowBits, zlibVersion(), size)
+            guard status == Z_OK else {
+                stream.deallocate()
+                return nil
+            }
+        }
+
+        /// Feed `input`, return whatever output libz produces. `finish` flushes the tail.
+        func push(_ input: Data, finish: Bool) -> Data? {
+            guard !closed else { return nil }
+            var output = Data()
+            var buffer = [UInt8](repeating: 0, count: 1 << 16)
+            var source = [UInt8](input)
+            let ok: Bool = source.withUnsafeMutableBufferPointer { sourcePointer in
+                stream.pointee.next_in = sourcePointer.baseAddress
+                stream.pointee.avail_in = uInt(sourcePointer.count)
+                while true {
+                    var status: Int32 = Z_OK
+                    let produced = buffer.withUnsafeMutableBufferPointer { bufferPointer -> Int in
+                        stream.pointee.next_out = bufferPointer.baseAddress
+                        stream.pointee.avail_out = uInt(bufferPointer.count)
+                        status = deflating
+                            ? deflate(stream, finish ? Z_FINISH : Z_NO_FLUSH)
+                            : inflate(stream, finish ? Z_FINISH : Z_NO_FLUSH)
+                        return bufferPointer.count - Int(stream.pointee.avail_out)
+                    }
+                    if produced > 0 { output.append(contentsOf: buffer[0..<produced]) }
+                    if status == Z_STREAM_END { return true }
+                    if status == Z_OK { if produced == 0 && stream.pointee.avail_in == 0 { return true }; continue }
+                    // Z_BUF_ERROR just means "no progress possible right now" mid-stream.
+                    if status == Z_BUF_ERROR { return !finish }
+                    return false
+                }
+            }
+            return ok ? output : nil
+        }
+
+        func close() {
+            guard !closed else { return }
+            closed = true
+            if deflating { deflateEnd(stream) } else { inflateEnd(stream) }
+            stream.deallocate()
+        }
+
+        deinit { close() }
+    }
+
+    /// Live coder streams, keyed by the handle JS holds. Touched only on the JS queue.
+    private var zlibStreams: [Int: ZlibStream] = [:]
+    private var nextZlibHandle = 1
 
     /// One-shot deflate or inflate with explicit windowBits (15=zlib, 15+16=gzip, -15=raw,
     /// 15+32=auto-detect on inflate). libz, not Compression — same reason as GitCore.
@@ -3713,13 +3813,35 @@ final class NodeEngine: @unchecked Sendable {
           // "Compression method not supported" when the constructor is missing.
           const Coder = function(options) {
             const chunks = [];
+            // A LIVE libz stream per coder: chunks feed the same z_stream and output comes
+            // out as it's ready. (The one-shot path can't do this — a partial gzip member
+            // isn't decodable alone, which is why streaming gunzip used to fail.)
+            let handle = bridge.zlibOpen(mode);
+            function code(chunk, finish) {
+              if (!handle) throw new Error('zlib: cannot open ' + mode);
+              const input = chunk && chunk.length
+                ? (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))).toString('base64') : '';
+              const result = bridge.zlibPush(handle, input, !!finish);
+              if (result === null || result === undefined) {
+                const error = new Error('zlib: ' + mode + ': invalid input');
+                error.code = 'Z_DATA_ERROR';
+                throw error;
+              }
+              if (finish) { bridge.zlibClose(handle); handle = 0; }
+              return Buffer.from(result, 'base64');
+            }
             const stream = new Transform({
               transform(chunk, encoding, callback) {
-                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-                callback();
+                try {
+                  const out = code(chunk, false);
+                  callback(null, out.length ? out : undefined);
+                } catch (error) { callback(error); }
               },
               flush(callback) {
-                try { callback(null, run(mode, Buffer.concat(chunks))); } catch (error) { callback(error); }
+                try {
+                  const out = code(null, true);
+                  callback(null, out.length ? out : undefined);
+                } catch (error) { callback(error); }
               },
             });
             stream._opts = options || {};
@@ -3737,13 +3859,7 @@ final class NodeEngine: @unchecked Sendable {
             // so data accumulates and codes at Z_FINISH (4); intermediate flushes return
             // empty, which minizlib concatenates harmlessly.
             stream._processChunk = function(chunk, flushFlag) {
-              if (chunk && chunk.length) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-              if (flushFlag === 4 || flushFlag === undefined) {
-                const coded = run(mode, Buffer.concat(chunks));
-                chunks.length = 0;
-                return coded;
-              }
-              return Buffer.alloc(0);
+              return code(chunk, flushFlag === 4);   // Z_FINISH
             };
             // Coder streams answer flush() and params() calls; ours codes once at end.
             stream.flush = function(kind, cb) { const done = typeof kind === 'function' ? kind : cb; if (done) done(); };
