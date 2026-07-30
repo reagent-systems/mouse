@@ -5145,13 +5145,88 @@ final class NodeEngine: @unchecked Sendable {
         const EventEmitter = coreRequire('events');
         const { Readable, Writable } = coreRequire('stream');
         const net = coreRequire('net');
-        // The extendable class surface: HTTP client libraries subclass Agent and touch the
-        // message classes for instanceof checks.
-        class Agent extends EventEmitter {
-          constructor(options) { super(); this.options = options || {}; this.sockets = {}; this.requests = {}; }
-          destroy() {}
-        }
         class OutgoingMessage extends Writable {}
+        // ---- the connection pool -------------------------------------------------------
+        // node's Agent keeps finished sockets and hands them to the next request for the same
+        // host:port, which is why node sends several requests down one connection. Without it
+        // we opened a connection per request — correct HTTP, but a visible difference and a
+        // handshake per call. A pooled socket is UNREF'd while idle, exactly as node does, so a
+        // warm pool never keeps a program alive.
+        function Agent(options) {
+          EventEmitter.call(this);
+          options = options || {};
+          this.options = options;
+          // node 19+ defaults keepAlive to true.
+          this.keepAlive = options.keepAlive !== false;
+          this.keepAliveMsecs = options.keepAliveMsecs === undefined ? 1000 : options.keepAliveMsecs;
+          this.maxSockets = options.maxSockets || Infinity;
+          this.maxFreeSockets = options.maxFreeSockets === undefined ? 256 : options.maxFreeSockets;
+          this.scheduling = options.scheduling || 'lifo';
+          this.sockets = {};          // in use, by name
+          this.freeSockets = {};      // idle and reusable, by name
+          this.requests = {};
+        }
+        Agent.prototype = Object.create(EventEmitter.prototype);
+        Agent.prototype.constructor = Agent;
+        Agent.prototype.getName = function(options) {
+          options = options || {};
+          return (options.host || options.hostname || 'localhost') + ':' + (options.port || 80);
+        };
+        /// An idle socket for this destination, or null. Dead ones are discarded on the way.
+        Agent.prototype._take = function(name) {
+          const free = this.freeSockets[name];
+          if (!free || !free.length) return null;
+          while (free.length) {
+            // 'lifo' — node's default, and the warm socket is the most likely to still be up.
+            const socket = this.scheduling === 'fifo' ? free.shift() : free.pop();
+            if (socket && !socket.destroyed && socket.writable) {
+              socket.ref();
+              (this.sockets[name] = this.sockets[name] || []).push(socket);
+              return socket;
+            }
+          }
+          return null;
+        };
+        Agent.prototype._claim = function(name, socket) {
+          (this.sockets[name] = this.sockets[name] || []).push(socket);
+        };
+        /// A finished socket goes back to the pool, or is closed when it cannot be reused.
+        Agent.prototype._release = function(name, socket, reusable) {
+          const inUse = this.sockets[name] || [];
+          const at = inUse.indexOf(socket);
+          if (at >= 0) inUse.splice(at, 1);
+          if (!inUse.length) delete this.sockets[name];
+          const free = this.freeSockets[name] = this.freeSockets[name] || [];
+          if (!this.keepAlive || !reusable || socket.destroyed || !socket.writable ||
+              free.length >= this.maxFreeSockets) {
+            socket.end();
+            return;
+          }
+          // The next request installs its own handlers; anything left from this one would see
+          // the next response.
+          socket.removeAllListeners('data');
+          socket.removeAllListeners('end');
+          socket.removeAllListeners('error');
+          socket.removeAllListeners('close');
+          const self = this;
+          socket.once('close', function() {
+            const list = self.freeSockets[name] || [];
+            const index = list.indexOf(socket);
+            if (index >= 0) list.splice(index, 1);
+          });
+          // Idle sockets must not hold the event loop open — node unrefs them too.
+          socket.unref();
+          free.push(socket);
+        };
+        Agent.prototype.destroy = function() {
+          for (const name of Object.keys(this.freeSockets)) {
+            for (const socket of this.freeSockets[name]) socket.destroy();
+          }
+          this.freeSockets = {};
+        };
+        Agent.prototype.createConnection = function(options) {
+          return net.connect(options);
+        };
         // -- the HTTP/1.1 SERVER, on top of real net ------------------------------------
         // Wire behavior is matched to real node's, measured with a raw-socket client rather
         // than assumed: user headers keep insertion order, then Date, then
@@ -5382,6 +5457,7 @@ final class NodeEngine: @unchecked Sendable {
           let remaining = 0;
           let chunkState = 'size';
           let closing = false;
+          let idleTimer = null;
 
           socket.on('data', function(chunk) {
             buffer = Buffer.concat([buffer, chunk]);
@@ -5391,6 +5467,7 @@ final class NodeEngine: @unchecked Sendable {
             if (message && !message.complete) { message.aborted = true; message.emit('aborted'); }
           });
           socket.on('error', function(error) { server.emit('clientError', error, socket); });
+          socket.on('close', clearKeepAliveTimeout);
 
           function pump() {
             while (true) {
@@ -5440,6 +5517,8 @@ final class NodeEngine: @unchecked Sendable {
           }
 
           function startMessage(head) {
+            socket._idleBetweenRequests = false;
+            clearKeepAliveTimeout();
             const lines = head.split('\r\n');
             const parts = lines[0].split(' ');
             message = new IncomingMessage(socket);
@@ -5519,8 +5598,27 @@ final class NodeEngine: @unchecked Sendable {
             if (!keepAlive) { closing = true; socket.end(); return; }
             message = null;
             phase = 'head';
+            // An idle keep-alive connection must eventually be dropped, or `server.close()`
+            // waits on a peer that has no reason to speak again. node enforces exactly this
+            // with keepAliveTimeout; without it a POOLING client (which never closes its end)
+            // left the server waiting forever.
+            armKeepAliveTimeout();
             // A pipelined request may already be sitting in the buffer.
             if (buffer.length) process.nextTick(pump);
+          }
+          function armKeepAliveTimeout() {
+            socket._idleBetweenRequests = true;
+            clearKeepAliveTimeout();
+            const wait = server.keepAliveTimeout;
+            if (!wait) return;
+            idleTimer = setTimeout(function() {
+              idleTimer = null;
+              closing = true;
+              socket.end();
+            }, wait);
+          }
+          function clearKeepAliveTimeout() {
+            if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
           }
 
           function wantsKeepAlive(msg) {
@@ -5597,7 +5695,14 @@ final class NodeEngine: @unchecked Sendable {
           }
           if (callback) this.once('response', callback);
 
-          this.socket = new net.Socket();
+          // Reuse a pooled connection when the agent has one for this destination; `agent:
+          // false` opts out, which is how node spells "no pooling".
+          this._agent = options.agent === false ? null
+            : (options.agent && options.agent._release ? options.agent : globalAgent);
+          this._poolName = this._agent ? this._agent.getName({ host: this._host, port: this.port }) : '';
+          const reused = this._agent ? this._agent._take(this._poolName) : null;
+          this.reusedSocket = !!reused;
+          this.socket = reused || new net.Socket();
           this.connection = this.socket;
           this.socket.on('error', function(error) { self.emit('error', error); });
           this.socket.on('close', function() {
@@ -5605,13 +5710,19 @@ final class NodeEngine: @unchecked Sendable {
             if (self._parser) self._parser.finish();
             if (!self._closeEmitted) { self._closeEmitted = true; self.emit('close'); }
           });
-          this.socket.on('connect', function() {
-            self.emit('socket', self.socket);
-            self._flushPending();
-          });
           this._parser = makeResponseParser(this);
           this.socket.on('data', function(chunk) { self._parser.push(chunk); });
-          this.socket.connect(this.port, this._host);
+          if (reused) {
+            // Already connected: nothing will fire 'connect', so the queued bytes go now.
+            process.nextTick(function(){ self.emit('socket', self.socket); self._flushPending(); });
+          } else {
+            if (this._agent) this._agent._claim(this._poolName, this.socket);
+            this.socket.on('connect', function() {
+              self.emit('socket', self.socket);
+              self._flushPending();
+            });
+            this.socket.connect(this.port, this._host);
+          }
           if (options.timeout) this.setTimeout(options.timeout);
         }
         ClientRequest.prototype = Object.create(Writable.prototype);
@@ -5873,9 +5984,17 @@ final class NodeEngine: @unchecked Sendable {
             message.complete = true;
             phase = 'done';
             message.push(null);
-            // We advertise keep-alive like node does but keep no socket pool, so the socket
-            // retires once its response is delivered.
-            request.socket.end();
+            // Whether this connection can carry another request: the response must say so, and
+            // its body must have been framed (an EOF-framed body ends WITH the connection).
+            const connection = String(message.headers.connection || '').toLowerCase();
+            const framed = message.headers['content-length'] !== undefined ||
+                           String(message.headers['transfer-encoding'] || '').indexOf('chunked') >= 0 ||
+                           request.method === 'HEAD' || message.statusCode === 204 || message.statusCode === 304;
+            const reusable = framed && connection.indexOf('close') < 0 &&
+                             message.httpVersionMajor === 1 && message.httpVersionMinor >= 1 &&
+                             !request._sentClose;
+            if (request._agent) request._agent._release(request._poolName, request.socket, reusable);
+            else request.socket.end();
           }
 
           return {
@@ -5886,6 +6005,9 @@ final class NodeEngine: @unchecked Sendable {
             },
           };
         }
+
+        // node's default agent pools with keepAlive since v19.
+        const globalAgent = new Agent({ keepAlive: true, scheduling: 'lifo' });
 
         // One entry point, two transports: plaintext over our own sockets, TLS over URLSession.
         function request(url, options, callback) {
@@ -5921,7 +6043,7 @@ final class NodeEngine: @unchecked Sendable {
             return clientRequest;
           },
           Agent: Agent,
-          globalAgent: new Agent(),
+          globalAgent: globalAgent,
           IncomingMessage: IncomingMessage,
           ServerResponse: ServerResponse,
           OutgoingMessage: OutgoingMessage,
@@ -7285,6 +7407,12 @@ final class NodeEngine: @unchecked Sendable {
             this._closing = true;
             this.listening = false;
             if (this._sid) { bridge.netDestroy(this._sid); this._sid = 0; }
+            // Connections sitting idle between keep-alive requests are finished as far as the
+            // protocol goes, so closing the server ends them now rather than after the idle
+            // timeout. A connection mid-request is left alone to complete.
+            for (const socket of this._connections.slice()) {
+              if (socket._idleBetweenRequests) socket.end();
+            }
           }
           this._maybeClosed();
           return this;

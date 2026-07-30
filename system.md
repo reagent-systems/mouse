@@ -98,6 +98,7 @@ so a TUI navigates and edits.
 | **Phase G — `tsc --watch` runs** | TypeScript's compiler in WATCH mode, installed by our package manager and running on our engine: it compiled clean, detected an edit through our kqueue watcher, recompiled, and reported the same diagnostic (`TS2339`) in the same order as real node. The heaviest real consumer of `fs.watch` there is, and a phase-D milestone reached early — **the credible-IDE loop (edit → recompile → diagnostics) now closes on the device** |
 | **Phase G — signing, and JWTs** | ECDSA over P-256/384/521 and Ed25519 through CryptoKit: `createSign`/`createVerify`, one-shot `sign`/`verify`, `generateKeyPair`, `createPrivateKey`/`createPublicKey`, and DER *or* JOSE raw (`ieee-p1363`) signature encoding. Real node verifies our signatures and we verify node's, for all four key types, with tampered messages rejected. **`jsonwebtoken` works cross-engine** on ES256 and HS256 — and it found three bugs nothing else had, including a base64url decoding fault that silently dropped bytes |
 | **Phase G — RSA on SecKey** | `NodeKeys.swift`: RSA sign/verify (PKCS1v15 and PSS), OAEP and PKCS1 encryption, and key generation, through Security framework — plus the small DER reader/writer that moves between SecKey's PKCS#1 and node's PKCS#8/SPKI. Cross-engine both ways, including re-signing an imported key to identical bytes (PKCS1v15 is deterministic) and opening the other engine's OAEP ciphertext. **`jsonwebtoken` now covers RS256 and PS256** as well as ES256 and HS256 — the four algorithms real JWTs actually use |
+| **Phase G — connection pooling** | A real keep-alive `Agent`: idle sockets are pooled per host:port, reused LIFO, and **unref'd while idle** so a warm pool never holds a program open. Four sequential requests now travel over one connection, the same count node reports — the last recorded divergence in the HTTP client is closed. Pooling immediately exposed a server-side gap it was right to expose: `keepAliveTimeout` was stored and never enforced, so an idle connection was never dropped and `server.close()` waited on a peer with nothing left to say |
 
 ### Verification performed
 
@@ -1007,6 +1008,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **Connection pooling, and the server bug it uncovered.** The HTTP client now
+  has node's `Agent`: sockets are kept per host:port after a response completes,
+  reused LIFO (the warm one is likeliest to still be up), discarded when the peer
+  closed them, and **unref'd while idle** so a warm pool never keeps a program
+  alive. Reuse is only offered when the response was framed (Content-Length or
+  chunked — an EOF-framed body ends WITH the connection) and neither side asked
+  to close. The fixture now counts CONNECTIONS: four sequential requests travel
+  over one, the same as node, which closes the last recorded divergence in the
+  client.
+  Turning it on immediately broke a fixture, and the break was correct: a
+  pooling client never closes its end, so `server.close()` sat waiting on an idle
+  connection forever. `keepAliveTimeout` was stored on the server and **never
+  enforced** — node drops an idle keep-alive connection after it. Now we do too,
+  the clock is cancelled when a request arrives, and `server.close()` ends the
+  connections that are idle between requests rather than waiting out their whole
+  window. This is the kind of gap only a change in the OTHER direction reveals:
+  nothing about our own client had ever left a connection idle.
 - **RSA is real, and the work was the FORMAT, not the crypto.** CryptoKit has no
   RSA, so this rides Security framework's `SecKey` — which speaks PKCS#1
   (`RSAPrivateKey`/`RSAPublicKey`) while node hands out PKCS#8 and SPKI. Both
@@ -1133,14 +1151,12 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   One thing deliberately not matched: node's first directory event reports
   activity from just BEFORE the watch existed (an FSEvents coalescing window);
   the fixture settles first rather than having us invent an event.
-- **Two divergences from node's HTTP client, both deliberate.** We open one
-  connection per request; node's agent pools sockets and sends several down
-  one connection. Per-request bytes are identical (that is what the wire
-  fixture asserts, after normalizing the Host port), and closing after each
-  response is correct HTTP — just less efficient. Socket pooling is future
-  work, not a bug. And `https.request` stays on URLSession: TLS is a
-  handshake we cannot put on a raw socket, so an https request keeps
-  URLSession's limits (complete bodies, no upgrade) while http has neither.
+- **One divergence left in the HTTP client, and it is structural.**
+  `https.request` stays on URLSession, because TLS is a handshake we cannot put
+  on a raw socket — so an https request keeps URLSession's limits (complete
+  bodies, no upgrade) while plaintext http has neither. The
+  one-connection-per-request difference that used to sit here is GONE: the agent
+  pools now, and the fixture asserts the connection count matches node's.
 - **A divergence recorded rather than papered over.** Node reports a
   server's `'connection'` before the connecting client's `'connect'`; we
   report the reverse, because a loopback handshake completes inside
@@ -1550,7 +1566,7 @@ D  web toolchain          tsc, bundling, Preview container     PARTLY DONE — t
                           watches on the engine (see §0); bundling + Preview remain
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, socket pooling, DSA/DH, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, DSA/DH, worker_threads, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

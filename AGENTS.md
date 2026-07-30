@@ -252,9 +252,18 @@ while `https.request` stays on URLSession because TLS is a handshake we cannot
 put on a raw socket. Verify the client the same way as the server: a neutral
 raw-socket sink prints what it received and our request BYTES must equal
 node's per request (normalize the Host port; split the stream into requests).
-Do NOT compare packet boundaries or connection reuse — node's agent pools
-sockets and sends several requests down one connection, we open one per
-request. That is a recorded divergence, not a bug; pooling is future work.
+Do NOT compare packet boundaries — those are not a contract. Connection REUSE is
+now, and the fixture counts connections: four sequential requests must travel
+over the same number of sockets node uses (one). Split the sink's transcript on a
+request line with the METHOD spelled out — `[A-Z]+ /` also matches inside "POST"
+and shreds each request into single letters, which compares equal only because
+both engines get shredded identically.
+**A pooling client never closes its end**, which is why the server must enforce
+`keepAliveTimeout`: without it an idle keep-alive connection lives forever and
+`server.close()` waits on a peer with nothing left to say. The clock is cancelled
+when a request arrives, and `close()` ends connections that are idle BETWEEN
+requests rather than waiting out their window. Pooled sockets are unref'd while
+idle so a warm pool never holds a program open.
 **`socket.cork()`/`uncork()` and `_readableState`/`_writableState` are
 load-bearing for real packages.** `ws` corks around every frame (without cork
 a WebSocket send throws) and reads `socket._readableState.endEmitted` /
