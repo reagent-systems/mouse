@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `crypto.scrypt`/`scryptSync` are real (`swift/Mouse/NodeScrypt.swift`).
+  scrypt is not a primitive — it is PBKDF2-HMAC-SHA256 around a Salsa20/8 memory-hard
+  mix — so it needed no system implementation. Matches RFC 7914's published vectors
+  byte for byte, along with node's option aliases, defaults and `maxmem` rules.
 - Node layer: one `MessagePort` with both surfaces — the `MessageChannel`,
   `MessagePort` and `BroadcastChannel` globals are now the `worker_threads` classes,
   as node has them, so `receiveMessageOnPort` works on a global channel's port.

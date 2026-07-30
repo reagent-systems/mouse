@@ -10,6 +10,7 @@
 		0A6F9CDD9D58550755EB4B28 /* ForegroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */; };
 		0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */; };
 		13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */; };
+		2023624DA13C04BD2E402AF1 /* NodeScrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */; };
 		20348E0EC1CA68374BEB45D0 /* NodeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */; };
 		2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */; };
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
@@ -45,6 +46,7 @@
 		0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeWatch.swift; sourceTree = "<group>"; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
 		179217813E4A44F9859669C5 /* GitCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCore.swift; sourceTree = "<group>"; };
+		18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeScrypt.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
 		2D1234209A0254A06BB8E915 /* Terminal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Terminal.swift; sourceTree = "<group>"; };
 		38F529B8B560B4DB034F9698 /* MouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseApp.swift; sourceTree = "<group>"; };
@@ -94,6 +96,7 @@
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
 				C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */,
 				AA049B76029F618EF94C1571 /* NodeKeys.swift */,
+				18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */,
 				03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */,
 				0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */,
 				3A88D15C6B606882BE9F472E /* PackageManager.swift */,
@@ -218,6 +221,7 @@
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
 				20348E0EC1CA68374BEB45D0 /* NodeEngine.swift in Sources */,
 				3CBA0D3FCBEAE0055B741849 /* NodeKeys.swift in Sources */,
+				2023624DA13C04BD2E402AF1 /* NodeScrypt.swift in Sources */,
 				B12D6FC121DECB1E6754DA64 /* NodeSockets.swift in Sources */,
 				4AE107D17AAB32363E162AA3 /* NodeWatch.swift in Sources */,
 				4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */,

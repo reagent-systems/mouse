@@ -1074,6 +1074,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **scrypt, and a refusal that was true but pointed the wrong way.** It said "scrypt
+  has no system implementation here", which is a fact — neither CryptoKit nor
+  CommonCrypto has scrypt — and also beside the point, because scrypt is not a
+  primitive. It is PBKDF2-HMAC-SHA256 (which CommonCrypto DOES have) wrapped around a
+  memory-hard mix built from Salsa20/8, and that mix is arithmetic. `NodeScrypt.swift`
+  follows RFC 7914 structurally (`scrypt` → `romix` → `blockMix` → `salsa20_8`) so it
+  can be read against the spec, and works in 32-bit words rather than bytes because
+  the entire cost of scrypt lives in that inner loop.
+  Verified against RFC 7914's three PUBLISHED vectors — so the proof is against the
+  standard, not merely agreement with node — plus node's defaults (N=16384, r=8, p=1),
+  both spellings of every option (`N`/`cost`, `r`/`blockSize`, `p`/`parallelization`),
+  Buffer inputs, a key length that is not a multiple of 64, and the `maxmem` bound.
+  All byte for byte, in 0.2 s including the 16 MB case.
+  One behaviour I had wrong until node corrected me: `crypto.scrypt`'s ASYNC form
+  validates parameters SYNCHRONOUSLY — bad params throw at the call site instead of
+  arriving at the callback. My first version passed the error to the callback, which
+  would have made a mis-parameterised program hang instead of throwing. A refusal-shaped
+  lesson in miniature: the async wrapper is not simply "the sync one, later".
+  This distinguishes the two kinds of remaining gap. `scrypt` was arithmetic nobody had
+  written yet. HTTP/2, a TLS server and finite-field DH are protocol or bignum work;
+  `SharedArrayBuffer` and `Atomics.wait` need memory two JSContexts cannot share; and
+  unhandled-rejection exit codes need a private JSC hook. Those reasons survive.
 - **The tick guarantee finished, and the caveat I wrote for it was wrong in BOTH
   directions.** The previous boundary said I/O-event callbacks were not trampolined.
   Testing six different routes out of the host showed four were already correct —

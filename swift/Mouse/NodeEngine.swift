@@ -1491,6 +1491,19 @@ final class NodeEngine: @unchecked Sendable {
         expose("cipherSeal", cipherSeal)
         expose("cipherOpen", cipherOpen)
         expose("pbkdf2", pbkdf2Block)
+        // scrypt: PBKDF2 around a memory-hard mix, so it needs no system primitive beyond the
+        // PBKDF2 above. NSNull means "node would reject these params" — the JS side turns that
+        // into ERR_CRYPTO_INVALID_SCRYPT_PARAMS rather than re-deriving the rules.
+        let scryptBlock: @convention(block) (String, String, Int32, Int32, Int32, Int32) -> Any = {
+            passwordBase64, saltBase64, n, r, parallel, length in
+            guard let password = Data(base64Encoded: passwordBase64),
+                  let salt = Data(base64Encoded: saltBase64),
+                  let derived = NodeScrypt.derive(password: password, salt: salt, n: Int(n),
+                                                  r: Int(r), p: Int(parallel), length: Int(length))
+            else { return NSNull() }
+            return derived.base64EncodedString()
+        }
+        expose("scrypt", scryptBlock)
         expose("hkdf", hkdfBlock)
         let cryptoHmac: @convention(block) (String, String, String) -> String? = { algorithm, keyBase64, base64 in
             guard let keyData = Data(base64Encoded: keyBase64), let data = Data(base64Encoded: base64) else { return nil }
@@ -8434,6 +8447,27 @@ final class NodeEngine: @unchecked Sendable {
             throw error;
           };
         }
+        function scryptSync(password, salt, keylen, options) {
+          options = options || {};
+          // node accepts both spellings of every parameter, and its defaults are N=16384, r=8, p=1.
+          const n = options.N !== undefined ? options.N : (options.cost !== undefined ? options.cost : 16384);
+          const r = options.r !== undefined ? options.r : (options.blockSize !== undefined ? options.blockSize : 8);
+          const p = options.p !== undefined ? options.p : (options.parallelization !== undefined ? options.parallelization : 1);
+          const maxmem = options.maxmem !== undefined ? options.maxmem : 32 * 1024 * 1024;
+          const invalid = function() {
+            return Object.assign(new Error('Invalid scrypt params'),
+                                 { code: 'ERR_CRYPTO_INVALID_SCRYPT_PARAMS' });
+          };
+          // The memory bound is node's own: 128 * N * r must fit in maxmem. Checked here because
+          // exceeding it means allocating hundreds of megabytes before finding out.
+          if (128 * n * r > maxmem) throw invalid();
+          const derived = bridge.scrypt(keyBytes(password).toString('base64'),
+                                        keyBytes(salt).toString('base64'),
+                                        n, r, p, keylen);
+          if (derived === null || derived === undefined) throw invalid();
+          return Buffer.from(String(derived), 'base64');
+        }
+
         function pbkdf2Sync(password, salt, iterations, keylen, digest) {
           const derived = bridge.pbkdf2(keyBytes(password).toString('base64'),
                                         keyBytes(salt).toString('base64'),
@@ -8632,8 +8666,14 @@ final class NodeEngine: @unchecked Sendable {
           // the reversed forms are legacy and stay honest about their absence.
           privateEncrypt: refuseCrypto('privateEncrypt', 'SecKey encrypts with the public key and decrypts with the private one — use sign/verify for the private-key direction'),
           publicDecrypt: refuseCrypto('publicDecrypt', 'SecKey decrypts with the private key only — use verify for the public-key direction'),
-          scrypt: refuseCrypto('scrypt', 'scrypt has no system implementation here; pbkdf2 and hkdf are real'),
-          scryptSync: refuseCrypto('scryptSync', 'scrypt has no system implementation here; pbkdf2 and hkdf are real'),
+          scrypt: function(password, salt, keylen, options, callback) {
+            if (typeof options === 'function') { callback = options; options = undefined; }
+            // Parameter validation is SYNCHRONOUS in node even in the async form — bad params
+            // throw at the call site rather than arriving at the callback. Verified against it.
+            const derived = scryptSync(password, salt, keylen, options);
+            process.nextTick(function(){ callback(null, derived); });
+          },
+          scryptSync: scryptSync,
           checkPrime: refuseCrypto('checkPrime', 'primality testing needs a bignum implementation'),
           checkPrimeSync: refuseCrypto('checkPrimeSync', 'primality testing needs a bignum implementation'),
           generatePrime: refuseCrypto('generatePrime', 'prime generation needs a bignum implementation'),
