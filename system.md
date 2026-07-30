@@ -1074,6 +1074,20 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **fs sync/async/promise parity — checking my own strictness propagated.** Several
+  boundaries ago the sync fs functions became much stricter (ENOENT for a missing parent,
+  EEXIST, ENOTDIR, refusing to delete a tree unasked), and whether the CALLBACK and PROMISE
+  forms followed was never checked. Three APIs for one operation is three chances to diverge,
+  and a program using the promise form would not have noticed.
+  All twelve agree, across all three forms — because both families delegate through a single
+  wrapper to the Sync implementation rather than reimplementing it. A clean negative result,
+  and worth the sweep precisely because the alternative was assuming. It is now pinned, so a
+  future "optimisation" of one form cannot quietly split them.
+  **`events` promoted back from diagnostic to assertion.** It only went red because the
+  standalone harness compared raw node while the suite fixture pinned two orderings with
+  reasons; pinning the same two there makes it a test again. A test that always fails protects
+  nothing, and the point of separating diagnostics last boundary was to shrink that set, not to
+  license it — one of the five is now genuinely gone rather than relabelled.
 - **A verification runner, because guessing a harness's sources faked a failure twice.** The
   shell harness and then the tty harness both reported BUILD FAILED from my own wrong file
   list, and a build failure that is really a typo is the most expensive noise there is: it
