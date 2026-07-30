@@ -153,6 +153,19 @@ construction — IP literals and hosts-file names — because node's `resolve4`
 queries a DNS server through c-ares and never reads the hosts file. Record
 types getaddrinfo cannot answer must keep saying so rather than returning an
 empty list.
+CIPHERS verify two ways, and the second is the one that matters: with a FIXED
+key and IV the ciphertext, auth tag and derived keys must be byte-identical to
+real node's (a much stronger check than "it round-trips"), and cross-engine —
+what we seal real node must open, and what node seals we must open, AAD
+included, with a wrong AAD rejected. AEAD modes ride CryptoKit; CBC/CTR/ECB ride
+CommonCrypto, the only system API that exposes them. A Cipher produces its bytes
+at `final()`, not in `update()`, because an auth tag cannot exist before the last
+byte — do not "fix" that into incremental output. The asymmetric family
+(sign/verify, key generation, key parsing, ECDH, DH, RSA) REFUSES with its reason
+named; it needs SecKey and ASN.1 work, and a half-implementation would be worse.
+`crypto.subtle` stays ABSENT, not refusing: it is an object, so a library that
+feature-detects it would use it and fail, where absence makes it take its
+fallback.
 **Audit core-module surfaces against real node periodically** — list
 `Object.keys(require(m))` in both engines and diff. It is how the `URL`,
 `Buffer`-statics and `Stats.mode` bugs were found, and each was a member that

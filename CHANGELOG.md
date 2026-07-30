@@ -20,7 +20,8 @@ carry breaking changes.
   terminal runs actual npm software on the phone. `npm install <pkg>` then
   `<bin>` works: the CommonJS *and* ES-module systems, a real event loop,
   `fs` (sync, callback and fd forms), `stream` (with streaming
-  compression), `crypto` (CryptoKit), `zlib` (libz), `readline`,
+  compression), `crypto` (CryptoKit — including real AES-GCM/CBC/CTR and
+  ChaCha20-Poly1305 ciphers, `pbkdf2` and `hkdf`, interoperable with node's), `zlib` (libz), `readline`,
   `child_process` bridged into `msh`, the **fetch API** with streaming
   response bodies, and **real TCP** (`net`): outbound connections, servers
   that listen and accept, honest backpressure and half-close — verified in

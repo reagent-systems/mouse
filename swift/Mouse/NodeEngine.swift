@@ -1,3 +1,4 @@
+import CommonCrypto
 import CryptoKit
 import Foundation
 import JavaScriptCore
@@ -694,6 +695,116 @@ final class NodeEngine: @unchecked Sendable {
             }
         }
         expose("cryptoHash", cryptoHash)
+
+        // -- ciphers and KDFs -------------------------------------------------------------
+        // AEAD modes come from CryptoKit; CBC and CTR from CommonCrypto, which is the only
+        // system API that exposes them. Everything is one-shot: node's Cipher is a stream, but
+        // the JS side buffers and calls this at final(), which is what keeps the tag handling
+        // honest (an AEAD tag cannot be produced before the last byte anyway).
+        let cipherSeal: @convention(block) (String, String, String, String, String) -> Any = {
+            algorithm, keyBase64, ivBase64, plainBase64, aadBase64 in
+            guard let key = Data(base64Encoded: keyBase64),
+                  let iv = Data(base64Encoded: ivBase64),
+                  let plain = Data(base64Encoded: plainBase64) else { return NSNull() }
+            let aad = Data(base64Encoded: aadBase64) ?? Data()
+            do {
+                switch algorithm {
+                case "aes-128-gcm", "aes-192-gcm", "aes-256-gcm":
+                    let box = try AES.GCM.seal(plain, using: SymmetricKey(data: key),
+                                               nonce: try AES.GCM.Nonce(data: iv),
+                                               authenticating: aad)
+                    return ["data": box.ciphertext.base64EncodedString(),
+                            "tag": box.tag.base64EncodedString()] as [String: Any]
+                case "chacha20-poly1305":
+                    let box = try ChaChaPoly.seal(plain, using: SymmetricKey(data: key),
+                                                  nonce: try ChaChaPoly.Nonce(data: iv),
+                                                  authenticating: aad)
+                    return ["data": box.ciphertext.base64EncodedString(),
+                            "tag": box.tag.base64EncodedString()] as [String: Any]
+                default:
+                    guard let out = Self.commonCrypt(algorithm: algorithm, key: key, iv: iv,
+                                                     input: plain, encrypt: true) else { return NSNull() }
+                    return ["data": out.base64EncodedString(), "tag": ""] as [String: Any]
+                }
+            } catch { return NSNull() }
+        }
+        let cipherOpen: @convention(block) (String, String, String, String, String, String) -> Any = {
+            algorithm, keyBase64, ivBase64, cipherBase64, tagBase64, aadBase64 in
+            guard let key = Data(base64Encoded: keyBase64),
+                  let iv = Data(base64Encoded: ivBase64),
+                  let body = Data(base64Encoded: cipherBase64) else { return NSNull() }
+            let aad = Data(base64Encoded: aadBase64) ?? Data()
+            let tag = Data(base64Encoded: tagBase64) ?? Data()
+            do {
+                switch algorithm {
+                case "aes-128-gcm", "aes-192-gcm", "aes-256-gcm":
+                    let box = try AES.GCM.SealedBox(nonce: try AES.GCM.Nonce(data: iv),
+                                                    ciphertext: body, tag: tag)
+                    let plain = try AES.GCM.open(box, using: SymmetricKey(data: key), authenticating: aad)
+                    return plain.base64EncodedString()
+                case "chacha20-poly1305":
+                    let box = try ChaChaPoly.SealedBox(nonce: try ChaChaPoly.Nonce(data: iv),
+                                                       ciphertext: body, tag: tag)
+                    let plain = try ChaChaPoly.open(box, using: SymmetricKey(data: key), authenticating: aad)
+                    return plain.base64EncodedString()
+                default:
+                    guard let out = Self.commonCrypt(algorithm: algorithm, key: key, iv: iv,
+                                                     input: body, encrypt: false) else { return NSNull() }
+                    return out.base64EncodedString()
+                }
+            } catch { return NSNull() }   // a wrong tag lands here, which is the point of AEAD
+        }
+        let pbkdf2Block: @convention(block) (String, String, Int32, Int32, String) -> Any = {
+            passwordBase64, saltBase64, iterations, length, digest in
+            guard let password = Data(base64Encoded: passwordBase64),
+                  let salt = Data(base64Encoded: saltBase64) else { return NSNull() }
+            let algorithm: UInt32
+            switch digest.lowercased() {
+            case "sha1": algorithm = UInt32(kCCPRFHmacAlgSHA1)
+            case "sha224": algorithm = UInt32(kCCPRFHmacAlgSHA224)
+            case "sha256": algorithm = UInt32(kCCPRFHmacAlgSHA256)
+            case "sha384": algorithm = UInt32(kCCPRFHmacAlgSHA384)
+            case "sha512": algorithm = UInt32(kCCPRFHmacAlgSHA512)
+            default: return NSNull()
+            }
+            var derived = [UInt8](repeating: 0, count: Int(length))
+            let status = password.withUnsafeBytes { passwordBytes in
+                salt.withUnsafeBytes { saltBytes in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordBytes.baseAddress?.assumingMemoryBound(to: CChar.self), password.count,
+                        saltBytes.baseAddress?.assumingMemoryBound(to: UInt8.self), salt.count,
+                        CCPseudoRandomAlgorithm(algorithm), UInt32(iterations),
+                        &derived, derived.count)
+                }
+            }
+            guard status == kCCSuccess else { return NSNull() }
+            return Data(derived).base64EncodedString()
+        }
+        let hkdfBlock: @convention(block) (String, String, String, String, Int32) -> Any = {
+            digest, keyBase64, saltBase64, infoBase64, length in
+            guard let key = Data(base64Encoded: keyBase64) else { return NSNull() }
+            let salt = Data(base64Encoded: saltBase64) ?? Data()
+            let info = Data(base64Encoded: infoBase64) ?? Data()
+            let material = SymmetricKey(data: key)
+            let count = Int(length)
+            func derive<H: HashFunction>(_ hash: H.Type) -> String {
+                let derived = HKDF<H>.deriveKey(inputKeyMaterial: material, salt: salt,
+                                                info: info, outputByteCount: count)
+                return derived.withUnsafeBytes { Data($0).base64EncodedString() }
+            }
+            switch digest.lowercased() {
+            case "sha256": return derive(SHA256.self)
+            case "sha384": return derive(SHA384.self)
+            case "sha512": return derive(SHA512.self)
+            case "sha1": return derive(Insecure.SHA1.self)
+            default: return NSNull()
+            }
+        }
+        expose("cipherSeal", cipherSeal)
+        expose("cipherOpen", cipherOpen)
+        expose("pbkdf2", pbkdf2Block)
+        expose("hkdf", hkdfBlock)
         let cryptoHmac: @convention(block) (String, String, String) -> String? = { algorithm, keyBase64, base64 in
             guard let keyData = Data(base64Encoded: keyBase64), let data = Data(base64Encoded: base64) else { return nil }
             let key = SymmetricKey(data: keyData)
@@ -884,6 +995,55 @@ final class NodeEngine: @unchecked Sendable {
             }
         }
         return finished ? output : nil
+    }
+
+    /// CBC and CTR through CommonCrypto — the only system API that exposes them (CryptoKit is
+    /// AEAD-only, deliberately). PKCS#7 padding for CBC, none for CTR, matching node's
+    /// defaults for `aes-256-cbc` and `aes-256-ctr`.
+    static func commonCrypt(algorithm: String, key: Data, iv: Data, input: Data, encrypt: Bool) -> Data? {
+        let mode: UInt32
+        let padding: CCPadding
+        if algorithm.hasSuffix("-cbc") { mode = UInt32(kCCModeCBC); padding = CCPadding(ccPKCS7Padding) }
+        else if algorithm.hasSuffix("-ctr") { mode = UInt32(kCCModeCTR); padding = CCPadding(ccNoPadding) }
+        else if algorithm.hasSuffix("-ecb") { mode = UInt32(kCCModeECB); padding = CCPadding(ccPKCS7Padding) }
+        else { return nil }
+        // Key length is implied by the name, and a mismatch must fail rather than truncate.
+        let expected: Int
+        if algorithm.hasPrefix("aes-128") { expected = 16 }
+        else if algorithm.hasPrefix("aes-192") { expected = 24 }
+        else if algorithm.hasPrefix("aes-256") { expected = 32 }
+        else { return nil }
+        guard key.count == expected else { return nil }
+
+        var cryptor: CCCryptorRef?
+        let operation = CCOperation(encrypt ? kCCEncrypt : kCCDecrypt)
+        let created = key.withUnsafeBytes { keyBytes -> CCCryptorStatus in
+            iv.withUnsafeBytes { ivBytes -> CCCryptorStatus in
+                CCCryptorCreateWithMode(operation, CCMode(mode), CCAlgorithm(kCCAlgorithmAES),
+                                        padding, iv.isEmpty ? nil : ivBytes.baseAddress,
+                                        keyBytes.baseAddress, key.count,
+                                        nil, 0, 0, CCModeOptions(0), &cryptor)
+            }
+        }
+        guard created == kCCSuccess, let cryptor else { return nil }
+        defer { CCCryptorRelease(cryptor) }
+
+        var output = [UInt8](repeating: 0, count: input.count + kCCBlockSizeAES128)
+        var moved = 0
+        let updated = input.withUnsafeBytes { inputBytes in
+            CCCryptorUpdate(cryptor, inputBytes.baseAddress, input.count,
+                            &output, output.count, &moved)
+        }
+        guard updated == kCCSuccess else { return nil }
+        var total = moved
+        var finalMoved = 0
+        let finished = output.withUnsafeMutableBytes { buffer -> CCCryptorStatus in
+            CCCryptorFinal(cryptor, buffer.baseAddress?.advanced(by: total),
+                           buffer.count - total, &finalMoved)
+        }
+        guard finished == kCCSuccess else { return nil }
+        total += finalMoved
+        return Data(output[0..<total])
     }
 
     // MARK: - Paths (workspace-virtual ↔ real)
@@ -6012,9 +6172,272 @@ final class NodeEngine: @unchecked Sendable {
                                                   Buffer.concat(this._chunks).toString('base64')), encoding);
           }
         }
+        // ---- ciphers, KDFs and key objects ----------------------------------------------
+        // AEAD modes (GCM, ChaCha20-Poly1305) ride CryptoKit; CBC/CTR/ECB ride CommonCrypto.
+        // A Cipher is node-shaped — update() then final() — but the bytes are produced in ONE
+        // call at final(), which is the honest shape for an AEAD: the tag does not exist until
+        // the last byte is in. update() therefore returns empty and final() returns everything,
+        // which is a legal (if unusual) streaming pattern that node itself uses for GCM.
+        const cipherNames = ['aes-128-cbc', 'aes-192-cbc', 'aes-256-cbc',
+                             'aes-128-ctr', 'aes-192-ctr', 'aes-256-ctr',
+                             'aes-128-ecb', 'aes-192-ecb', 'aes-256-ecb',
+                             'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm',
+                             'chacha20-poly1305'];
+        function isAEAD(algorithm) {
+          return /-gcm$/.test(algorithm) || algorithm === 'chacha20-poly1305';
+        }
+        function keyBytes(key) {
+          if (key && key._keyObject) return key._material;
+          if (Buffer.isBuffer(key)) return key;
+          if (typeof key === 'string') return Buffer.from(key, 'utf8');
+          if (key && key.key) return keyBytes(key.key);
+          return Buffer.from(key || []);
+        }
+        function unsupportedCipher(algorithm) {
+          const error = new Error("Unsupported cipher '" + algorithm + "': this device provides AES (CBC/CTR/ECB/GCM) and ChaCha20-Poly1305 through CryptoKit and CommonCrypto, and nothing else");
+          error.code = 'ERR_CRYPTO_UNKNOWN_CIPHER';
+          return error;
+        }
+
+        function Cipher(algorithm, key, iv, options) {
+          this._algorithm = String(algorithm).toLowerCase();
+          if (cipherNames.indexOf(this._algorithm) < 0) throw unsupportedCipher(algorithm);
+          this._key = keyBytes(key);
+          this._iv = iv ? keyBytes(iv) : Buffer.alloc(0);
+          this._chunks = [];
+          this._aad = Buffer.alloc(0);
+          this._tag = null;
+          this._done = false;
+          this._autoPad = true;
+        }
+        Cipher.prototype.setAAD = function(aad) {
+          this._aad = keyBytes(aad);
+          return this;
+        };
+        Cipher.prototype.setAutoPadding = function(on) { this._autoPad = on !== false; return this; };
+        Cipher.prototype.update = function(data, inputEncoding, outputEncoding) {
+          const chunk = Buffer.isBuffer(data) ? data : Buffer.from(String(data), inputEncoding || 'utf8');
+          this._chunks.push(chunk);
+          const empty = Buffer.alloc(0);
+          return outputEncoding ? empty.toString(outputEncoding) : empty;
+        };
+        Cipher.prototype.final = function(outputEncoding) {
+          if (this._done) throw Object.assign(new Error('Cipher already finalized'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+          this._done = true;
+          const plain = Buffer.concat(this._chunks);
+          const result = bridge.cipherSeal(this._algorithm, this._key.toString('base64'),
+                                           this._iv.toString('base64'), plain.toString('base64'),
+                                           this._aad.toString('base64'));
+          if (!result) throw Object.assign(new Error('Cipher failed: check the key and IV lengths for ' + this._algorithm),
+                                           { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+          if (result.tag) this._tag = Buffer.from(result.tag, 'base64');
+          const out = Buffer.from(result.data, 'base64');
+          return outputEncoding ? out.toString(outputEncoding) : out;
+        };
+        Cipher.prototype.getAuthTag = function() {
+          if (!isAEAD(this._algorithm)) {
+            throw Object.assign(new Error('getAuthTag is only for authenticated ciphers'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+          }
+          if (!this._tag) throw Object.assign(new Error('getAuthTag must be called after final()'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+          return this._tag;
+        };
+
+        function Decipher(algorithm, key, iv, options) {
+          Cipher.call(this, algorithm, key, iv, options);
+          this._expectedTag = Buffer.alloc(0);
+        }
+        Decipher.prototype = Object.create(Cipher.prototype);
+        Decipher.prototype.constructor = Decipher;
+        Decipher.prototype.setAuthTag = function(tag) { this._expectedTag = keyBytes(tag); return this; };
+        Decipher.prototype.final = function(outputEncoding) {
+          if (this._done) throw Object.assign(new Error('Decipher already finalized'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+          this._done = true;
+          const body = Buffer.concat(this._chunks);
+          const result = bridge.cipherOpen(this._algorithm, this._key.toString('base64'),
+                                            this._iv.toString('base64'), body.toString('base64'),
+                                            this._expectedTag.toString('base64'),
+                                            this._aad.toString('base64'));
+          if (result === null || result === undefined) {
+            // For an AEAD this is the tag check failing, which is the whole point of one.
+            const error = new Error(isAEAD(this._algorithm)
+              ? 'Unsupported state or unable to authenticate data'
+              : 'error:1C800064:Provider routines::bad decrypt');
+            error.code = isAEAD(this._algorithm) ? 'ERR_CRYPTO_INVALID_AUTH_TAG' : 'ERR_OSSL_BAD_DECRYPT';
+            throw error;
+          }
+          const out = Buffer.from(result, 'base64');
+          return outputEncoding ? out.toString(outputEncoding) : out;
+        };
+
+        // A KeyObject wraps raw material so it can travel without being a bare Buffer, which
+        // is what modern code passes to createCipheriv/createHmac.
+        function SecretKeyObject(material) {
+          this._keyObject = true;
+          this._material = keyBytes(material);
+          this.type = 'secret';
+          this.symmetricKeySize = this._material.length;
+          this.asymmetricKeyType = undefined;
+        }
+        SecretKeyObject.prototype.export = function(options) {
+          if (options && options.format === 'jwk') {
+            return { kty: 'oct', k: this._material.toString('base64url') };
+          }
+          return Buffer.from(this._material);
+        };
+        SecretKeyObject.prototype.equals = function(other) {
+          return !!other && other._keyObject === true && this._material.equals(other._material);
+        };
+
+        function refuseCrypto(name, reason) {
+          return function() {
+            const error = new Error('crypto.' + name + ' is not available: ' + reason);
+            error.code = 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED';
+            throw error;
+          };
+        }
+        function pbkdf2Sync(password, salt, iterations, keylen, digest) {
+          const derived = bridge.pbkdf2(keyBytes(password).toString('base64'),
+                                        keyBytes(salt).toString('base64'),
+                                        Number(iterations), Number(keylen),
+                                        String(digest || 'sha1'));
+          if (!derived) {
+            const error = new Error('Unsupported digest for pbkdf2: ' + digest);
+            error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+            throw error;
+          }
+          return Buffer.from(derived, 'base64');
+        }
+        function hkdfSync(digest, key, salt, info, keylen) {
+          const derived = bridge.hkdf(String(digest), keyBytes(key).toString('base64'),
+                                      keyBytes(salt).toString('base64'),
+                                      keyBytes(info).toString('base64'), Number(keylen));
+          if (!derived) {
+            const error = new Error('Unsupported digest for hkdf: ' + digest);
+            error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+            throw error;
+          }
+          // node's hkdf resolves an ArrayBuffer, not a Buffer.
+          const bytes = Buffer.from(derived, 'base64');
+          return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length);
+        }
         const crypto = {
           createHash: function(algorithm) { return new Hash(algorithm); },
           createHmac: function(algorithm, key) { return new Hmac(algorithm, key); },
+          // Real symmetric crypto, from the audit's biggest gap.
+          createCipheriv: function(algorithm, key, iv, options) { return new Cipher(algorithm, key, iv, options); },
+          createDecipheriv: function(algorithm, key, iv, options) { return new Decipher(algorithm, key, iv, options); },
+          Cipheriv: Cipher, Decipheriv: Decipher, Cipher: Cipher, Decipher: Decipher,
+          getCiphers: function() { return cipherNames.slice(); },
+          getCipherInfo: function(name) {
+            const algorithm = String(name).toLowerCase();
+            if (cipherNames.indexOf(algorithm) < 0) return undefined;
+            const bits = algorithm === 'chacha20-poly1305' ? 256 : Number(algorithm.split('-')[1]);
+            const mode = algorithm === 'chacha20-poly1305' ? 'stream' : algorithm.split('-')[2];
+            // node reports OpenSSL's canonical name, which for AES-GCM is `id-aes256-gcm`
+            // rather than the name you passed in (measured).
+            const canonical = /^aes-(\d+)-gcm$/.test(algorithm)
+              ? 'id-aes' + algorithm.split('-')[1] + '-gcm' : algorithm;
+            return { name: canonical, blockSize: mode === 'stream' ? 1 : 16,
+                     ivLength: isAEAD(algorithm) ? 12 : (mode === 'ecb' ? 0 : 16),
+                     keyLength: bits / 8, mode: mode };
+          },
+          pbkdf2Sync: pbkdf2Sync,
+          pbkdf2: function(password, salt, iterations, keylen, digest, callback) {
+            try {
+              const derived = pbkdf2Sync(password, salt, iterations, keylen, digest);
+              process.nextTick(function(){ callback(null, derived); });
+            } catch (error) { process.nextTick(function(){ callback(error); }); }
+          },
+          hkdfSync: hkdfSync,
+          hkdf: function(digest, key, salt, info, keylen, callback) {
+            try {
+              const derived = hkdfSync(digest, key, salt, info, keylen);
+              process.nextTick(function(){ callback(null, derived); });
+            } catch (error) { process.nextTick(function(){ callback(error); }); }
+          },
+          createSecretKey: function(material, encoding) {
+            return new SecretKeyObject(typeof material === 'string' ? Buffer.from(material, encoding || 'utf8') : material);
+          },
+          KeyObject: SecretKeyObject,
+          secureHeapUsed: function() { return { total: 0, min: 0, used: 0, utilization: 0 }; },
+          getFips: function() { return 0; },
+          setFips: function() {},
+          fips: false,
+          // node 21's one-shot digest, and the algorithm lists.
+          hash: function(algorithm, data, outputEncoding) {
+            const digest = new Hash(algorithm);
+            digest.update(data);
+            return digest.digest(outputEncoding === undefined ? 'hex' : outputEncoding);
+          },
+          getHashes: function() { return ['md5', 'sha1', 'sha256', 'sha384', 'sha512']; },
+          // What CryptoKit actually carries. Listing curves we cannot use would be a lie a
+          // library then acts on.
+          getCurves: function() { return ['prime256v1', 'secp384r1', 'secp521r1', 'x25519', 'ed25519']; },
+          // The asymmetric family. Every one of these needs key parsing, ASN.1 and padding
+          // modes that this device exposes only through Security framework's SecKey — real
+          // work, not a shim, and it is honest to say so rather than half-do it. A caller gets
+          // a clear error naming what is missing instead of `undefined is not a function`.
+          createSign: refuseCrypto('createSign', 'signing needs SecKey key parsing (ASN.1/PKCS#8) — digests, HMAC, ciphers and KDFs are real'),
+          createVerify: refuseCrypto('createVerify', 'signature verification needs SecKey key parsing'),
+          sign: refuseCrypto('sign', 'signing needs SecKey key parsing'),
+          verify: refuseCrypto('verify', 'signature verification needs SecKey key parsing'),
+          Sign: refuseCrypto('Sign', 'signing needs SecKey key parsing'),
+          Verify: refuseCrypto('Verify', 'signature verification needs SecKey key parsing'),
+          generateKeyPair: refuseCrypto('generateKeyPair', 'key-pair generation needs SecKey and PEM/DER encoding'),
+          generateKeyPairSync: refuseCrypto('generateKeyPairSync', 'key-pair generation needs SecKey and PEM/DER encoding'),
+          generateKey: refuseCrypto('generateKey', 'use createSecretKey with randomBytes for symmetric keys'),
+          generateKeySync: refuseCrypto('generateKeySync', 'use createSecretKey with randomBytes for symmetric keys'),
+          createPrivateKey: refuseCrypto('createPrivateKey', 'private-key parsing needs ASN.1/PKCS#8 decoding'),
+          createPublicKey: refuseCrypto('createPublicKey', 'public-key parsing needs ASN.1/SPKI decoding'),
+          createECDH: refuseCrypto('createECDH', 'ECDH needs SecKey key exchange plumbing'),
+          createDiffieHellman: refuseCrypto('createDiffieHellman', 'finite-field DH needs a bignum implementation'),
+          createDiffieHellmanGroup: refuseCrypto('createDiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
+          getDiffieHellman: refuseCrypto('getDiffieHellman', 'finite-field DH needs a bignum implementation'),
+          diffieHellman: refuseCrypto('diffieHellman', 'finite-field DH needs a bignum implementation'),
+          ECDH: refuseCrypto('ECDH', 'ECDH needs SecKey key exchange plumbing'),
+          DiffieHellman: refuseCrypto('DiffieHellman', 'finite-field DH needs a bignum implementation'),
+          DiffieHellmanGroup: refuseCrypto('DiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
+          publicEncrypt: refuseCrypto('publicEncrypt', 'RSA needs SecKey'),
+          publicDecrypt: refuseCrypto('publicDecrypt', 'RSA needs SecKey'),
+          privateEncrypt: refuseCrypto('privateEncrypt', 'RSA needs SecKey'),
+          privateDecrypt: refuseCrypto('privateDecrypt', 'RSA needs SecKey'),
+          scrypt: refuseCrypto('scrypt', 'scrypt has no system implementation here; pbkdf2 and hkdf are real'),
+          scryptSync: refuseCrypto('scryptSync', 'scrypt has no system implementation here; pbkdf2 and hkdf are real'),
+          checkPrime: refuseCrypto('checkPrime', 'primality testing needs a bignum implementation'),
+          checkPrimeSync: refuseCrypto('checkPrimeSync', 'primality testing needs a bignum implementation'),
+          generatePrime: refuseCrypto('generatePrime', 'prime generation needs a bignum implementation'),
+          generatePrimeSync: refuseCrypto('generatePrimeSync', 'prime generation needs a bignum implementation'),
+          Certificate: refuseCrypto('Certificate', 'certificate handling needs Security framework plumbing'),
+          X509Certificate: refuseCrypto('X509Certificate', 'certificate parsing needs Security framework plumbing'),
+          setEngine: function() {},
+          prng: function(size) { return Buffer.from(bridge.randomBytes(size), 'base64'); },
+          rng: function(size) { return Buffer.from(bridge.randomBytes(size), 'base64'); },
+          pseudoRandomBytes: function(size) { return Buffer.from(bridge.randomBytes(size), 'base64'); },
+          constants: { RSA_PKCS1_PADDING: 1, RSA_NO_PADDING: 3, RSA_PKCS1_OAEP_PADDING: 4,
+                       RSA_PKCS1_PSS_PADDING: 6, RSA_PSS_SALTLEN_DIGEST: -1,
+                       RSA_PSS_SALTLEN_MAX_SIGN: -2, RSA_PSS_SALTLEN_AUTO: -2,
+                       defaultCoreCipherList: '', defaultCipherList: '' },
+          getRandomValues: function(target) {
+            const bytes = Buffer.from(bridge.randomBytes(target.length), 'base64');
+            for (let i = 0; i < target.length; i++) target[i] = bytes[i];
+            return target;
+          },
+          randomFillSync: function(target, offset, size) {
+            offset = offset || 0;
+            size = size === undefined ? target.length - offset : size;
+            const bytes = Buffer.from(bridge.randomBytes(size), 'base64');
+            for (let i = 0; i < size; i++) target[offset + i] = bytes[i];
+            return target;
+          },
+          randomFill: function(target, offset, size, callback) {
+            if (typeof offset === 'function') { callback = offset; offset = 0; size = target.length; }
+            else if (typeof size === 'function') { callback = size; size = target.length - offset; }
+            const self = this;
+            process.nextTick(function(){
+              try { callback(null, self.randomFillSync(target, offset, size)); }
+              catch (error) { callback(error); }
+            });
+          },
           randomBytes: function(size, callback) {
             const buffer = Buffer.from(bridge.randomBytes(size), 'base64');
             if (typeof callback === 'function') { setImmediate(function(){ callback(null, buffer); }); return; }

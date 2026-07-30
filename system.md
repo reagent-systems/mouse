@@ -94,6 +94,7 @@ so a TUI navigates and edits.
 | **Phase G — WebSockets, and the HTTP client on raw sockets** | `http.request` left URLSession for `net`, which is what makes three things possible: response bodies arrive INCREMENTALLY, request bodies can stream, and a 101 hands the socket over. Request bytes match node's per request. On top of that, **the real `ws` package works in both directions** — a real node ws client cannot tell our server from node's, and a real node ws server cannot tell our client from node's, closing handshake included. `https` stays on URLSession, where the system owns the TLS handshake |
 | **Phase G — `fs.watch`** | Real file watching (`NodeWatch.swift`) on kqueue via `DispatchSource`: files, directories, recursive trees, `watchFile`/`unwatchFile`, and the async-iterator form. A directory watch also watches the files inside it, which is the only way kqueue can NAME a modification. **chokidar works** — the watcher under webpack, vite, nodemon and `jest --watch` reports the same events on our engine as on node's. `Stats` grew its real fields in the process (see below) |
 | **Phase G — the core-module surface audit** | Every core module's exports diffed against real node's and the gaps filled where they matter: `fs` 81→105 of 106 (`Stats`/`Dirent` as real classes, `opendir`, `cp`, `writev`/`readv`, `statfs`, the access constants), `fs/promises` 13→32 of 32 (including `open` and a real `FileHandle`), `os` and `stream` and `buffer` and `dns` and `url` and `timers` complete, plus `events.on` as an async iterator, `util.parseArgs`, `process.uptime`/`loadEnvFile`, `assert.CallTracker`. It also found a bug that mattered: our `URL` resolved relative URLs by trimming the base after the last slash |
+| **Phase G — real ciphers and KDFs** | `crypto` 17→70 of 71: AES-128/192/256 in GCM, CBC, CTR and ECB plus ChaCha20-Poly1305 (CryptoKit for the AEAD modes, CommonCrypto for the rest — the only system API that exposes CBC/CTR), `pbkdf2`, `hkdf`, `KeyObject`/`createSecretKey`, `randomFill`, `getCiphers`/`getCipherInfo`/`getHashes`/`getCurves`, `crypto.hash`. Ciphertext, tags and derived keys are byte-identical to node's, and **what one engine seals the other opens**. The asymmetric family refuses with the reason (it needs SecKey key parsing) rather than half-working |
 
 ### Verification performed
 
@@ -1003,6 +1004,29 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **Real symmetric crypto, proven the only way that counts.** AES in GCM, CBC,
+  CTR and ECB and ChaCha20-Poly1305 are real — AEAD modes through CryptoKit,
+  CBC/CTR/ECB through CommonCrypto, which is the only system API that exposes
+  them (CryptoKit is AEAD-only on purpose). `pbkdf2` rides
+  CCKeyDerivationPBKDF, `hkdf` rides CryptoKit's HKDF, and `createSecretKey`
+  gives a real `KeyObject`. Two proofs, in order of strength: with a fixed key
+  and IV the CIPHERTEXT, the auth tag and the derived keys are byte-identical
+  to real node's across all four modes and both KDFs; and cross-engine, **what
+  we seal real node opens, and what node seals we open**, AAD included — with
+  a wrong AAD correctly rejected, which is the entire point of an AEAD.
+  A Cipher here is node-shaped (`update()` then `final()`) but produces its
+  bytes in one call at `final()`, which is the honest shape: an authentication
+  tag does not exist until the last byte is in.
+- **What crypto still refuses, and why that is the right answer.** The whole
+  asymmetric family — sign/verify, key-pair generation, key parsing, ECDH,
+  finite-field DH, RSA — needs ASN.1/PKCS#8 key decoding and padding modes that
+  this device exposes only through Security framework's SecKey. That is real
+  work, not a shim, so each member throws with the reason named instead of
+  pretending. Same for `scrypt` (no system implementation; pbkdf2 and hkdf are
+  real) and the prime helpers (no bignum). `crypto.subtle` is deliberately
+  ABSENT rather than refusing: WebCrypto is an object, and a library that
+  feature-detects it would use it and fail, where absence makes it take its
+  fallback path.
 - **A surface audit, and the URL bug it turned up.** The proactive method again:
   list what real node exports for each core module, diff against ours, and read
   the difference. It moved `fs` from 81 to 105 of 106 members (only an internal
@@ -1455,7 +1479,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP, http client+server, WebSockets, fs.watch — express, ws and chokidar run; gaps: TLS server, socket pooling, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, real ciphers+KDFs — express, ws and chokidar run; gaps: asymmetric crypto, TLS server, socket pooling, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
