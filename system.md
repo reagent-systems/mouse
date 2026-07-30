@@ -878,6 +878,44 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   parser). The 25-script sh corpus and all 19 node fixtures stayed green;
   the app builds under Swift 6 strict concurrency
 
+### Android parity: where it stands, and what phase G would take there
+
+AGENTS.md requires mirroring iOS feature work into `kotlin/` **or recording
+why not**. Recording it, with the facts measured rather than guessed:
+
+- The Android app **builds green today** (`ANDROID_HOME=~/Library/Android/sdk
+  ./gradlew assembleDebug`) and has the gesture shell, workspaces, git, and a
+  terminal with `msh`. What it does NOT have is phases **T** (the terminal
+  SCREEN + programs), **F** (the package manager) and **G** (the Node layer)
+  — those are iOS-only.
+- **T and F are portable work, not blocked work.** `TerminalScreen.swift`
+  (27 KB) and `PackageManager.swift` (32 KB) are pure logic over Foundation,
+  HTTP and zlib — all of which Android has, and the Kotlin app already does
+  native tar/gzip for workspaces. Re-implementing them is effort, not a
+  design problem, and the pyte cross-check plus the pnpm/semver corpora
+  transfer as the Android verification harness too.
+- **G needs a JS engine decision, and the code splits favourably.**
+  `NodeEngine.swift` is **72 % JS bootstrap** (165 KB of JavaScript that is
+  engine-agnostic and ports VERBATIM) and only **28 % host bridge** (65 KB of
+  Swift: the native blocks, module resolver and event loop). Android has no
+  public JavaScriptCore, but WebView's V8 is reachable and
+  `@JavascriptInterface` gives JS **synchronous** calls into Kotlin — which
+  is exactly the direction `require()`, `readFileSync` and `execSync` need.
+  The reverse direction (`evaluateJavascript`) is async, which is fine
+  because that direction only carries events (keystrokes, timers, I/O
+  completions) that are already asynchronous here — but it does change the
+  event loop's shape: ours is a synchronous drain on the JS thread, whereas a
+  WebView port would drive the loop from the JS side or via posted messages.
+  So parity is **feasible without breaking invariant #4** (zero third-party
+  dependencies — no QuickJS/J2V8/GraalJS needed), and the honest estimate is
+  a real port of the 28 % plus an event-loop redesign, not a rewrite.
+- **Deliberate deferral, not an oversight.** Doing it now would fork
+  attention while the iOS engine is still gaining API surface weekly; the
+  bootstrap is the asset, and it stabilises with every fixture added here.
+  The moment to port is when the fixture suite stops finding gaps — the
+  suite itself is the specification the Android side would be verified
+  against.
+
 Method to reproduce: `Shell.swift`, `GitCore.swift`, and `GitRemote.swift`
 are Foundation-only by design. Compile them with a scratch `main.swift` via
 `swiftc` (add `-lz` for GitCore) and assert. Scratchpad harnesses are not

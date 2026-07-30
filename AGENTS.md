@@ -132,6 +132,12 @@ seed: mirror any iOS feature change here too, or note in the PR why not.
 The two apps share no code (no cross-platform bridge) — parity is by
 faithful re-implementation, file-for-file where it helps
 (`Shell.swift`↔`MouseShell.kt`, `CarouselDeck.swift`↔`Model.kt`, etc.).
+**Phases T, F and G (terminal screen, package manager, Node layer) are
+iOS-only by a recorded decision, not an oversight** — see "Android parity"
+in system.md for the measured split (the Node engine is 72 % portable JS
+bootstrap, 28 % host bridge) and why WebView + `@JavascriptInterface` is the
+parity path that keeps invariant #4. It is a scope decision with a stated
+trigger; don't fix it in passing.
 
 ## Invariants
 
