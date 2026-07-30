@@ -1621,8 +1621,9 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   error makes the surface unreadable to exactly the tool that audits it.
   **What the sweep says is left**, with reasons that survive: the bignum family
   (`generatePrime`, `checkPrime`, `createDiffieHellman` and its group variants),
-  `privateEncrypt`/`publicDecrypt` (SecKey has no reversed forms),
-  `path.matchesGlob` (node contradicts itself), `moveMessagePortToContext` (shared
+  `privateEncrypt`/`publicDecrypt` (SecKey has no reversed forms — **this one was WRONG and
+  fell later; SecKey's RAW algorithms do exactly that, and only the PKCS#1 type 1 padding was
+  missing**), `path.matchesGlob` (node contradicts itself), `moveMessagePortToContext` (shared
   memory), and — the one genuinely reachable item now — the **`dns.resolve*` family**
   (14 functions: resolve, resolveAny/Cname/Mx/Ns/Ptr/Soa/Srv/Txt/Caa/Naptr/Tlsa,
   reverse, lookupService). Those were absent because `dns.lookup` uses getaddrinfo
