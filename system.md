@@ -97,6 +97,7 @@ so a TUI navigates and edits.
 | **Phase G — real ciphers and KDFs** | `crypto` 17→70 of 71: AES-128/192/256 in GCM, CBC, CTR and ECB plus ChaCha20-Poly1305 (CryptoKit for the AEAD modes, CommonCrypto for the rest — the only system API that exposes CBC/CTR), `pbkdf2`, `hkdf`, `KeyObject`/`createSecretKey`, `randomFill`, `getCiphers`/`getCipherInfo`/`getHashes`/`getCurves`, `crypto.hash`. Ciphertext, tags and derived keys are byte-identical to node's, and **what one engine seals the other opens**. The asymmetric family refuses with the reason (it needs SecKey key parsing) rather than half-working |
 | **Phase G — `tsc --watch` runs** | TypeScript's compiler in WATCH mode, installed by our package manager and running on our engine: it compiled clean, detected an edit through our kqueue watcher, recompiled, and reported the same diagnostic (`TS2339`) in the same order as real node. The heaviest real consumer of `fs.watch` there is, and a phase-D milestone reached early — **the credible-IDE loop (edit → recompile → diagnostics) now closes on the device** |
 | **Phase G — signing, and JWTs** | ECDSA over P-256/384/521 and Ed25519 through CryptoKit: `createSign`/`createVerify`, one-shot `sign`/`verify`, `generateKeyPair`, `createPrivateKey`/`createPublicKey`, and DER *or* JOSE raw (`ieee-p1363`) signature encoding. Real node verifies our signatures and we verify node's, for all four key types, with tampered messages rejected. **`jsonwebtoken` works cross-engine** on ES256 and HS256 — and it found three bugs nothing else had, including a base64url decoding fault that silently dropped bytes |
+| **Phase G — RSA on SecKey** | `NodeKeys.swift`: RSA sign/verify (PKCS1v15 and PSS), OAEP and PKCS1 encryption, and key generation, through Security framework — plus the small DER reader/writer that moves between SecKey's PKCS#1 and node's PKCS#8/SPKI. Cross-engine both ways, including re-signing an imported key to identical bytes (PKCS1v15 is deterministic) and opening the other engine's OAEP ciphertext. **`jsonwebtoken` now covers RS256 and PS256** as well as ES256 and HS256 — the four algorithms real JWTs actually use |
 
 ### Verification performed
 
@@ -1006,6 +1007,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **RSA is real, and the work was the FORMAT, not the crypto.** CryptoKit has no
+  RSA, so this rides Security framework's `SecKey` — which speaks PKCS#1
+  (`RSAPrivateKey`/`RSAPublicKey`) while node hands out PKCS#8 and SPKI. Both
+  wrappers are a fixed ASN.1 shape around the PKCS#1 body, so `NodeKeys.swift`
+  carries a deliberately small DER reader and writer for exactly that unwrap and
+  rewrap, returning nil on anything malformed rather than guessing. On top of it:
+  sign/verify with PKCS1v15 **and PSS**, OAEP and PKCS1 encryption, and key
+  generation (not persisted to the keychain — a program's key should not outlive
+  the program). Verified cross-engine in a way that also proves the DER: each
+  side re-imports the other's PEM, and because PKCS1v15 is deterministic,
+  re-signing the same message with the imported key must produce **identical
+  bytes**. It does, and each engine opens the other's OAEP ciphertext.
+  With that, `jsonwebtoken` covers **RS256, PS256, ES256 and HS256** — the four
+  algorithms real JWTs use — signed in one engine and verified in the other.
+- **What crypto still refuses, now that RSA doesn't.** DSA and finite-field DH
+  (no bignum), `x25519` key agreement, `privateEncrypt`/`publicDecrypt` (SecKey
+  encrypts with the public key and decrypts with the private one; the reversed
+  legacy forms have no API — sign/verify is the private-key direction), scrypt,
+  and the prime helpers. `crypto.subtle` stays absent so feature detection falls
+  back. The fixture that asserted RSA refusing was replaced rather than left to
+  rot: it now pins dsa/dh/x25519, which is what is actually still missing.
 - **Signing is real for what the device can do, and `jsonwebtoken` proved it.**
   ECDSA over P-256/384/521 and Ed25519 ride CryptoKit, which imports and exports
   PKCS#8/SPKI PEM directly — so no ASN.1 of ours is involved for EC. Ed25519 has
@@ -1528,7 +1550,7 @@ D  web toolchain          tsc, bundling, Preview container     PARTLY DONE — t
                           watches on the engine (see §0); bundling + Preview remain
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, ciphers+KDFs, EC/Ed25519 signing — express, ws, chokidar, tsc --watch and jsonwebtoken run; gaps: RSA, TLS server, socket pooling, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, http client+server, WebSockets, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, socket pooling, DSA/DH, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"

@@ -851,13 +851,10 @@ final class NodeEngine: @unchecked Sendable {
         /// What kind of key is this? JS needs it for `asymmetricKeyType` and to reject an
         /// algorithm/key mismatch the way node does.
         let keyIdentify: @convention(block) (String) -> Any = { pem in
-            if pem.contains("RSA") || (pemBody(pem)?.count ?? 0) > 200 {
-                // An RSA key imports fine here and then cannot be used, so name it and let JS
-                // refuse with the reason.
-                if (try? P521.Signing.PrivateKey(pemRepresentation: pem)) == nil,
-                   (try? P521.Signing.PublicKey(pemRepresentation: pem)) == nil {
-                    return ["type": "rsa", "curve": ""] as [String: Any]
-                }
+            // RSA is decided by the algorithm identifier in the DER, not by guessing at length.
+            if NodeKeys.isRSA(pem: pem) {
+                return ["type": "rsa", "curve": "",
+                        "modulusLength": NodeKeys.modulusLength(pem: pem)] as [String: Any]
             }
             if (try? P256.Signing.PrivateKey(pemRepresentation: pem)) != nil ||
                (try? P256.Signing.PublicKey(pemRepresentation: pem)) != nil {
@@ -1000,6 +997,40 @@ final class NodeEngine: @unchecked Sendable {
                 return NSNull()
             }
         }
+        let rsaSign: @convention(block) (String, String, String, Bool) -> Any = { pem, dataBase64, digest, pss in
+            guard let data = Data(base64Encoded: dataBase64),
+                  let signature = NodeKeys.sign(pem: pem, message: data,
+                                                digest: Self.digestName(digest), pss: pss) else { return NSNull() }
+            return signature.base64EncodedString()
+        }
+        let rsaVerify: @convention(block) (String, String, String, String, Bool) -> Any = {
+            pem, dataBase64, signatureBase64, digest, pss in
+            guard let data = Data(base64Encoded: dataBase64),
+                  let signature = Data(base64Encoded: signatureBase64) else { return false }
+            return NodeKeys.verify(pem: pem, message: data, signature: signature,
+                                   digest: Self.digestName(digest), pss: pss)
+        }
+        let rsaEncrypt: @convention(block) (String, String, Int32, String) -> Any = { pem, plainBase64, padding, digest in
+            guard let plain = Data(base64Encoded: plainBase64),
+                  let sealed = NodeKeys.encrypt(pem: pem, plain: plain, padding: Int(padding),
+                                                digest: Self.digestName(digest)) else { return NSNull() }
+            return sealed.base64EncodedString()
+        }
+        let rsaDecrypt: @convention(block) (String, String, Int32, String) -> Any = { pem, cipherBase64, padding, digest in
+            guard let body = Data(base64Encoded: cipherBase64),
+                  let plain = NodeKeys.decrypt(pem: pem, cipher: body, padding: Int(padding),
+                                               digest: Self.digestName(digest)) else { return NSNull() }
+            return plain.base64EncodedString()
+        }
+        let rsaGenerate: @convention(block) (Int32) -> Any = { bits in
+            guard let pair = NodeKeys.generate(modulusLength: Int(bits)) else { return NSNull() }
+            return ["privateKey": pair.privatePEM, "publicKey": pair.publicPEM] as [String: Any]
+        }
+        expose("rsaSign", rsaSign)
+        expose("rsaVerify", rsaVerify)
+        expose("rsaEncrypt", rsaEncrypt)
+        expose("rsaDecrypt", rsaDecrypt)
+        expose("rsaGenerate", rsaGenerate)
         expose("keyIdentify", keyIdentify)
         expose("keySign", keySign)
         expose("keyVerify", keyVerify)
@@ -1198,6 +1229,18 @@ final class NodeEngine: @unchecked Sendable {
             }
         }
         return finished ? output : nil
+    }
+
+    /// OpenSSL's legacy digest names reach us through real libraries — `jwa` signs RS256 by
+    /// asking for "RSA-SHA256", certificates use "ecdsa-with-SHA256". One normalizer, used by
+    /// every signing path.
+    static func digestName(_ raw: String) -> String {
+        var normalized = raw.lowercased().replacingOccurrences(of: "-", with: "")
+        for prefix in ["rsassapss", "rsa", "ecdsawith", "ecdsa"] where normalized.hasPrefix(prefix) {
+            normalized = String(normalized.dropFirst(prefix.count))
+            break
+        }
+        return normalized
     }
 
     /// CBC and CTR through CommonCrypto — the only system API that exposes them (CryptoKit is
@@ -6518,8 +6561,7 @@ final class NodeEngine: @unchecked Sendable {
                                 { code: 'ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE' });
           }
           if (identity.type === 'rsa') {
-            throw Object.assign(new Error('RSA keys are not usable here: RSA needs Security framework SecKey plumbing. EC (P-256/384/521) and Ed25519 are real'),
-                                { code: 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED' });
+            this.asymmetricKeyDetails = { modulusLength: identity.modulusLength, publicExponent: 65537n };
           }
         }
         AsymmetricKeyObject.prototype.export = function(options) {
@@ -6545,9 +6587,24 @@ final class NodeEngine: @unchecked Sendable {
         function dsaIsRaw(key) {
           return !!(key && typeof key === 'object' && key.dsaEncoding === 'ieee-p1363');
         }
+        // node's padding constants for RSA, and PSS is selected per call.
+        function rsaOptions(key) {
+          const options = (key && typeof key === 'object' && !key._keyObject) ? key : {};
+          const padding = options.padding === undefined ? 1 : Number(options.padding);   // PKCS1v15
+          return { pss: padding === 6, padding: padding };
+        }
         function signWith(algorithm, data, key) {
           const pem = keyPem(key);
           const identity = bridge.keyIdentify(pem);
+          if (identity.type === 'rsa') {
+            const signature = bridge.rsaSign(pem, Buffer.from(data).toString('base64'),
+                                             String(algorithm || 'sha256'), rsaOptions(key).pss);
+            if (!signature) {
+              throw Object.assign(new Error('RSA signing failed: the key must be an RSA private key and the digest one of sha1/sha256/sha384/sha512'),
+                                  { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+            }
+            return Buffer.from(signature, 'base64');
+          }
           if (identity.type === 'ed25519' && algorithm) {
             // node: Ed25519 signs the message itself, so naming a digest is an error.
             throw Object.assign(new Error('Ed25519 signs the message directly; pass null as the algorithm'),
@@ -6564,6 +6621,11 @@ final class NodeEngine: @unchecked Sendable {
         function verifyWith(algorithm, data, key, signature) {
           const pem = keyPem(key);
           const identity = bridge.keyIdentify(pem);
+          if (identity.type === 'rsa') {
+            return !!bridge.rsaVerify(pem, Buffer.from(data).toString('base64'),
+                                      Buffer.from(signature).toString('base64'),
+                                      String(algorithm || 'sha256'), rsaOptions(key).pss);
+          }
           if (identity.type === 'ed25519' && algorithm) {
             throw Object.assign(new Error('Ed25519 verifies the message directly; pass null as the algorithm'),
                                 { code: 'ERR_OSSL_INVALID_DIGEST' });
@@ -6600,11 +6662,13 @@ final class NodeEngine: @unchecked Sendable {
         function generateKeyPairSync(type, options) {
           options = options || {};
           const kind = String(type).toLowerCase();
-          if (kind !== 'ec' && kind !== 'ed25519') {
-            throw Object.assign(new Error("Key type '" + type + "' is not available: this device can generate EC (P-256/384/521) and Ed25519 through CryptoKit; RSA and DSA need SecKey plumbing"),
+          if (kind !== 'ec' && kind !== 'ed25519' && kind !== 'rsa') {
+            throw Object.assign(new Error("Key type '" + type + "' is not available: this device generates RSA through SecKey and EC (P-256/384/521) and Ed25519 through CryptoKit; DSA and DH have no system implementation"),
                                 { code: 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED' });
           }
-          const pair = bridge.keyGenerate(kind, String(options.namedCurve || ''));
+          const pair = kind === 'rsa'
+            ? bridge.rsaGenerate(Number(options.modulusLength) || 2048)
+            : bridge.keyGenerate(kind, String(options.namedCurve || ''));
           if (!pair) {
             throw Object.assign(new Error("Unsupported curve '" + options.namedCurve + "': P-256 (prime256v1), P-384 (secp384r1) and P-521 (secp521r1) are available"),
                                 { code: 'ERR_CRYPTO_INVALID_CURVE' });
@@ -6747,10 +6811,34 @@ final class NodeEngine: @unchecked Sendable {
           ECDH: refuseCrypto('ECDH', 'ECDH needs SecKey key exchange plumbing'),
           DiffieHellman: refuseCrypto('DiffieHellman', 'finite-field DH needs a bignum implementation'),
           DiffieHellmanGroup: refuseCrypto('DiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
-          publicEncrypt: refuseCrypto('publicEncrypt', 'RSA needs SecKey'),
-          publicDecrypt: refuseCrypto('publicDecrypt', 'RSA needs SecKey'),
-          privateEncrypt: refuseCrypto('privateEncrypt', 'RSA needs SecKey'),
-          privateDecrypt: refuseCrypto('privateDecrypt', 'RSA needs SecKey'),
+          // RSA encryption. node's default padding for these is OAEP (4) with SHA-1.
+          publicEncrypt: function(key, buffer) {
+            const options = (key && typeof key === 'object' && !key._keyObject) ? key : {};
+            const padding = options.padding === undefined ? 4 : Number(options.padding);
+            const digest = String(options.oaepHash || 'sha1');
+            const sealed = bridge.rsaEncrypt(keyPem(key), Buffer.from(buffer).toString('base64'), padding, digest);
+            if (!sealed) {
+              throw Object.assign(new Error('publicEncrypt failed: needs an RSA key, OAEP (padding 4) or PKCS1 (padding 1), and a payload that fits the modulus'),
+                                  { code: 'ERR_CRYPTO_OPERATION_FAILED' });
+            }
+            return Buffer.from(sealed, 'base64');
+          },
+          privateDecrypt: function(key, buffer) {
+            const options = (key && typeof key === 'object' && !key._keyObject) ? key : {};
+            const padding = options.padding === undefined ? 4 : Number(options.padding);
+            const digest = String(options.oaepHash || 'sha1');
+            const plain = bridge.rsaDecrypt(keyPem(key), Buffer.from(buffer).toString('base64'), padding, digest);
+            if (plain === null || plain === undefined) {
+              throw Object.assign(new Error('privateDecrypt failed: wrong key, wrong padding, or corrupt ciphertext'),
+                                  { code: 'ERR_OSSL_RSA_OAEP_DECODING_ERROR' });
+            }
+            return Buffer.from(plain, 'base64');
+          },
+          // The signing-with-the-private-key direction of raw RSA. SecKey exposes encryption
+          // for the public key and decryption for the private one, which is the useful pair;
+          // the reversed forms are legacy and stay honest about their absence.
+          privateEncrypt: refuseCrypto('privateEncrypt', 'SecKey encrypts with the public key and decrypts with the private one — use sign/verify for the private-key direction'),
+          publicDecrypt: refuseCrypto('publicDecrypt', 'SecKey decrypts with the private key only — use verify for the public-key direction'),
           scrypt: refuseCrypto('scrypt', 'scrypt has no system implementation here; pbkdf2 and hkdf are real'),
           scryptSync: refuseCrypto('scryptSync', 'scrypt has no system implementation here; pbkdf2 and hkdf are real'),
           checkPrime: refuseCrypto('checkPrime', 'primality testing needs a bignum implementation'),

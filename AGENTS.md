@@ -168,10 +168,20 @@ watch mode must compile, detect an edit through our watcher, recompile, and
 report the same diagnostics as real node. That last one is the phase-D loop
 (edit → recompile → diagnostics) and the heaviest consumer of `fs.watch` there
 is; if it breaks, suspect the watcher or `Stats` before suspecting tsc.
+RSA (`NodeKeys.swift`) rides Security framework's `SecKey`, which speaks PKCS#1
+while node speaks PKCS#8/SPKI — the DER reader/writer there exists ONLY for that
+unwrap and rewrap, and it must keep returning nil on malformed input rather than
+guessing. PKCS1v15 signatures are deterministic, so the cross-engine test also
+checks that re-signing with the OTHER engine's imported key gives identical
+bytes; that is what proves the DER round trip, not just the signature. Generated
+keys must NOT be persisted to the keychain (`kSecAttrIsPermanent: false`) — a
+program's key should not outlive the program. `privateEncrypt`/`publicDecrypt`
+stay refused: SecKey encrypts with the public key and decrypts with the private
+one, and sign/verify is the private-key direction.
 SIGNING (ECDSA P-256/384/521 and Ed25519, via CryptoKit) cannot be verified by
 comparing bytes — signatures are randomized. The test is CROSS-ENGINE: real node
 must verify our signatures and we must verify node's, for every key type, with a
-tampered message rejected. Keep `jsonwebtoken` green too (ES256 and HS256, signed
+tampered message rejected. Keep `jsonwebtoken` green too (RS256, PS256, ES256 and HS256, signed
 in one engine and verified in the other) — it exercised three faults no fixture
 did. Ed25519 signs the MESSAGE (a digest name is an error, code
 `ERR_OSSL_INVALID_DIGEST`), and `dsaEncoding: 'ieee-p1363'` selects JOSE's raw
