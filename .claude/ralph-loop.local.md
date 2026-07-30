@@ -1,10 +1,10 @@
 ---
 active: true
-iteration: 4
-session_id: ea518e67-84c4-4903-8d6b-21355638388a
+iteration: 38
+session_id: f1ee49c6-93f4-4a63-9c10-51994e47370d
 max_iterations: 0
 completion_promise: null
-started_at: "2026-07-28T02:38:30Z"
+started_at: "2026-07-29T01:57:06Z"
 ---
 
-Work through the system.md phases headlessly in order: phase A msh language, phase F package manager, phase G Node layer. Verify per AGENTS.md and commit at each phase boundary.
+Continue system.md phase G: raw TTY and stdin wiring so Node programs drive the phase-T screen for ink-style TUIs, then remaining G gaps: stream depth, unhandled-rejection exit codes. Verify per AGENTS.md and commit at each boundary.

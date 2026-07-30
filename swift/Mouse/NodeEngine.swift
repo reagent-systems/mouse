@@ -11,7 +11,8 @@ import zlib
 /// Scope, honestly: CommonJS only (`import` errors clearly), the core-module subset real
 /// CLIs lean on (`fs` `path` `os` `util` `events` `buffer` `tty` `assert`, timers,
 /// `process`), and a macrotask loop (timers, immediates, nextTick; promises ride JSC's own
-/// microtask queue). `http`/`net` and `child_process` are stubs that say what's missing.
+/// microtask queue). `net` is real TCP (see NodeSockets.swift) and `child_process` runs
+/// through msh; `http` clients ride URLSession, and `http.createServer` rides `net`.
 /// Paths are workspace-virtual: "/" is the project root, exactly like msh.
 ///
 /// Foundation + JavaScriptCore only: verified headlessly against REAL Node's output for the
@@ -83,6 +84,28 @@ final class NodeEngine: @unchecked Sendable {
     private let jobsLock = NSLock()
     private var jobs: [() -> Void] = []
     private var outstanding = 0
+    /// Open TCP handles (`net`, and `http` servers above it). Counted separately from
+    /// `outstanding` because they are opened and closed from the socket queue, not the JS
+    /// thread — hence the lock, which the loop's quiescence check reads through.
+    private let handlesLock = NSLock()
+    private var openHandles = 0
+    private lazy var sockets: SocketTable = SocketTable(
+        deliver: { [weak self] job in self?.enqueueJob(job) },
+        retain: { [weak self] in
+            guard let self else { return }
+            handlesLock.lock(); openHandles += 1; handlesLock.unlock()
+        },
+        release: { [weak self] in
+            guard let self else { return }
+            handlesLock.lock(); openHandles -= 1; handlesLock.unlock()
+            wakeup.signal()   // the last handle closing is what lets the loop notice and exit
+        })
+    private var socketsUsed = false
+    private var hasOpenHandles: Bool {
+        handlesLock.lock()
+        defer { handlesLock.unlock() }
+        return openHandles > 0
+    }
     private var cancelled = false
     /// stdin has listeners on an attached TTY — the program is waiting on the keyboard,
     /// which keeps the event loop alive exactly like node's ref'd stdin.
@@ -238,6 +261,9 @@ final class NodeEngine: @unchecked Sendable {
         }
 
         runEventLoop()
+        // A program that exits with a server still listening must not leave the port held —
+        // there is no process teardown here to do it for us.
+        if socketsUsed { sockets.closeAll() }
 
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
@@ -298,7 +324,7 @@ final class NodeEngine: @unchecked Sendable {
             }
 
             let next = timers.min(by: { $0.due < $1.due })
-            if next == nil, outstanding == 0, !stdinActive {
+            if next == nil, outstanding == 0, !stdinActive, !hasOpenHandles {
                 // Quiescent with the entry's top-level await still pending: nothing can
                 // ever settle it. Real node exits 13 here.
                 if entryPending { exitCode = 13 }
@@ -504,6 +530,74 @@ final class NodeEngine: @unchecked Sendable {
             }.resume()
         }
         expose("httpRequest", httpRequest)
+
+        // -- net: real TCP through SocketTable ---------------------------------------------
+        // One dispatcher shape for every socket: `callback(event, payload)`. The JS side
+        // switches on the name, so adding an event costs nothing here. All of these run on
+        // the JS thread already (SocketTable delivers through `enqueueJob`).
+        func dispatcher(_ callback: JSValue) -> SocketTable.Handler {
+            func plain(_ address: SocketTable.Address) -> [String: Any] {
+                ["address": address.address, "port": address.port, "family": address.family]
+            }
+            return { id, event in
+                switch event {
+                case let .connect(local, remote):
+                    callback.call(withArguments: [id, "connect", ["local": plain(local), "remote": plain(remote)]])
+                case let .listening(address):
+                    callback.call(withArguments: [id, "listening", plain(address)])
+                case let .connection(socket, local, remote):
+                    callback.call(withArguments: [id, "connection", ["id": socket, "local": plain(local), "remote": plain(remote)]])
+                case let .data(bytes):
+                    callback.call(withArguments: [id, "data", bytes.base64EncodedString()])
+                case .end:
+                    callback.call(withArguments: [id, "end", NSNull()])
+                case .drain:
+                    callback.call(withArguments: [id, "drain", NSNull()])
+                case .close:
+                    callback.call(withArguments: [id, "close", NSNull()])
+                case let .error(message, code):
+                    callback.call(withArguments: [id, "error", ["message": message, "code": code]])
+                }
+            }
+        }
+        let netConnect: @convention(block) (String, Int32, JSValue) -> Int32 = { [weak self] host, port, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.connect(host: host, port: Int(port), handler: dispatcher(callback)))
+        }
+        let netListen: @convention(block) (String, Int32, Int32, JSValue) -> Int32 = { [weak self] host, port, backlog, callback in
+            guard let self else { return 0 }
+            socketsUsed = true
+            return Int32(sockets.listen(host: host, port: Int(port),
+                                        backlog: Int(backlog), handler: dispatcher(callback)))
+        }
+        let netWrite: @convention(block) (Int32, String) -> Bool = { [weak self] id, base64 in
+            guard let self, let data = Data(base64Encoded: base64) else { return true }
+            return sockets.write(id: Int(id), data: data)
+        }
+        let netEnd: @convention(block) (Int32) -> Void = { [weak self] id in self?.sockets.end(id: Int(id)) }
+        let netDestroy: @convention(block) (Int32) -> Void = { [weak self] id in self?.sockets.destroy(id: Int(id)) }
+        let netPause: @convention(block) (Int32) -> Void = { [weak self] id in self?.sockets.pause(id: Int(id)) }
+        let netResume: @convention(block) (Int32) -> Void = { [weak self] id in self?.sockets.resume(id: Int(id)) }
+        let netRef: @convention(block) (Int32, Bool) -> Void = { [weak self] id, refed in
+            self?.sockets.setRef(id: Int(id), refed: refed)
+        }
+        let netNoDelay: @convention(block) (Int32, Bool) -> Void = { [weak self] id, on in
+            self?.sockets.setNoDelay(id: Int(id), on)
+        }
+        let netKeepAlive: @convention(block) (Int32, Bool, Int32) -> Void = { [weak self] id, on, delay in
+            self?.sockets.setKeepAlive(id: Int(id), on, delay: Int(delay))
+        }
+        expose("netConnect", netConnect)
+        expose("netListen", netListen)
+        expose("netWrite", netWrite)
+        expose("netEnd", netEnd)
+        expose("netDestroy", netDestroy)
+        expose("netPause", netPause)
+        expose("netResume", netResume)
+        expose("netRef", netRef)
+        expose("netNoDelay", netNoDelay)
+        expose("netKeepAlive", netKeepAlive)
 
         // -- crypto: CryptoKit digests/HMAC, the system CSPRNG -----------------------------
         let cryptoHash: @convention(block) (String, String) -> String? = { algorithm, base64 in
@@ -2909,6 +3003,21 @@ final class NodeEngine: @unchecked Sendable {
         // `util.inherits(MyStream, Readable); Readable.call(this, opts)`, and a class
         // constructor throws when called without `new` — the same reason EventEmitter is a
         // function here. Methods live on the prototype so util.inherits chains find them.
+        // 'close' is emitted ONCE PER STREAM, not once per side. A Duplex whose readable side
+        // ended AND whose writable side finished reached both close paths and emitted twice —
+        // which any `let done = 0; if (++done === n)` counter reads as double the work
+        // finishing (found on a net fixture where 5 connections reported 5 closes after 3).
+        function emitCloseOnce(stream) {
+          // A socket's 'close' means THE FILE DESCRIPTOR is gone, not "this stream's sides
+          // finished": net.Socket sets `_hostOwnsClose` and emits it from the host event
+          // instead. Letting the writable side emit it made `client.end()` announce a close
+          // while the fd was still open — a fixture that called `server.close()` from the
+          // client's 'close' handler then shut the listener down mid-exchange and both ends
+          // waited forever.
+          if (stream._closeEmitted || stream._hostOwnsClose) return;
+          stream._closeEmitted = true;
+          stream.emit('close');
+        }
         function initReadable(self, options) {
           options = options || {};
           self._buf = [];
@@ -2972,7 +3081,7 @@ final class NodeEngine: @unchecked Sendable {
               process.nextTick(() => {
                 this.readable = false;
                 this.emit('end');
-                process.nextTick(() => { this._closeEmitted = true; this.emit('close'); });
+                process.nextTick(() => emitCloseOnce(this));
               });
             }
           },
@@ -2998,7 +3107,7 @@ final class NodeEngine: @unchecked Sendable {
           destroy: function(err) {
             if (this.destroyed) return this;
             this.destroyed = true;
-            const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => this.emit('close')); };
+            const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => emitCloseOnce(this)); };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
           },
@@ -3104,7 +3213,7 @@ final class NodeEngine: @unchecked Sendable {
             const finish = () => {
               this.writable = false;
               this.emit('finish');
-              process.nextTick(() => { this._closeEmitted = true; this.emit('close'); });
+              process.nextTick(() => emitCloseOnce(this));
             };
             if (this._final) this._final((err) => { if (err) this.emit('error', err); finish(); });
             else finish();
@@ -3112,7 +3221,7 @@ final class NodeEngine: @unchecked Sendable {
           destroy(err) {
             if (this.destroyed) return this;
             this.destroyed = true;
-            const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => this.emit('close')); };
+            const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => emitCloseOnce(this)); };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
           },
@@ -4144,43 +4253,301 @@ final class NodeEngine: @unchecked Sendable {
         return zlib;
       };
 
-      // net: the address helpers are real; sockets carry the sandbox's truth — nothing
-      // listens in-process and there is no server engine yet, so connects refuse and
-      // listens error (the dev-server phase makes these real).
+      // net: REAL TCP. Sockets are file descriptors in SocketTable (NodeSockets.swift); this
+      // is the node-shaped skin over them — a Duplex whose _write hands bytes to the fd and
+      // whose push() comes from the read source, plus a Server that turns accept() into
+      // 'connection'. Backpressure is honest end to end: netWrite returns false when the
+      // kernel queue is past the high-water mark, and the _write callback waits for 'drain'.
       coreFactories.net = function() {
         const EventEmitter = coreRequire('events');
         const { Duplex } = coreRequire('stream');
-        function fail(target, code, syscall) {
-          setImmediate(function(){
-            target.emit('error', Object.assign(new Error(syscall + ' ' + code), { code: code, syscall: syscall }));
+
+        function Socket(options) {
+          Duplex.call(this, options || {});
+          options = options || {};
+          this._sid = 0;
+          this._hostOwnsClose = true;
+          this.connecting = false;
+          this.pending = true;
+          this.bytesRead = 0;
+          this.bytesWritten = 0;
+          this.allowHalfOpen = !!options.allowHalfOpen;
+          this._drainWaiters = [];
+          this._timeoutMs = 0;
+          this._timeoutTimer = null;
+          this.remoteAddress = undefined;
+          this.remotePort = undefined;
+          this.remoteFamily = undefined;
+          this.localAddress = undefined;
+          this.localPort = undefined;
+        }
+        Socket.prototype = Object.create(Duplex.prototype);
+        Socket.prototype.constructor = Socket;
+        Object.defineProperty(Socket.prototype, 'readyState', {
+          get: function() {
+            if (this.connecting) return 'opening';
+            if (this.destroyed) return 'closed';
+            if (this.readable && this.writable) return 'open';
+            return this.readable ? 'readOnly' : this.writable ? 'writeOnly' : 'closed';
+          }, configurable: true,
+        });
+
+        // Every host event for this socket lands here. One function, so the set of events is
+        // visible in one place.
+        Socket.prototype._hostEvent = function(event, payload) {
+          switch (event) {
+            case 'connect':
+              this.connecting = false;
+              this.pending = false;
+              this._adopt(payload);
+              this.emit('connect');
+              this.emit('ready');
+              break;
+            case 'data': {
+              const chunk = Buffer.from(payload, 'base64');
+              this.bytesRead += chunk.length;
+              this._touchTimeout();
+              // push() false means the consumer is behind — stop the fd reading rather
+              // than growing an unbounded JS buffer. _read resumes it.
+              if (this.push(chunk) === false) bridge.netPause(this._sid);
+              break;
+            }
+            case 'end':
+              this.push(null);
+              // Node's allowHalfOpen=false default: the peer's FIN ends our side too.
+              if (!this.allowHalfOpen && !this._writableEnded) this.end();
+              break;
+            case 'drain': {
+              const waiters = this._drainWaiters;
+              this._drainWaiters = [];
+              for (let i = 0; i < waiters.length; i++) waiters[i]();
+              break;
+            }
+            case 'close':
+              this.writable = false;
+              this.readable = false;
+              this.destroyed = true;
+              this._clearTimeout();
+              if (!this._sawEOF) this.push(null);
+              if (!this._closeEmitted) { this._closeEmitted = true; this.emit('close', !!this._errored); }
+              break;
+            case 'error': {
+              const error = Object.assign(new Error(payload.message), { code: payload.code });
+              this._errored = error;
+              this.connecting = false;
+              this.emit('error', error);
+              break;
+            }
+          }
+        };
+
+        Socket.prototype._adopt = function(payload) {
+          if (!payload) return;
+          if (payload.remote) {
+            this.remoteAddress = payload.remote.address;
+            this.remotePort = payload.remote.port;
+            this.remoteFamily = payload.remote.family;
+          }
+          if (payload.local) {
+            this.localAddress = payload.local.address;
+            this.localPort = payload.local.port;
+            this._localFamily = payload.local.family;
+          }
+        };
+
+        Socket.prototype.connect = function() {
+          // node's overloads: (port[, host][, cb]), (options[, cb]), (path[, cb]).
+          const args = Array.prototype.slice.call(arguments);
+          const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+          let host = 'localhost', port = 0;
+          if (args[0] && typeof args[0] === 'object') {
+            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available'), { code: 'ERR_INVALID_ARG_VALUE' });
+            port = args[0].port; host = args[0].host || 'localhost';
+          } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
+            throw Object.assign(new Error('unix domain sockets are not available'), { code: 'ERR_INVALID_ARG_VALUE' });
+          } else {
+            port = Number(args[0]);
+            if (typeof args[1] === 'string') host = args[1];
+          }
+          this.connecting = true;
+          if (callback) this.once('connect', callback);
+          const self = this;
+          this._sid = bridge.netConnect(String(host), Number(port), function(id, event, payload) {
+            self._hostEvent(event, payload);
           });
+          return this;
+        };
+
+        Socket.prototype._read = function() {
+          if (this._sid) bridge.netResume(this._sid);
+        };
+        Socket.prototype._write = function(chunk, encoding, callback) {
+          if (!this._sid || this.destroyed) { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); return; }
+          const buffer = Buffer.isBuffer(chunk) ? chunk
+            : Buffer.from(String(chunk), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+          this.bytesWritten += buffer.length;
+          this._touchTimeout();
+          if (bridge.netWrite(this._sid, buffer.toString('base64'))) callback();
+          else this._drainWaiters.push(callback);   // resolved by the host's 'drain'
+        };
+        Socket.prototype._final = function(callback) {
+          if (this._sid) bridge.netEnd(this._sid);
+          callback();
+        };
+        Socket.prototype._destroy = function(error, callback) {
+          if (this._sid) bridge.netDestroy(this._sid);
+          this._clearTimeout();
+          callback(error);
+        };
+
+        Socket.prototype.setNoDelay = function(on) {
+          if (this._sid) bridge.netNoDelay(this._sid, on === undefined ? true : !!on);
+          return this;
+        };
+        Socket.prototype.setKeepAlive = function(on, delay) {
+          if (this._sid) bridge.netKeepAlive(this._sid, on === undefined ? true : !!on, Number(delay) || 0);
+          return this;
+        };
+        // An idle timer, not a socket option: node emits 'timeout' and leaves the socket
+        // open — closing it is the listener's decision.
+        Socket.prototype.setTimeout = function(ms, callback) {
+          this._timeoutMs = Number(ms) || 0;
+          if (callback) this.once('timeout', callback);
+          this._touchTimeout();
+          return this;
+        };
+        Socket.prototype._touchTimeout = function() {
+          this._clearTimeout();
+          if (!this._timeoutMs) return;
+          const self = this;
+          this._timeoutTimer = setTimeout(function(){ self.emit('timeout'); }, this._timeoutMs);
+          // An idle timer must not be the reason the program stays alive.
+          if (this._timeoutTimer && this._timeoutTimer.unref) this._timeoutTimer.unref();
+        };
+        Socket.prototype._clearTimeout = function() {
+          if (this._timeoutTimer) { clearTimeout(this._timeoutTimer); this._timeoutTimer = null; }
+        };
+        Socket.prototype.ref = function() { if (this._sid) bridge.netRef(this._sid, true); return this; };
+        Socket.prototype.unref = function() { if (this._sid) bridge.netRef(this._sid, false); return this; };
+        Socket.prototype.address = function() {
+          if (this.localPort === undefined) return {};
+          return { address: this.localAddress, family: this._localFamily || 'IPv4', port: this.localPort };
+        };
+        Socket.prototype.destroySoon = function() { this.end(); };
+
+        function Server(options, handler) {
+          EventEmitter.call(this);
+          if (typeof options === 'function') { handler = options; options = {}; }
+          options = options || {};
+          this._sid = 0;
+          this._connections = [];
+          this._sockets = {};        // socket id -> Socket, for routing host events
+          this.listening = false;
+          this.maxConnections = Infinity;
+          this.allowHalfOpen = !!options.allowHalfOpen;
+          this._address = null;
+          this._closing = false;
+          if (handler) this.on('connection', handler);
         }
-        class Socket extends Duplex {
-          constructor() { super(); this.connecting = false; this.destroyed = false; }
-          connect() {
-            this.connecting = true;
-            fail(this, 'ECONNREFUSED', 'connect');
-            return this;
+        Server.prototype = Object.create(EventEmitter.prototype);
+        Server.prototype.constructor = Server;
+
+        Server.prototype.listen = function() {
+          const args = Array.prototype.slice.call(arguments);
+          const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+          let port = 0, host = '0.0.0.0', backlog = 511;
+          if (args[0] && typeof args[0] === 'object') {
+            if (args[0].path) throw Object.assign(new Error('unix domain sockets are not available'), { code: 'ERR_INVALID_ARG_VALUE' });
+            port = args[0].port || 0;
+            host = args[0].host || '0.0.0.0';
+            backlog = args[0].backlog || backlog;
+          } else {
+            port = Number(args[0]) || 0;
+            if (typeof args[1] === 'string') { host = args[1]; if (args[2]) backlog = Number(args[2]); }
+            else if (typeof args[1] === 'number') backlog = args[1];
           }
-          setNoDelay() { return this; }
-          setKeepAlive() { return this; }
-          setTimeout() { return this; }
-          ref() { return this; }
-          unref() { return this; }
-          address() { return {}; }
-        }
-        class Server extends EventEmitter {
-          listen() {
-            const callback = typeof arguments[arguments.length - 1] === 'function' ? arguments[arguments.length - 1] : null;
-            if (callback) this.once('listening', callback);
-            fail(this, 'EPERM', 'listen');
-            return this;
+          if (callback) this.once('listening', callback);
+          const self = this;
+          // The listening socket's handler receives its accepted sockets' events too, tagged
+          // with the socket id: 'connection' is always the first event for a new id, so the
+          // Socket object is registered here before anything else can arrive for it.
+          this._sid = bridge.netListen(String(host), Number(port), Number(backlog), function(id, event, payload) {
+            if (id === self._sid) self._hostEvent(event, payload);
+            else if (self._sockets[id]) self._sockets[id]._hostEvent(event, payload);
+          });
+          return this;
+        };
+
+        Server.prototype._hostEvent = function(event, payload) {
+          switch (event) {
+            case 'listening':
+              this.listening = true;
+              this._address = { address: payload.address, family: payload.family, port: payload.port };
+              this.emit('listening');
+              break;
+            case 'connection': {
+              const socket = new Socket({ allowHalfOpen: this.allowHalfOpen });
+              socket._sid = payload.id;
+              socket.connecting = false;
+              socket.pending = false;
+              socket._adopt(payload);
+              socket._server = this;
+              this._sockets[payload.id] = socket;
+              this._connections.push(socket);
+              const self = this;
+              socket.once('close', function(){
+                delete self._sockets[socket._sid];
+                const at = self._connections.indexOf(socket);
+                if (at >= 0) self._connections.splice(at, 1);
+                self._maybeClosed();
+              });
+              if (this._connections.length > this.maxConnections) { socket.destroy(); break; }
+              this.emit('connection', socket);
+              break;
+            }
+            case 'error':
+              this.listening = false;
+              this.emit('error', Object.assign(new Error(payload.message), { code: payload.code }));
+              break;
+            case 'close':
+              break;
           }
-          close(callback) { if (callback) setImmediate(callback); return this; }
-          address() { return null; }
-          ref() { return this; }
-          unref() { return this; }
+        };
+
+        // node: close() stops accepting, and 'close' fires only once the live connections
+        // are gone.
+        Server.prototype.close = function(callback) {
+          if (callback) this.once('close', callback);
+          if (!this._closing) {
+            this._closing = true;
+            this.listening = false;
+            if (this._sid) { bridge.netDestroy(this._sid); this._sid = 0; }
+          }
+          this._maybeClosed();
+          return this;
+        };
+        Server.prototype._maybeClosed = function() {
+          if (!this._closing || this._connections.length || this._closed) return;
+          this._closed = true;
+          const self = this;
+          process.nextTick(function(){ self.emit('close'); });
+        };
+        Server.prototype.address = function() { return this._address; };
+        Server.prototype.getConnections = function(callback) {
+          const count = this._connections.length;
+          process.nextTick(function(){ callback(null, count); });
+          return this;
+        };
+        Server.prototype.ref = function() { if (this._sid) bridge.netRef(this._sid, true); return this; };
+        Server.prototype.unref = function() { if (this._sid) bridge.netRef(this._sid, false); return this; };
+
+        function connect() {
+          const args = Array.prototype.slice.call(arguments);
+          const options = args[0] && typeof args[0] === 'object' ? args[0] : {};
+          const socket = new Socket(options);
+          return socket.connect.apply(socket, args);
         }
+
         function isIPv4(text) {
           const parts = String(text).split('.');
           return parts.length === 4 && parts.every(function(p){ return /^\d{1,3}$/.test(p) && Number(p) <= 255; });
@@ -4190,14 +4557,11 @@ final class NodeEngine: @unchecked Sendable {
         }
         return {
           Socket: Socket,
+          Stream: Socket,          // node's legacy alias
           Server: Server,
-          createServer: function(handler) {
-            const server = new Server();
-            if (typeof handler === 'function') server.on('connection', handler);
-            return server;
-          },
-          createConnection: function() { return new Socket().connect(); },
-          connect: function() { return new Socket().connect(); },
+          createServer: function(options, handler) { return new Server(options, handler); },
+          createConnection: connect,
+          connect: connect,
           isIPv4: isIPv4,
           isIPv6: isIPv6,
           isIP: function(text) { return isIPv4(text) ? 4 : isIPv6(text) ? 6 : 0; },

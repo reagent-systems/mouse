@@ -113,6 +113,40 @@ exactly; msh semantics proven separately end-to-end), and fetch/https
 against a live local HTTP server. The engine runs JS on a background
 queue — never block the main actor from JS; `execSync` blocks the JS
 thread on a semaphore while msh runs on main.
+TCP (`NodeSockets.swift` + the `net` module) verifies THREE ways, and the
+third is the one that matters: twin-engine fixtures (ours vs real node,
+stdout+status), our server against a REAL node client, and our client against
+a REAL node server — each cross case compared byte-for-byte against the same
+peer talking to real node, because "it works when both ends are ours" proves
+nothing about the wire. Run the suite REPEATEDLY: every bug this layer had
+was intermittent (one run in three), so a single green run is not evidence.
+Load-bearing rules, each paid for:
+**A socket's `'close'` means the file descriptor is gone**, not "both stream
+sides finished" — `net.Socket` sets `_hostOwnsClose` and emits `'close'` from
+the host event, and `emitCloseOnce` honors that. Do not let the writable
+side announce a socket's close.
+**`'close'` is emitted once per STREAM, not once per side** — a Duplex that
+ended AND finished used to emit twice, which halves any `++done === n`
+counter.
+**EOF is not a close.** The peer's FIN means no more data; the fd retires
+only when BOTH directions are done (`readEOF && writeShutdown`), the write
+queue drained, and every byte read has reached JavaScript. Closing on EOF
+loses buffered bytes and breaks half-open sockets.
+**An accepted socket must never exist without a handler.** A server's
+handler receives its accepted sockets' events too, tagged by socket id;
+`'connection'` is necessarily the first event for a new id, so JavaScript
+registers the Socket before anything else can arrive. Do not reintroduce a
+placeholder-then-adopt scheme — a fast peer's bytes and FIN vanish in that
+window.
+Nothing may block the socket queue: `getaddrinfo` runs on a separate
+concurrent queue and connect is non-blocking, or one slow host stalls every
+other socket's I/O.
+Known divergence, do NOT write fixtures across it: node reports a server's
+`'connection'` before the connecting client's `'connect'` and we report the
+reverse (a loopback handshake completes inside `connect()`; the accept is a
+dispatch-source event). Deferring delivery does not reorder it. Assert each
+socket's OWN event sequence instead. Likewise `server.getConnections()`
+mid-exchange is nondeterministic in real node (1, 2 or 3 across runs).
 The T↔G JOIN (`NodeProgram` + the engine's TTY surface) verifies like any
 terminal program — `TerminalProgramIO.write` → `AnsiParser`, grid asserted
 after keystrokes, pumping the main runloop between steps — covering both

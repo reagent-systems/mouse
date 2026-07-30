@@ -21,8 +21,11 @@ carry breaking changes.
   `<bin>` works: the CommonJS *and* ES-module systems, a real event loop,
   `fs` (sync, callback and fd forms), `stream` (with streaming
   compression), `crypto` (CryptoKit), `zlib` (libz), `readline`,
-  `child_process` bridged into `msh`, and the **fetch API** with streaming
-  response bodies. Full-screen programs get a real TTY: keystrokes,
+  `child_process` bridged into `msh`, the **fetch API** with streaming
+  response bodies, and **real TCP** (`net`): outbound connections, servers
+  that listen and accept, honest backpressure and half-close — verified in
+  both directions against real node, so a node client cannot tell our
+  server from node's. Full-screen programs get a real TTY: keystrokes,
   arrows/F-keys/Ctrl-combos, bracketed paste, resize as `SIGWINCH`, and
   terminal query replies — so **ink/React TUIs draw on the terminal
   screen**. Verified against real `node` (65 byte-identical fixtures) and

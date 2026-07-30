@@ -89,6 +89,7 @@ so a TUI navigates and edits.
 | **Android** | Pixel-only ring travel moved to the **negative space between containers** (`systemGestureExclusion` is capped at 200 dp, so edge strips lose to the back gesture on Pixels) |
 | **Phase T — the terminal screen** | `TerminalScreen.swift`: VT100/xterm grid (cursor, scroll regions, IL/DL/ICH/DCH/ECH, SGR incl. 256/truecolor, alt screen) + byte-at-a-time `AnsiParser`. `TerminalPrograms.swift`: the `TerminalProgram` contract — a full-screen program owns screen + keyboard, the fork/exec-less stand-in for a foreground process on a PTY — plus the first two real programs: `less`/`more` (true pager) and live `top`. `Terminal.swift` hosts programs (grid renderer, key routing, resize-as-SIGWINCH). **Android parity deferred** — the Kotlin terminal is transcript-only until this is mirrored |
 | **The T↔G join — Node on a TTY** | `NodeProgram` (`TerminalPrograms.swift`): `node`/`npx`/installed bins launched interactively become terminal programs. `process.stdin.isTTY` is true, keystrokes arrive as `data` events, stdin listeners keep the event loop alive (node's ref'd-stdin rule). The program picks its mode like on a real terminal: plain printing stays in the scrollback (lines land ANSI-stripped, stderr keeps its color); `setRawMode(true)` or the alt screen hands it the grid — the ink model. Terminal discipline is real: cooked-mode ^C is SIGINT (handlers run, or the program dies 130), raw-mode ^C is a byte the program reads; rotation emits `resize` with the live geometry, and a program is born knowing `stdout.columns` |
+| **Phase G — real TCP** | `NodeSockets.swift`: `net` is no longer a stub that refuses. POSIX sockets on `DispatchSource` (not a thread each), non-blocking connect, name resolution off the I/O queue, honest backpressure at a 64 KB high-water mark, `ref`/`unref` feeding the event loop's quiescence test. `net.Socket` is a real Duplex over an fd and `net.Server` turns `accept()` into `'connection'`. Verified BOTH directions against real node: a real node client cannot tell our server from node's, and a real node server cannot tell our client from node's. This is what `http.createServer` — the dev-server story — stands on |
 
 ### Verification performed
 
@@ -878,6 +879,50 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   parser). The 25-script sh corpus and all 19 node fixtures stayed green;
   the app builds under Swift 6 strict concurrency
 
+- **Real TCP (`net`), and four bugs it took to get there.** Verified three
+  ways: 11 twin-engine fixtures (echo split into a client view and a server
+  view, half-close, 1 MB through a 64 KB queue, ECONNREFUSED, EADDRINUSE,
+  five concurrent connections, pause/resume flow control, `unref`), plus the
+  two cross-engine directions — a REAL node client against our server, and
+  our client against a REAL node server, each compared byte-for-byte with
+  the same peer talking to real node. The bugs are the interesting part,
+  because none of them were visible in a passing single run:
+  1. **Our streams emitted `'close'` twice on a Duplex** — once per side.
+     Any `if (++done === n)` counter therefore fired at half the work. Found
+     because five connections reported five closes after three replies.
+     Fixed generally (`emitCloseOnce`), not just for sockets.
+  2. **A socket's `'close'` was announced while its fd was still open.**
+     Our Writable emits `'close'` after `'finish'`, so `client.end()` looked
+     like a closed socket; a fixture that called `server.close()` from the
+     client's `'close'` handler then shut the listener mid-exchange and both
+     ends waited forever. A socket's `'close'` means THE DESCRIPTOR is gone,
+     so `net.Socket` sets `_hostOwnsClose` and emits it from the host event.
+  3. **EOF tore the socket down, discarding buffered inbound bytes** — and
+     was wrong for half-open sockets besides, which stay writable after the
+     peer is done. The fd now retires only when both directions are finished
+     and every byte read has reached JavaScript.
+  4. **An accepted socket had no handler for a moment**, and a fast peer can
+     finish talking inside that window: its bytes AND its FIN went to a
+     placeholder and vanished, leaving a socket that never completed. The
+     fix removed the window rather than patching it — a server's handler
+     receives its accepted sockets' events too, tagged by id, and
+     `'connection'` is necessarily the first event for a new id.
+  Failure rate before the fixes was one run in three, which is the real
+  lesson: **a green run on a concurrent path is not evidence.** The bugs
+  were found by running the same fixture twenty times and by tracing host
+  events, not by reading the code.
+- **A divergence recorded rather than papered over.** Node reports a
+  server's `'connection'` before the connecting client's `'connect'`; we
+  report the reverse, because a loopback handshake completes inside
+  `connect()` while the accept arrives as a dispatch-source event.
+  Deferring our delivery by a queue turn does NOT reorder them (a ready
+  source is not ordered against a queued block), and it is the relative
+  order of events on two DIFFERENT sockets, which node does not specify. So
+  the fixtures assert each socket's own sequence — which IS a contract —
+  and the divergence is written down. Same treatment for
+  `server.getConnections()` mid-exchange: real node answers 1, 2 or 3
+  across runs, so only its type is asserted.
+
 ### Android parity: where it stands, and what phase G would take there
 
 AGENTS.md requires mirroring iOS feature work into `kotlin/` **or recording
@@ -1274,7 +1319,7 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     the credible-IDE milestone
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib; gaps: net, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, fetch/https, raw TTY→phase-T screen, streams, readline, crypto, zlib, real TCP net; gaps: http.createServer, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
