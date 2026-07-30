@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: fs errors carry node's `code`, `syscall` and `path`, and five operations now
+  fail where node fails instead of silently succeeding. `rmdirSync` on a file deleted it,
+  `writeFileSync` into a missing directory created the tree, and `mkdirSync` built a whole
+  path without `recursive`. Reading a directory is EISDIR and scanning a file is ENOTDIR.
 - Node layer: every cancellable API now cancels. Eight accepted an `AbortSignal` and
   ignored it — `timers/promises.setTimeout`, `events.on`, `stream.finished`,
   `stream/promises.pipeline`, `readline.createInterface`, `fs.readFile`,

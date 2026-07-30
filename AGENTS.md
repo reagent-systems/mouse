@@ -465,6 +465,14 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A permissive filesystem API destroys data or invents it.** Three boundaries found the
+  same disposition: `rmSync` deleting a tree without `recursive`, `writeFileSync({flag:'a'})`
+  truncating, `rmdirSync` deleting a file it was handed, `writeFileSync` fabricating missing
+  parents, `mkdirSync` building a path unasked. Being lenient is not a kindness here —
+  refuse exactly what node refuses.
+- **Audit error CODES, not just error presence.** Real code branches on `error.code`, so a
+  wrong code takes the wrong path and nothing looks broken. Compare code, syscall and path
+  against the reference for every failing operation you support.
 - **When the same defect appears twice, sweep the CLASS.** An ignored AbortSignal turned up
   in `http.request` and then in `events.once`; sweeping every cancellable API found eight
   more, five of them permanent hangs. Two instances of one bug is the signal to enumerate

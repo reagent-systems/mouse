@@ -4711,12 +4711,34 @@ final class NodeEngine: @unchecked Sendable {
         };
 
         const fs = {
+          // Every fs error node raises carries a `code`, a `syscall` and a `path`, and real code
+          // branches on all three. An audit found the syscall missing everywhere, two codes wrong,
+          // and — worse — five operations that SUCCEEDED where node fails. A filesystem API that
+          // silently does more than it was asked either destroys data or fabricates it.
+          _fail: function(code, syscall, path, message) {
+            throw Object.assign(new Error(code + ': ' + message + ", " + syscall + " '" + path + "'"),
+                                { code: code, errno: -2, syscall: syscall, path: String(path) });
+          },
+          /// Does the containing directory exist? node refuses to write into a path whose parent
+          /// is missing, rather than creating it.
+          _parentExists: function(file) {
+            const text = String(file);
+            const cut = text.lastIndexOf('/');
+            if (cut <= 0) return true;
+            const parent = text.slice(0, cut);
+            const raw = bridge.stat(resolvePath(parent), true);
+            return !!(raw && raw.dir);
+          },
           readFileSync: function(file, options) {
+            // A directory is EISDIR, not ENOENT — code that distinguishes them takes the wrong
+            // branch otherwise.
+            if (typeof file === 'string') {
+              const raw = bridge.stat(resolvePath(file), true);
+              if (raw && raw.dir) fs._fail('EISDIR', 'read', file, 'illegal operation on a directory');
+            }
             const base64 = bridge.readFile(resolvePath(file));
             if (base64 === null || base64 === undefined) {
-              const error = new Error("ENOENT: no such file or directory, open '" + file + "'");
-              error.code = 'ENOENT';
-              throw error;
+              fs._fail('ENOENT', 'open', file, 'no such file or directory');
             }
             const buffer = Buffer.from(base64, 'base64');
             const encoding = toEncoding(options);
@@ -4734,6 +4756,11 @@ final class NodeEngine: @unchecked Sendable {
             if (flag.indexOf('x') >= 0 && fs.existsSync(file)) {
               throw Object.assign(new Error("EEXIST: file already exists, open '" + file + "'"),
                                   { code: 'EEXIST', syscall: 'open', path: file });
+            }
+            // A missing parent used to be created silently, so a mistyped path produced a phantom
+            // tree and a program relying on ENOENT to notice never saw it.
+            if (typeof file === 'string' && !fs._parentExists(file)) {
+              fs._fail('ENOENT', 'open', file, 'no such file or directory');
             }
             const append = flag[0] === 'a';
             if (!bridge.writeFile(path, buffer.toString('base64'), append)) {
@@ -4757,9 +4784,7 @@ final class NodeEngine: @unchecked Sendable {
             const raw = bridge.stat(resolvePath(file), true);
             if (!raw) {
               if (options && options.throwIfNoEntry === false) return undefined;
-              const error = new Error("ENOENT: no such file or directory, stat '" + file + "'");
-              error.code = 'ENOENT';
-              throw error;
+              fs._fail('ENOENT', 'stat', file, 'no such file or directory');
             }
             return statsFrom(raw);
           },
@@ -4775,12 +4800,10 @@ final class NodeEngine: @unchecked Sendable {
           },
           readdirSync: function(dir, options) {
             const parent = resolvePath(dir);
+            const probe = bridge.stat(parent, true);
+            if (probe && !probe.dir) fs._fail('ENOTDIR', 'scandir', dir, 'not a directory');
             const entries = bridge.readdir(parent);
-            if (!entries) {
-              const error = new Error("ENOENT: no such file or directory, scandir '" + dir + "'");
-              error.code = 'ENOENT';
-              throw error;
-            }
+            if (!entries) fs._fail('ENOENT', 'scandir', dir, 'no such file or directory');
             // `recursive` (node 20+) was ignored, so a deep tree listed only its top level.
             if (options && options.recursive) {
               const found = [];
@@ -4818,12 +4841,25 @@ final class NodeEngine: @unchecked Sendable {
             });
           },
           mkdirSync: function(dir, options) {
+            const recursive = !!(options && typeof options === 'object' && options.recursive);
+            if (!recursive) {
+              // node makes ONE directory: an existing path is EEXIST, a missing parent is ENOENT.
+              // Ours created the whole tree either way, which is `mkdir -p` behaviour nobody asked
+              // for and hides a mistyped path.
+              if (fs.existsSync(dir)) fs._fail('EEXIST', 'mkdir', dir, 'file already exists');
+              if (!fs._parentExists(dir)) fs._fail('ENOENT', 'mkdir', dir, 'no such file or directory');
+            }
             const path = resolvePath(dir);
             bridge.mkdir(path);
             const mode = options && typeof options === 'object' ? options.mode : undefined;
             if (mode !== undefined) bridge.chmodPath(path, Number(mode));
           },
           rmdirSync: function(dir, options) {
+            // Asked to remove a DIRECTORY and handed a file, this used to delete the file. node
+            // raises ENOTDIR, which is the difference between a refusal and data loss.
+            const raw = bridge.stat(resolvePath(dir), true);
+            if (raw && !raw.dir) fs._fail('ENOTDIR', 'rmdir', dir, 'not a directory');
+            if (!raw) fs._fail('ENOENT', 'rmdir', dir, 'no such file or directory');
             // node refuses a non-empty directory here; deleting one anyway is not a convenience.
             if (!(options && options.recursive)) {
               let entries = null;
@@ -4855,13 +4891,15 @@ final class NodeEngine: @unchecked Sendable {
           },
           unlinkSync: function(file) {
             if (!bridge.remove(resolvePath(file))) {
-              const error = new Error("ENOENT: no such file or directory, unlink '" + file + "'");
-              error.code = 'ENOENT';
-              throw error;
+              fs._fail('ENOENT', 'unlink', file, 'no such file or directory');
             }
           },
-          renameSync: function(from, to) { bridge.rename(resolvePath(from), resolvePath(to)); },
+          renameSync: function(from, to) {
+            if (!fs.existsSync(from)) fs._fail('ENOENT', 'rename', from, 'no such file or directory');
+            bridge.rename(resolvePath(from), resolvePath(to));
+          },
           copyFileSync: function(from, to) {
+            if (!fs.existsSync(from)) fs._fail('ENOENT', 'copyfile', from, 'no such file or directory');
             fs.writeFileSync(to, fs.readFileSync(from));
           },
           realpathSync: function(file) { return resolvePath(file); },
@@ -4887,11 +4925,7 @@ final class NodeEngine: @unchecked Sendable {
             UV_FS_SYMLINK_DIR: 1, UV_FS_SYMLINK_JUNCTION: 2, W_OK: 2, X_OK: 1,
           },
           accessSync: function(file) {
-            if (!fs.existsSync(file)) {
-              const error = new Error("ENOENT: no such file or directory, access '" + file + "'");
-              error.code = 'ENOENT';
-              throw error;
-            }
+            if (!fs.existsSync(file)) fs._fail('ENOENT', 'access', file, 'no such file or directory');
           },
         };
         // Callback forms wrap the sync forms through the event loop.
@@ -4938,11 +4972,7 @@ final class NodeEngine: @unchecked Sendable {
           const path = resolvePath(file);
           if (flags.includes('w')) fs.writeFileSync(path, '');
           else if (flags.includes('a')) { if (!fs.existsSync(path)) fs.writeFileSync(path, ''); }
-          else if (!fs.existsSync(path)) {
-            const e = new Error("ENOENT: no such file or directory, open '" + file + "'");
-            e.code = 'ENOENT';
-            throw e;
-          }
+          else if (!fs.existsSync(path)) fs._fail('ENOENT', 'open', file, 'no such file or directory');
           const fd = nextFd++;
           fileDescriptors[fd] = { path: path, flags: flags, position: 0 };
           return fd;
@@ -10102,7 +10132,14 @@ final class NodeEngine: @unchecked Sendable {
               if (!this._closeEmitted) { this._closeEmitted = true; this.emit('close', !!this._errored); }
               break;
             case 'error': {
-              const error = Object.assign(new Error(payload.message), { code: payload.code });
+              // node's socket errors carry a syscall, and its message is "connect ECONNREFUSED
+              // 127.0.0.1:1" rather than a bare description. The host layer's message already
+              // starts with the syscall name, so this reads it back rather than guessing.
+              const first = String(payload.message || '').split(' ')[0];
+              const syscall = /^[a-z_]+$/.test(first) ? first : undefined;
+              const error = Object.assign(new Error(payload.message),
+                                          syscall ? { code: payload.code, syscall: syscall }
+                                                  : { code: payload.code });
               this._errored = error;
               this.connecting = false;
               this.emit('error', error);

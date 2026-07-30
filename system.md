@@ -1074,6 +1074,32 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The error-code audit — and an fs that quietly did more than it was asked.** The class
+  with the widest blast radius, because real code BRANCHES on `error.code`: `if (e.code ===
+  'ENOENT') create()` takes the wrong path when the code is wrong, and nothing looks broken
+  until it does. Eighteen failing operations compared against node.
+  Three problems, in rising order of seriousness. Every fs error was **missing its
+  `syscall`** (node's carry `open`, `stat`, `scandir`, `copyfile`). Two **codes were wrong**:
+  reading a directory gave ENOENT instead of EISDIR, and scanning a file gave ENOENT instead
+  of ENOTDIR — both cases where a program distinguishing them takes the wrong branch.
+  And five operations **SUCCEEDED where node fails**, which was the real find:
+  - `rmdirSync('file.txt')` **deleted the file**. node raises ENOTDIR. Asked to remove a
+    directory and handed a file, we destroyed it.
+  - `writeFileSync('a/missing/deep.txt')` **created the missing directories** and wrote.
+    node raises ENOENT. A mistyped path produced a phantom tree, and a program relying on
+    ENOENT to notice never saw it.
+  - `mkdirSync('a/b/c')` **built the whole path** without `recursive: true` — `mkdir -p`
+    behaviour nobody asked for, which hides exactly the mistake ENOENT exists to report.
+  - `renameSync` with a missing source, and `mkdirSync` on an existing path, both did
+    nothing quietly instead of raising ENOENT and EEXIST.
+  The theme is worth naming because it recurred all session: **a permissive filesystem API
+  either destroys data or invents it.** This is the same family as `rmSync` deleting a tree
+  without `recursive` and `writeFileSync({flag:'a'})` truncating — three separate boundaries
+  finding the same disposition.
+  Highest-risk change of the session, since our OWN code writes trees: the package manager
+  lays out `node_modules`, tar extracts, webpack emits bundles. All re-run and unaffected —
+  91 fixtures, phase-F pkg, webpack (byte-identical), esbuild-wasm, express, tsc --watch,
+  chokidar, http and ws.
 - **The AbortSignal audit: eight of ten cancellable APIs could not be cancelled.** Two of
   the previous batch's findings were the SAME defect in different places — an accepted and
   ignored signal — so instead of meeting it a third time, this swept the whole class: every
