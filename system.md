@@ -946,6 +946,16 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Also found the same way: our `http.request` read only `options.hostname`,
   so the ubiquitous `{ host, port, path }` form built `http://undefined:PORT`
   and failed silently — a server-plus-client script waited forever.
+- **`dns` is real now, because the resolver was already there.** `dns.lookup`,
+  `resolve4`/`resolve6`, the `all` form, IP literals answered without a query,
+  and the promises API all run on the socket layer's `getaddrinfo` (off the I/O
+  queue, where it belongs). Matches real node on the cases the two agree on by
+  construction — literals and hosts-file names. Record types getaddrinfo cannot
+  answer (MX, TXT, SRV, NS, PTR…) need a resolver speaking to a DNS server
+  directly, which this device does not expose, so they say exactly that instead
+  of returning a plausible empty list. Deliberately NOT fixture-compared:
+  node's `resolve4` goes to a DNS server through c-ares and never reads the
+  hosts file, so a twin fixture there would compare two different mechanisms.
 - **A divergence recorded rather than papered over.** Node reports a
   server's `'connection'` before the connecting client's `'connect'`; we
   report the reverse, because a loopback handshake completes inside

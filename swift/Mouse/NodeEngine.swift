@@ -588,6 +588,15 @@ final class NodeEngine: @unchecked Sendable {
         let netKeepAlive: @convention(block) (Int32, Bool, Int32) -> Void = { [weak self] id, on, delay in
             self?.sockets.setKeepAlive(id: Int(id), on, delay: Int(delay))
         }
+        let netResolve: @convention(block) (String, Int32, JSValue) -> Void = { [weak self] host, family, callback in
+            guard let self else { return }
+            socketsUsed = true
+            sockets.resolve(host: host, family: Int(family)) { found, code in
+                let list = found.map { ["address": $0.address, "family": $0.family == "IPv6" ? 6 : 4] as [String: Any] }
+                callback.call(withArguments: [list, code ?? ""])
+            }
+        }
+        expose("netResolve", netResolve)
         expose("netConnect", netConnect)
         expose("netListen", netListen)
         expose("netWrite", netWrite)
@@ -4213,23 +4222,112 @@ final class NodeEngine: @unchecked Sendable {
       };
       // The feature-detect tail: bundled CLIs import these and gate real use behind checks.
       // Each surface is import-safe and says the truth when actually exercised.
+      // dns: real name resolution, because the socket layer's getaddrinfo is exactly what
+      // `dns.lookup` is. Record types getaddrinfo cannot answer (MX, TXT, SRV, NS…) need a
+      // resolver library talking to a DNS server directly, which this device does not give
+      // us — those say so rather than pretending to be empty.
       coreFactories.dns = function() {
-        function notFound(host) { return Object.assign(new Error('getaddrinfo ENOTFOUND ' + host), { code: 'ENOTFOUND', hostname: host }); }
+        function notFound(host, syscall) {
+          return Object.assign(new Error((syscall || 'getaddrinfo') + ' ENOTFOUND ' + host),
+                               { code: 'ENOTFOUND', errno: -3008, syscall: syscall || 'getaddrinfo', hostname: host });
+        }
+        function isIPv4(text) {
+          const parts = String(text).split('.');
+          return parts.length === 4 && parts.every(function(p){ return /^\d{1,3}$/.test(p) && Number(p) <= 255; });
+        }
+        function lookup(host, options, callback) {
+          if (typeof options === 'function') { callback = options; options = {}; }
+          if (typeof options === 'number') options = { family: options };
+          options = options || {};
+          const family = Number(options.family) || 0;
+          // An IP literal is not a query — node answers it without touching a resolver.
+          if (isIPv4(host) || String(host).indexOf(':') >= 0) {
+            const literal = { address: String(host), family: isIPv4(host) ? 4 : 6 };
+            setImmediate(function(){
+              if (options.all) callback(null, [literal]);
+              else callback(null, literal.address, literal.family);
+            });
+            return;
+          }
+          bridge.netResolve(String(host), family, function(found, code) {
+            if (code || !found.length) { callback(notFound(host)); return; }
+            if (options.all) { callback(null, found); return; }
+            callback(null, found[0].address, found[0].family);
+          });
+        }
+        function resolveFamily(host, family, callback) {
+          bridge.netResolve(String(host), family, function(found, code) {
+            if (code || !found.length) { callback(notFound(host, 'queryA')); return; }
+            callback(null, found.map(function(entry){ return entry.address; }));
+          });
+        }
+        function unsupported(type) {
+          return function(host, callback) {
+            const done = typeof callback === 'function' ? callback : arguments[arguments.length - 1];
+            const error = Object.assign(
+              new Error('dns.resolve' + type + ' is not available: it needs a DNS resolver talking to a server, and this device only exposes getaddrinfo (lookup/resolve4/resolve6 are real)'),
+              { code: 'ENOTIMP', syscall: 'query' + type, hostname: host });
+            if (typeof done === 'function') setImmediate(function(){ done(error); });
+            else throw error;
+          };
+        }
+        function promisify(fn, arity) {
+          return function() {
+            const args = Array.prototype.slice.call(arguments);
+            return new Promise(function(resolve, reject) {
+              fn.apply(null, args.concat([function(error, a, b) {
+                if (error) { reject(error); return; }
+                resolve(arity === 2 && b !== undefined ? { address: a, family: b } : a);
+              }]));
+            });
+          };
+        }
         const dns = {
-          lookup: function(host, options, callback) {
-            if (typeof options === 'function') callback = options;
-            // URLSession resolves names internally — standalone lookups have no resolver here.
-            setImmediate(function(){ callback(notFound(host)); });
+          lookup: lookup,
+          resolve4: function(host, options, callback) {
+            if (typeof options === 'function') { callback = options; }
+            resolveFamily(host, 4, callback);
+          },
+          resolve6: function(host, options, callback) {
+            if (typeof options === 'function') { callback = options; }
+            resolveFamily(host, 6, callback);
           },
           resolve: function(host, type, callback) {
-            if (typeof type === 'function') callback = type;
-            setImmediate(function(){ callback(notFound(host)); });
+            if (typeof type === 'function') { callback = type; type = 'A'; }
+            const kind = String(type).toUpperCase();
+            if (kind === 'A') return resolveFamily(host, 4, callback);
+            if (kind === 'AAAA') return resolveFamily(host, 6, callback);
+            return unsupported(kind)(host, callback);
           },
-          promises: {
-            lookup: function(host) { return Promise.reject(notFound(host)); },
-            resolve: function(host) { return Promise.reject(notFound(host)); },
-          },
+          resolveMx: unsupported('Mx'), resolveTxt: unsupported('Txt'),
+          resolveSrv: unsupported('Srv'), resolveNs: unsupported('Ns'),
+          resolveCname: unsupported('Cname'), resolvePtr: unsupported('Ptr'),
+          resolveSoa: unsupported('Soa'), resolveNaptr: unsupported('Naptr'),
+          reverse: unsupported('Reverse'),
+          getServers: function() { return []; },
+          setServers: function() {},
+          setDefaultResultOrder: function() {},
+          getDefaultResultOrder: function() { return 'verbatim'; },
+          ADDRCONFIG: 1024, V4MAPPED: 2048, ALL: 4096,
+          NOTFOUND: 'ENOTFOUND', NODATA: 'ENODATA', BADFAMILY: 'EBADFAMILY',
         };
+        dns.promises = {
+          lookup: promisify(lookup, 2),
+          resolve4: promisify(dns.resolve4, 1),
+          resolve6: promisify(dns.resolve6, 1),
+          resolve: promisify(dns.resolve, 1),
+          getServers: function() { return Promise.resolve([]); },
+        };
+        for (const name of ['resolveMx', 'resolveTxt', 'resolveSrv', 'resolveNs', 'resolveCname',
+                            'resolvePtr', 'resolveSoa', 'resolveNaptr', 'reverse']) {
+          dns.promises[name] = promisify(dns[name], 1);
+        }
+        // node's Resolver class, for libraries that construct their own.
+        dns.Resolver = function Resolver() {};
+        dns.Resolver.prototype = Object.create(Object.prototype);
+        for (const name of Object.keys(dns)) {
+          if (typeof dns[name] === 'function') dns.Resolver.prototype[name] = dns[name];
+        }
         return dns;
       };
       coreFactories.worker_threads = function() {

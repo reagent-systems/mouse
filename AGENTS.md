@@ -147,6 +147,12 @@ reverse (a loopback handshake completes inside `connect()`; the accept is a
 dispatch-source event). Deferring delivery does not reorder it. Assert each
 socket's OWN event sequence instead. Likewise `server.getConnections()`
 mid-exchange is nondeterministic in real node (1, 2 or 3 across runs).
+`dns` rides the socket layer's `getaddrinfo` (on the resolver queue, never the
+I/O queue). Fixture it ONLY on cases node and getaddrinfo agree on by
+construction — IP literals and hosts-file names — because node's `resolve4`
+queries a DNS server through c-ares and never reads the hosts file. Record
+types getaddrinfo cannot answer must keep saying so rather than returning an
+empty list.
 The HTTP SERVER (`http.createServer`, in the engine's http module) verifies at
 the WIRE, not through its API: one raw-socket client sends literal request
 strings and prints the exact response bytes (normalizing `Date`), and those

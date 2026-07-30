@@ -223,6 +223,42 @@ final class SocketTable: @unchecked Sendable {
         if !entry.pending.isEmpty || entry.shutdownAfterFlush { flush(entry) }
     }
 
+    // MARK: - Resolve
+
+    /// `getaddrinfo` for its own sake — what `dns.lookup` is. Runs on `resolvers` (it blocks
+    /// for as long as the network takes) and answers on the JS thread through `deliver`.
+    func resolve(host: String, family: Int, completion: @escaping ([Address], String?) -> Void) {
+        retain()
+        resolvers.async { [self] in
+            var hints = addrinfo(ai_flags: 0,
+                                 ai_family: family == 4 ? AF_INET : (family == 6 ? AF_INET6 : AF_UNSPEC),
+                                 ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0,
+                                 ai_canonname: nil, ai_addr: nil, ai_next: nil)
+            var list: UnsafeMutablePointer<addrinfo>?
+            let status = getaddrinfo(host, nil, &hints, &list)
+            guard status == 0, let first = list else {
+                deliver { completion([], "ENOTFOUND") }
+                release()
+                return
+            }
+            var found: [Address] = []
+            var node: UnsafeMutablePointer<addrinfo>? = first
+            while let current = node {
+                var storage = sockaddr_storage()
+                memcpy(&storage, current.pointee.ai_addr, Int(current.pointee.ai_addrlen))
+                let address = describe(storage)
+                // getaddrinfo repeats an address once per socket type; dns.lookup does not.
+                if !address.address.isEmpty, !found.contains(where: { $0.address == address.address }) {
+                    found.append(address)
+                }
+                node = current.pointee.ai_next
+            }
+            freeaddrinfo(list)
+            deliver { completion(found, found.isEmpty ? "ENOTFOUND" : nil) }
+            release()
+        }
+    }
+
     // MARK: - Listen
 
     /// Bind and listen. Port 0 means "any" — the assigned port comes back in `.listening`,
