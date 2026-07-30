@@ -3843,6 +3843,161 @@ final class NodeEngine: @unchecked Sendable {
         return Coder;
       };
 
+      // ---- util.MIMEType / MIMEParams, parseEnv, getCallSites, diff ----
+      // Named by the module-surface audit and left alone for a long time as "internals". They
+      // are not: MIMEType and MIMEParams are documented classes, parseEnv is what `--env-file`
+      // is built on, and getCallSites is how a logger reports where it was called from. The
+      // underscore-prefixed neighbours in that same audit list ARE node internals and stay out.
+      globalThis.__MIMEParams = class MIMEParams {
+        constructor() { this._entries = []; }
+        get(name) {
+          const found = this._entries.find(pair => pair[0] === String(name));
+          return found ? found[1] : null;
+        }
+        has(name) { return this._entries.some(pair => pair[0] === String(name)); }
+        set(name, value) {
+          const key = String(name), text = String(value);
+          const found = this._entries.find(pair => pair[0] === key);
+          if (found) found[1] = text; else this._entries.push([key, text]);
+        }
+        delete(name) { this._entries = this._entries.filter(pair => pair[0] !== String(name)); }
+        entries() { return this._entries.map(pair => [pair[0], pair[1]])[Symbol.iterator](); }
+        keys() { return this._entries.map(pair => pair[0])[Symbol.iterator](); }
+        values() { return this._entries.map(pair => pair[1])[Symbol.iterator](); }
+        [Symbol.iterator]() { return this.entries(); }
+        toString() {
+          return this._entries.map(function(pair) {
+            // A value containing a separator has to come back quoted, or the reassembled type
+            // would parse differently from the one that was read.
+            const needsQuote = /[;=\s"]/.test(pair[1]);
+            const value = needsQuote ? '"' + pair[1].replace(/(["\\])/g, '\\$1') + '"' : pair[1];
+            return pair[0] + '=' + value;
+          }).join(';');
+        }
+      };
+
+      globalThis.__MIMEType = class MIMEType {
+        constructor(input) {
+          const text = String(input).trim();
+          const semicolon = text.indexOf(';');
+          const essence = (semicolon < 0 ? text : text.slice(0, semicolon)).trim();
+          const slash = essence.indexOf('/');
+          if (slash < 1 || slash === essence.length - 1) {
+            throw new TypeError('The MIME syntax for a type in "' + input + '" is invalid');
+          }
+          this._type = essence.slice(0, slash).toLowerCase();
+          this._subtype = essence.slice(slash + 1).toLowerCase();
+          this.params = new globalThis.__MIMEParams();
+          if (semicolon >= 0) {
+            for (const piece of splitParameters(text.slice(semicolon + 1))) {
+              const equals = piece.indexOf('=');
+              if (equals < 0) continue;
+              const name = piece.slice(0, equals).trim().toLowerCase();
+              let value = piece.slice(equals + 1).trim();
+              if (value.startsWith('"')) {
+                value = value.slice(1, value.endsWith('"') ? -1 : undefined).replace(/\\(.)/g, '$1');
+              }
+              if (name) this.params.set(name, value);
+            }
+          }
+        }
+        get type() { return this._type; }
+        set type(value) {
+          const text = String(value).toLowerCase();
+          if (!text || /[/;\s]/.test(text)) throw new TypeError('Invalid MIME type ' + value);
+          this._type = text;
+        }
+        get subtype() { return this._subtype; }
+        set subtype(value) {
+          const text = String(value).toLowerCase();
+          if (!text || /[/;\s]/.test(text)) throw new TypeError('Invalid MIME subtype ' + value);
+          this._subtype = text;
+        }
+        get essence() { return this._type + '/' + this._subtype; }
+        toString() {
+          const parameters = this.params.toString();
+          return this.essence + (parameters ? ';' + parameters : '');
+        }
+        toJSON() { return this.toString(); }
+      };
+      // A quoted value may contain the separator, so parameters cannot be split naively.
+      function splitParameters(text) {
+        const parts = [];
+        let current = '', quoted = false;
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+          if (ch === '\\' && quoted) { current += ch + (text[++i] || ''); continue; }
+          if (ch === '"') { quoted = !quoted; current += ch; continue; }
+          if (ch === ';' && !quoted) { parts.push(current); current = ''; continue; }
+          current += ch;
+        }
+        parts.push(current);
+        return parts.filter(piece => piece.trim().length);
+      }
+
+      globalThis.__parseEnv = function(text) {
+        const out = {};
+        for (let line of String(text).split(/\r?\n/)) {
+          line = line.trim();
+          if (!line || line.startsWith('#')) continue;
+          const equals = line.indexOf('=');
+          if (equals < 0) continue;
+          const key = line.slice(0, equals).trim();
+          let value = line.slice(equals + 1).trim();
+          if ((value.startsWith('"') && value.endsWith('"') && value.length > 1) ||
+              (value.startsWith("'") && value.endsWith("'") && value.length > 1)) {
+            value = value.slice(1, -1);
+          }
+          if (key) out[key] = value;
+        }
+        return out;
+      };
+
+      globalThis.__getCallSites = function(limit) {
+        // Built from the stack rather than from V8's structured API, which JSC has no analogue
+        // for. The fields are node's; the values come from parsing frames.
+        const frames = String(new Error().stack || '').split('\n');
+        const sites = [];
+        for (const frame of frames) {
+          const match = /^\s*(?:at\s+)?([^@(]*)[@(]?(.*?):(\d+):(\d+)\)?\s*$/.exec(frame);
+          if (!match) continue;
+          const name = match[1].trim();
+          if (name === 'globalThis.__getCallSites' || /__getCallSites/.test(frame)) continue;
+          sites.push({ functionName: name, scriptName: match[2], scriptId: '0',
+                       lineNumber: Number(match[3]), column: Number(match[4]),
+                       columnNumber: Number(match[4]) });
+          if (typeof limit === 'number' && sites.length >= limit) break;
+        }
+        return sites;
+      };
+
+      // node's `util.diff`: [-1 removed, 0 same, 1 added] over lines or array entries.
+      globalThis.__utilDiff = function(actual, expected) {
+        const a = Array.isArray(actual) ? actual.map(String) : String(actual).split('');
+        const b = Array.isArray(expected) ? expected.map(String) : String(expected).split('');
+        // node short-circuits identical input to an EMPTY list rather than a run of unchanged
+        // entries — "no difference" is expressed as nothing, not as everything matching.
+        if (a.length === b.length && a.every((item, index) => item === b[index])) return [];
+        const table = [];
+        for (let i = 0; i <= a.length; i++) table.push(new Array(b.length + 1).fill(0));
+        for (let i = a.length - 1; i >= 0; i--) {
+          for (let j = b.length - 1; j >= 0; j--) {
+            table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1
+                                        : Math.max(table[i + 1][j], table[i][j + 1]);
+          }
+        }
+        const out = [];
+        let i = 0, j = 0;
+        while (i < a.length && j < b.length) {
+          if (a[i] === b[j]) { out.push([0, a[i]]); i++; j++; }
+          else if (table[i + 1][j] >= table[i][j + 1]) { out.push([1, a[i]]); i++; }
+          else { out.push([-1, b[j]]); j++; }
+        }
+        while (i < a.length) out.push([1, a[i++]]);
+        while (j < b.length) out.push([-1, b[j++]]);
+        return out;
+      };
+
       globalThis.__toBytes = function(value, encoding) {
         if (Buffer.isBuffer(value)) return value;
         if (ArrayBuffer.isView(value)) {
@@ -4988,6 +5143,33 @@ final class NodeEngine: @unchecked Sendable {
         EventEmitter.init = function() {};
         EventEmitter.getEventListeners = function(emitter, name) { return emitter.listeners(name); };
         EventEmitter.setMaxListeners = function() {};
+        // Named by the module-surface audit. `EventEmitterAsyncResource` pairs an emitter with
+        // an async-resource handle; without async_hooks context propagation the handle is inert,
+        // and the emitter half — which is what callers use it for — is fully real.
+        EventEmitter.EventEmitterAsyncResource = class EventEmitterAsyncResource extends EventEmitter {
+          constructor(options) {
+            super(options);
+            const name = (options && options.name) || 'EventEmitterAsyncResource';
+            let destroyed = false;
+            this.asyncResource = {
+              // node leaves `type` undefined here; the name is carried by the resource itself.
+              _name: name,
+              asyncId: function() { return 0; },
+              triggerAsyncId: function() { return 0; },
+              emitDestroy: function() { destroyed = true; },
+              bind: function(fn) { return fn; },
+              runInAsyncScope: function(fn, thisArg) {
+                return fn.apply(thisArg, Array.prototype.slice.call(arguments, 2));
+              },
+            };
+            this.emitDestroy = function() { this.asyncResource.emitDestroy(); };
+            this.asyncId = function() { return 0; };
+            this.triggerAsyncId = function() { return 0; };
+            Object.defineProperty(this, 'destroyed', { get: function() { return destroyed; } });
+          }
+        };
+        EventEmitter.kMaxEventTargetListeners = Symbol('events.maxEventTargetListeners');
+        EventEmitter.kMaxEventTargetListenersWarned = Symbol('events.maxEventTargetListenersWarned');
         return EventEmitter;
       };
 
@@ -5071,6 +5253,13 @@ final class NodeEngine: @unchecked Sendable {
           isString: v => typeof v === 'string',
           isObject: v => v !== null && typeof v === 'object',
           isDeepStrictEqual: function(a, b) { return globalThis.__deepEqual(a, b, true); },
+          // Named by the module-surface audit. Documented API, not internals.
+          MIMEType: globalThis.__MIMEType,
+          MIMEParams: globalThis.__MIMEParams,
+          parseEnv: function(text) { return globalThis.__parseEnv(text); },
+          getCallSites: function(limit) { return globalThis.__getCallSites(limit); },
+          getCallSite: function(limit) { return globalThis.__getCallSites(limit); },
+          diff: function(actual, expected) { return globalThis.__utilDiff(actual, expected); },
           // The deprecated-but-still-used type checks. Packages that support old node call
           // these directly, and an undefined one reads as "not that type".
           isBoolean: v => typeof v === 'boolean',
