@@ -183,7 +183,7 @@ final class NodeEngine: @unchecked Sendable {
         let dir = virtualDirname(path)
         let entryIsESM = isESModule(id: normalize(path), source: source)
         if entryIsESM {
-            source = Self.transpileESM(source)
+            source = transpileCached(source)
         } else if source.contains("import") {
             source = Self.rewriteDynamicImport(source)
         }
@@ -936,7 +936,7 @@ final class NodeEngine: @unchecked Sendable {
             }
             let esm = isESModule(id: id, source: source)
             if esm {
-                source = Self.transpileESM(source)
+                source = transpileCached(source)
             } else if source.contains("import") {
                 // Dynamic import() is legal in CJS too (prettier lazy-loads plugins with it).
                 // JSC's native import has no module loader here — route through ours.
@@ -1035,6 +1035,39 @@ final class NodeEngine: @unchecked Sendable {
     /// ESM → CJS, statement-shaped: the rigid grammar of import/export declarations makes a
     /// regex transform reliable for real packages; expressions stay untouched. Named exports
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
+    /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
+    /// without this a stale rewrite would be reused after an engine update.
+    private static let transpilerVersion = 1
+
+    /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
+    /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
+    /// pure function of the source, so it caches content-addressed (SHA-256) in the app's
+    /// CACHES directory — deliberately NOT in the workspace, which is a git repo the user
+    /// sees: cache files there would show up in `git status`. Small modules are transpiled
+    /// directly; the file dance costs more than the rewrite below this size.
+    private static let transpileCacheThreshold = 64 * 1024
+
+    private static let transpileCacheDirectory: URL? = {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let directory = caches.appendingPathComponent("MouseNodeTranspile", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }()
+
+    private func transpileCached(_ source: String) -> String {
+        guard source.utf8.count >= Self.transpileCacheThreshold,
+              let directory = Self.transpileCacheDirectory else {
+            return Self.transpileESM(source)
+        }
+        let digest = SHA256.hash(data: Data(source.utf8))
+        let name = digest.map { String(format: "%02x", $0) }.joined() + "-v\(Self.transpilerVersion).cjs"
+        let file = directory.appendingPathComponent(name)
+        if let cached = try? String(contentsOf: file, encoding: .utf8) { return cached }
+        let transpiled = Self.transpileESM(source)
+        try? transpiled.write(to: file, atomically: true, encoding: .utf8)
+        return transpiled
+    }
+
     /// `import(spec)` → `__dynamicImport(__mouseRequire, spec)`. Applied to ESM (as part of
     /// the transpile) AND to CJS that contains it — dynamic import is legal in both, and
     /// JSC's native import has no module loader wired to our resolver.

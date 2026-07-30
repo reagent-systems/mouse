@@ -716,6 +716,27 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   its frames correctly stay in the scrollback — the two-mode rule holding,
   not a bug; the test now includes `useInput` because that is what a real
   agent CLI does
+- **Warm start is 10× faster: a persistent transpile cache.** Measured
+  first: loading claude-code's 9.3 MB bundle costs ~2.2 s, of which ~1.85 s
+  is the ESM→CJS rewrite — 78 % of launch, paid on EVERY launch, on a
+  phone. The rewrite is a pure function of the source, so it is now cached
+  content-addressed (SHA-256 of the source + a `transpilerVersion` that
+  must be bumped when `transpileESM` changes, or a stale rewrite would be
+  reused after an engine update). Result: **2.21 s cold → 0.22 s warm**, a
+  10× cut on the exact workload that matters (a big bundled CLI relaunching).
+  Two deliberate placement decisions: the cache lives in the app's CACHES
+  directory, NOT the workspace — the workspace is a git repo the user looks
+  at, and cache files there would show up in `git status` — and only sources
+  ≥ 64 KB are cached, since below that the file dance costs more than the
+  rewrite. Writes are atomic (temp + rename), so concurrent engines can't
+  tear an entry, and any cache failure silently falls back to transpiling.
+  Transparency proven the strong way: the whole 65-fixture suite passes
+  identically COLD and WARM (populating vs hitting the cache), plus TTY,
+  e2e and the Swift 6 build. Also observed en route, and correct: with no
+  TTY attached, claude-code's ink UI reports "Raw mode is not supported on
+  the current process.stdin" — exactly what real node does headlessly;
+  under a `NodeProgram` (which attaches a TTY) it renders, as the earlier
+  frames show
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
