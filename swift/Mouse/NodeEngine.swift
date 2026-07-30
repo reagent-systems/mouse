@@ -3475,6 +3475,29 @@ final class NodeEngine: @unchecked Sendable {
       // For host callbacks the loop does not invoke itself. A bridge that calls JavaScript from
       // its own handler (dns completions, watch events) wraps the callback ONCE here, at
       // registration, so the handler can call it without knowing any of this.
+      // Every API that takes an AbortSignal needs the same three things: the error node raises,
+      // a way to notice an already-aborted signal, and a listener for a later abort. A class
+      // sweep found EIGHT places that accepted a signal and ignored it — five of them turning a
+      // cancellable wait into a permanent one — so this exists once rather than eight times.
+      globalThis.__abortError = function() {
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        error.code = 'ABORT_ERR';
+        return error;
+      };
+      globalThis.__onAbort = function(signal, handler) {
+        if (!signal) return function(){};
+        if (signal.aborted) { handler(); return function(){}; }
+        if (typeof signal.addEventListener === 'function') {
+          signal.addEventListener('abort', handler);
+          return function(){ if (signal.removeEventListener) signal.removeEventListener('abort', handler); };
+        }
+        if (typeof signal.once === 'function') {
+          signal.once('abort', handler);
+          return function(){ if (signal.off) signal.off('abort', handler); };
+        }
+        return function(){};
+      };
       globalThis.__wrapInvoke = function(fn) {
         return function() {
           return globalThis.__invoke(fn, Array.prototype.slice.call(arguments));
@@ -4088,6 +4111,12 @@ final class NodeEngine: @unchecked Sendable {
           let waiting = null;
           let failure = null;
           let finished = false;
+          // An ignored signal here means the iterator waits for an event that may never come.
+          globalThis.__onAbort(options && options.signal, function() {
+            failure = globalThis.__abortError();
+            finished = true;
+            if (waiting) { const settle = waiting; waiting = null; settle.reject(failure); }
+          });
           emitter.on(name, function() {
             const value = Array.from(arguments);
             if (waiting) { const settle = waiting; waiting = null; settle.resolve({ value: value, done: false }); }
@@ -4431,7 +4460,10 @@ final class NodeEngine: @unchecked Sendable {
         function watch(path, options, listener) {
           if (typeof options === 'function') { listener = options; options = {}; }
           if (typeof options === 'string') options = { encoding: options };
-          return new FSWatcher(path, options, listener);
+          const watcher = new FSWatcher(path, options, listener);
+          // node closes the watcher when the signal fires; without this it runs forever.
+          globalThis.__onAbort(options && options.signal, function(){ watcher.close(); });
+          return watcher;
         }
 
         // watchFile is node's OLDER, polling API, and it is polling in node too: an interval
@@ -4866,7 +4898,21 @@ final class NodeEngine: @unchecked Sendable {
         for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'readdir', 'mkdir', 'unlink', 'rename', 'copyFile', 'access', 'rm']) {
           fs[name] = function(...args) {
             const callback = typeof args[args.length - 1] === 'function' ? args.pop() : function(){};
+            // An options bag may carry a signal; an already-aborted one must not do the work.
+            const bag = args.length > 1 && args[args.length - 1] && typeof args[args.length - 1] === 'object'
+              ? args[args.length - 1] : null;
+            if (bag && bag.signal && bag.signal.aborted) {
+              setImmediate(function(){ callback(globalThis.__abortError()); });
+              return;
+            }
+            let cancelled = false;
+            const stop = globalThis.__onAbort(bag && bag.signal, function() {
+              cancelled = true;
+              callback(globalThis.__abortError());
+            });
             setImmediate(() => {
+              if (cancelled) return;
+              stop();
               try { callback(null, fs[name + 'Sync'].apply(null, args)); }
               catch (error) { callback(error); }
             });
@@ -5430,8 +5476,18 @@ final class NodeEngine: @unchecked Sendable {
                             'lchmod', 'lchown', 'utimes', 'lutimes', 'mkdtemp', 'truncate']) {
           fs.promises[name] = function(...args) {
             return new Promise((resolve, reject) => {
-              try { resolve(fs[name + 'Sync'].apply(null, args)); }
-              catch (error) { reject(error); }
+              const bag = args.length > 1 && args[args.length - 1] && typeof args[args.length - 1] === 'object'
+                ? args[args.length - 1] : null;
+              if (bag && bag.signal && bag.signal.aborted) { reject(globalThis.__abortError()); return; }
+              let cancelled = false;
+              const stop = globalThis.__onAbort(bag && bag.signal, function() {
+                cancelled = true;
+                reject(globalThis.__abortError());
+              });
+              try {
+                const value = fs[name + 'Sync'].apply(null, args);
+                if (!cancelled) { stop(); resolve(value); }
+              } catch (error) { if (!cancelled) { stop(); reject(error); } }
             });
           };
         }
@@ -6093,7 +6149,18 @@ final class NodeEngine: @unchecked Sendable {
         PassThrough.prototype = Object.create(Transform.prototype);
         PassThrough.prototype.constructor = PassThrough;
 
-        function finished(stream, callback) {
+        function finished(stream, options, callback) {
+          if (typeof options === 'function') { callback = options; options = undefined; }
+          const stop = globalThis.__onAbort(options && options.signal, function() {
+            const error = globalThis.__abortError();
+            if (callback) callback(error);
+            callback = null;
+          });
+          const wrapped = callback;
+          callback = function(error) { stop(); if (wrapped) wrapped(error); };
+          return _finishedInner(stream, callback);
+        }
+        function _finishedInner(stream, callback) {
           let done = false;
           const wrap = (err) => { if (!done) { done = true; callback(err || null); } };
           stream.once('error', wrap);
@@ -6104,8 +6171,20 @@ final class NodeEngine: @unchecked Sendable {
         function pipeline() {
           const parts = Array.prototype.slice.call(arguments);
           const callback = typeof parts[parts.length - 1] === 'function' ? parts.pop() : function(){};
+          // A trailing options object carries the signal; stream/promises always passes one.
+          let options = null;
+          const tail = parts[parts.length - 1];
+          if (tail && typeof tail === 'object' && typeof tail.pipe !== 'function' &&
+              typeof tail.write !== 'function' && typeof tail[Symbol.asyncIterator] !== 'function' &&
+              !Array.isArray(tail)) {
+            options = parts.pop();
+          }
           let failed = false;
-          const fail = (err) => { if (!failed) { failed = true; callback(err); } };
+          const fail = (err) => { if (!failed) { failed = true; stopAbort(); callback(err); } };
+          const stopAbort = globalThis.__onAbort(options && options.signal, function() {
+            for (const part of parts) { try { part && part.destroy && part.destroy(); } catch (ignored) {} }
+            fail(globalThis.__abortError());
+          });
           for (const part of parts) part.once('error', fail);
           for (let i = 0; i + 1 < parts.length; i++) parts[i].pipe(parts[i + 1]);
           const last = parts[parts.length - 1];
@@ -6234,8 +6313,25 @@ final class NodeEngine: @unchecked Sendable {
       };
       coreFactories['timers/promises'] = function() {
         return {
-          setTimeout: function(delay, value) { return new Promise(function(resolve){ setTimeout(function(){ resolve(value); }, delay); }); },
-          setImmediate: function(value) { return new Promise(function(resolve){ setImmediate(function(){ resolve(value); }); }); },
+          setTimeout: function(delay, value, options) {
+            return new Promise(function(resolve, reject) {
+              const timer = setTimeout(function(){ stop(); resolve(value); }, delay);
+              const stop = globalThis.__onAbort(options && options.signal, function() {
+                clearTimeout(timer);
+                reject(globalThis.__abortError());
+              });
+            });
+          },
+          setImmediate: function(value, options) {
+            return new Promise(function(resolve, reject) {
+              let cancelled = false;
+              const stop = globalThis.__onAbort(options && options.signal, function() {
+                cancelled = true;
+                reject(globalThis.__abortError());
+              });
+              setImmediate(function(){ if (!cancelled) { stop(); resolve(value); } });
+            });
+          },
           setInterval: function(delay, value) {
             return { [Symbol.asyncIterator]() {
               return { next() { return new Promise(function(resolve){ setTimeout(function(){ resolve({ value: value, done: false }); }, delay); }); } };
@@ -8964,6 +9060,8 @@ final class NodeEngine: @unchecked Sendable {
             this._questionCb = null;
             this._lastWasCR = false;
             this.closed = false;
+            // node closes the interface on abort; ignored, a prompt waits for input forever.
+            globalThis.__onAbort(options.signal, () => { if (!this.closed) this.close(); });
             this._onData = (chunk) => this._feed(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
             this._onEnd = () => {
               if (this._line.length) { const line = this._line; this._line = ''; this._deliver(line); }

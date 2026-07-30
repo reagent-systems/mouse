@@ -465,6 +465,11 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **When the same defect appears twice, sweep the CLASS.** An ignored AbortSignal turned up
+  in `http.request` and then in `events.once`; sweeping every cancellable API found eight
+  more, five of them permanent hangs. Two instances of one bug is the signal to enumerate
+  the whole family rather than fix the second one. Wire it through a single shared helper —
+  eight copies of the same abort logic would drift.
 - **Give every async probe a fallback timer, and isolate each check.** A probe for an
   ignored option must report a WRONG ANSWER, never hang: the abort-signal sweep had no
   fallback and blocked for ten minutes instead of printing one line. And wrap each check

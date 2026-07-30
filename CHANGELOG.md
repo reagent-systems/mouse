@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: every cancellable API now cancels. Eight accepted an `AbortSignal` and
+  ignored it — `timers/promises.setTimeout`, `events.on`, `stream.finished`,
+  `stream/promises.pipeline`, `readline.createInterface`, `fs.readFile`,
+  `fs.promises.readFile` and `fs.watch` — and five of those turned a cancellable wait into
+  a permanent one.
 - Node layer: `fs.createReadStream({start, end})` reads the byte range it was given
   instead of the whole file, and honours `highWaterMark`. Also fixed:
   `events.once(..., {signal})` (an ignored signal never settled the promise),

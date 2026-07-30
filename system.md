@@ -1074,6 +1074,28 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The AbortSignal audit: eight of ten cancellable APIs could not be cancelled.** Two of
+  the previous batch's findings were the SAME defect in different places — an accepted and
+  ignored signal — so instead of meeting it a third time, this swept the whole class: every
+  API node lets you abort. Only the two `AbortSignal` constructors worked.
+  **Five of the eight turned a cancellable wait into a permanent one**, which is the shape
+  worth naming: `timers/promises.setTimeout({signal})` (an uncancellable sleep),
+  `events.on(…, {signal})` (an async iterator that never ends), `stream.finished`,
+  `stream/promises.pipeline`, and `readline.createInterface({signal})` — a prompt that
+  waits for input forever. The other three did the work anyway: `fs.readFile`,
+  `fs.promises.readFile` (both read despite an already-aborted signal) and `fs.watch`,
+  which kept a watcher running with no way to stop it.
+  One shared helper — `__onAbort` and `__abortError` — wires all of them, because eight
+  copies of "is it already aborted, else listen, and raise AbortError with ABORT_ERR" would
+  drift apart. The async fs callback family and the promises family each go through a single
+  wrapper, so one change covered a dozen functions rather than a dozen edits.
+  `pipeline` also had to learn to accept a trailing options object, which is how
+  `stream/promises` passes the signal — and it had to distinguish that object from a stream,
+  since both are objects in the argument list.
+  This is what makes a class sweep worth more than fixing instances: the two I had already
+  fixed by chance (http's `signal`, `events.once`) were the visible tip of eight.
+  90 fixtures, and every harness re-run — chokidar and `tsc --watch` especially, since
+  `fs.watch` changed underneath them.
 - **The options detector, third batch — a byte range that was not a range.** Five more
   accepted-and-ignored options, and the worst returned WRONG DATA rather than an error:
   **`fs.createReadStream(path, {start, end})` ignored the range and handed back the whole
