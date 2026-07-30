@@ -1376,6 +1376,40 @@ final class NodeEngine: @unchecked Sendable {
       };
       globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 1; } };
       globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 16384; } };
+      // V8's stack-trace protocol: when Error.prepareStackTrace is set, captureStackTrace
+      // hands it structured CallSite objects (depd — under express — walks them). JSC's
+      // native captureStackTrace ignores the protocol, so emulate it from JSC stack lines
+      // ("functionName@file:line:col").
+      Error.captureStackTrace = function(target, constructorOpt) {
+        const raw = (new Error().stack || '').split('\n').slice(1);
+        if (typeof Error.prepareStackTrace === 'function') {
+          const callSites = raw.map(function(line) {
+            const at = line.lastIndexOf('@');
+            const name = at >= 0 ? line.slice(0, at) : '';
+            const match = (at >= 0 ? line.slice(at + 1) : line).match(/^(.*?):(\d+):(\d+)$/) || [];
+            return {
+              getFileName: function(){ return match[1] || null; },
+              getLineNumber: function(){ return match[2] ? Number(match[2]) : null; },
+              getColumnNumber: function(){ return match[3] ? Number(match[3]) : null; },
+              getFunctionName: function(){ return name || null; },
+              getMethodName: function(){ return name || null; },
+              getTypeName: function(){ return null; },
+              getEvalOrigin: function(){ return undefined; },
+              getThis: function(){ return undefined; },
+              isNative: function(){ return line.includes('[native code]'); },
+              isToplevel: function(){ return !name; },
+              isEval: function(){ return false; },
+              isConstructor: function(){ return false; },
+              isAsync: function(){ return false; },
+              toString: function(){ return line; },
+            };
+          });
+          target.stack = Error.prepareStackTrace(target, callSites);
+        } else {
+          target.stack = (target.name || 'Error') + (target.message ? ': ' + target.message : '') + '\n'
+            + raw.map(function(l){ return '    at ' + l; }).join('\n');
+        }
+      };
       globalThis.atob = function(base64) { return Buffer.from(String(base64), 'base64').toString('binary'); };
       globalThis.btoa = function(binary) { return Buffer.from(String(binary), 'binary').toString('base64'); };
       // JSC's ASYNC wasm APIs never settle on a bare JSContext (their completion needs a
@@ -2050,9 +2084,13 @@ final class NodeEngine: @unchecked Sendable {
       };
 
       coreFactories.events = function() {
+        // `_events` initializes LAZILY in every method, not just the constructor: express
+        // mixes EventEmitter.prototype into a plain function without ever calling the
+        // constructor, and real node's emitter tolerates exactly that.
         class EventEmitter {
           constructor() { this._events = {}; }
-          on(name, handler) { (this._events[name] = this._events[name] || []).push(handler); return this; }
+          _bucket() { return this._events || (this._events = {}); }
+          on(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).push(handler); return this; }
           addListener(name, handler) { return this.on(name, handler); }
           once(name, handler) {
             const wrapper = (...args) => { this.off(name, wrapper); handler.apply(this, args); };
@@ -2060,15 +2098,15 @@ final class NodeEngine: @unchecked Sendable {
             return this.on(name, wrapper);
           }
           off(name, handler) {
-            const list = this._events[name] || [];
+            const list = this._bucket()[name] || [];
             const index = list.findIndex(h => h === handler || h.listener === handler);
             if (index >= 0) list.splice(index, 1);
             return this;
           }
           removeListener(name, handler) { return this.off(name, handler); }
-          removeAllListeners(name) { if (name) delete this._events[name]; else this._events = {}; return this; }
+          removeAllListeners(name) { if (name) delete this._bucket()[name]; else this._events = {}; return this; }
           emit(name, ...args) {
-            const list = (this._events[name] || []).slice();
+            const list = (this._bucket()[name] || []).slice();
             // Node semantics: an 'error' with no listener THROWS — otherwise failures
             // dissolve into silence (and awaited events dangle forever).
             if (name === 'error' && list.length === 0) {
@@ -2077,18 +2115,27 @@ final class NodeEngine: @unchecked Sendable {
             for (const handler of list) handler.apply(this, args);
             return list.length > 0;
           }
-          listenerCount(name) { return (this._events[name] || []).length; }
-          listeners(name) { return (this._events[name] || []).slice(); }
-          rawListeners(name) { return (this._events[name] || []).slice(); }
-          eventNames() { return Object.keys(this._events); }
+          listenerCount(name) { return (this._bucket()[name] || []).length; }
+          listeners(name) { return (this._bucket()[name] || []).slice(); }
+          rawListeners(name) { return (this._bucket()[name] || []).slice(); }
+          eventNames() { return Object.keys(this._bucket()); }
           setMaxListeners() { return this; }
           getMaxListeners() { return Infinity; }
-          prependListener(name, handler) { (this._events[name] = this._events[name] || []).unshift(handler); return this; }
+          prependListener(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).unshift(handler); return this; }
           prependOnceListener(name, handler) {
             const wrapper = (...args) => { this.off(name, wrapper); handler.apply(this, args); };
             wrapper.listener = handler;
             return this.prependListener(name, wrapper);
           }
+        }
+        // Real node assigns its emitter methods onto the prototype as ENUMERABLE properties
+        // — express's `Object.assign(app, EventEmitter.prototype)` mixin depends on it.
+        // Class methods are non-enumerable by default; flip them.
+        for (const key of Object.getOwnPropertyNames(EventEmitter.prototype)) {
+          if (key === 'constructor') continue;
+          const descriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, key);
+          descriptor.enumerable = true;
+          Object.defineProperty(EventEmitter.prototype, key, descriptor);
         }
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.default = EventEmitter;

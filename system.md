@@ -414,6 +414,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   call, only ever CLEAR it after. prettier now exits 0. Fixture
   `microtask-only-tla` pins the pure-microtask entry path against real
   node — 47 node fixtures, full battery green
+- **Batch 5: EXPRESS ROUTES ON THE ENGINE; marked/uuid/minimist/dotenv
+  pass outright.** An express app builds, registers routes, and — driven
+  as the handler function it is, with a mock req/res — routes a request
+  end-to-end (`GET /hello/:name` → 200, path params, content-type
+  negotiation); `listen` hits the honest no-server wall (dev-server
+  phase), exactly as designed. Two engine fixes en route: (1) the **V8
+  stack-trace protocol** — depd (under express) sets
+  `Error.prepareStackTrace` and expects `captureStackTrace` to hand it
+  structured CallSites; JSC's native captureStackTrace ignores the
+  protocol, so we emulate it from JSC stack lines (fixture
+  `callsite-protocol`, which also documents V8's lazy-stack read-before-
+  restore gotcha). (2) **EventEmitter faithful to node's shape**: methods
+  lazily create `_events` (express mixes the prototype into a plain
+  function, never calling the constructor) AND are ENUMERABLE on the
+  prototype (real node assigns them; `Object.assign` mixins depend on
+  it — class methods are non-enumerable by default). Fixture
+  `events-lazy-mixin`. 49 node fixtures, full battery green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
