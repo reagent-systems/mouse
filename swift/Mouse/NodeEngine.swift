@@ -276,6 +276,7 @@ final class NodeEngine: @unchecked Sendable {
         installNativeBridge(argv: argv, cwd: cwd, stdin: stdin)
         if ipcSink != nil { channelHoldsLoop = true; outstanding += 1 }
         context.evaluateScript(Self.bootstrap)
+        installRejectionHook()
 
         let dir = virtualDirname(path)
         let entryIsESM = isESModule(id: normalize(path), source: source)
@@ -477,6 +478,34 @@ final class NodeEngine: @unchecked Sendable {
 
     // MARK: - Native bridge
 
+    /// JavaScriptCore's unhandled-rejection hook, resolved at runtime.
+    ///
+    /// This was refused for a long time on the grounds that JSC exposes no rejection hook — a
+    /// conclusion reached by reading the PUBLIC headers. The symbol is exported all the same.
+    /// It matters because the userland alternative cannot work: patching
+    /// `Promise.prototype.then` is called ZERO times by `await`, since JSC's await path uses the
+    /// internal `PerformPromiseThen`, so a userland tracker would miss every awaited rejection
+    /// and false-positive on the ones it did see.
+    ///
+    /// Resolved by `dlsym` rather than linked, so an OS without it keeps the previous behaviour
+    /// instead of failing to launch.
+    private typealias SetRejectionCallback = @convention(c)
+        (JSGlobalContextRef?, JSObjectRef?, UnsafeMutablePointer<JSValueRef?>?) -> Void
+
+    private static let setRejectionCallback: SetRejectionCallback? = {
+        guard let handle = dlopen("/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+                                  RTLD_NOW),
+              let symbol = dlsym(handle, "JSGlobalContextSetUnhandledRejectionCallback") else { return nil }
+        return unsafeBitCast(symbol, to: SetRejectionCallback.self)
+    }()
+
+    private func installRejectionHook() {
+        guard let install = Self.setRejectionCallback,
+              let hook = context.objectForKeyedSubscript("__mouseOnUnhandledRejection"),
+              !hook.isUndefined else { return }
+        install(context.jsGlobalContextRef, hook.jsValueRef, nil)
+    }
+
     private func installNativeBridge(argv: [String], cwd: String, stdin: String) {
         let bridge = JSValue(newObjectIn: context)!
 
@@ -515,6 +544,15 @@ final class NodeEngine: @unchecked Sendable {
         expose("stdout", stdoutWrite)
         expose("stderr", stderrWrite)
         expose("exit", exitBlock)
+
+        // An unhandled rejection with no listener is fatal in node, exactly like an uncaught
+        // throw: the message goes to stderr and the process dies with status 1.
+        let unhandledRejection: @convention(block) (String) -> Void = { [weak self] text in
+            guard let self, self.exitCode == nil else { return }
+            self.err += text.hasSuffix("\n") ? text : text + "\n"
+            self.exitCode = 1
+        }
+        expose("unhandledRejection", unhandledRejection)
 
         // -- monotonic clock --
         // `process.hrtime`, `hrtime.bigint` and `performance.now` all read a MONOTONIC clock:
@@ -4203,6 +4241,33 @@ final class NodeEngine: @unchecked Sendable {
       };
       // The host routes an uncaught synchronous exception here. Returns true when a
       // 'uncaughtException' handler ran (node then does NOT exit 1); false means unhandled.
+      // JSC calls this with (promise, reason) once a rejection reaches a microtask checkpoint
+      // with no handler attached. node's precedence: an 'unhandledRejection' listener gets first
+      // refusal and suppresses the exit; with no listener the rejection is fatal.
+      //
+      // A rejection handled LATER (in a timer, say) is still fatal — node decides at the end of
+      // the turn, and so does this.
+      globalThis.__mouseOnUnhandledRejection = function(promise, reason) {
+        const handlers = processEvents.unhandledRejection;
+        if (handlers && handlers.length) {
+          for (const handler of handlers.slice()) handler(reason, promise);
+          return;
+        }
+        let text;
+        if (reason instanceof Error) {
+          const stack = reason.stack;
+          text = stack && String(stack).indexOf(reason.message) >= 0
+            ? String(stack) : String(reason) + (stack ? '\n' + stack : '');
+        } else {
+          // node wraps a non-Error rejection rather than printing it bare.
+          text = 'UnhandledPromiseRejection: This error originated either by throwing inside of ' +
+                 'an async function without a catch block, or by rejecting a promise which was ' +
+                 'not handled with .catch(). The promise rejected with the reason "' +
+                 String(reason) + '".';
+        }
+        bridge.unhandledRejection(text);
+      };
+
       globalThis.__mouseEmitUncaught = function(error) {
         const handlers = processEvents.uncaughtException;
         if (!handlers || !handlers.length) return false;

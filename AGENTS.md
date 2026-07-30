@@ -111,10 +111,15 @@ the real filesystem. Known divergences to keep out of fixtures: absolute
 host paths in cwd, setTimeout-vs-setImmediate order from the main module,
 stderr text. `uncaughtException` is honored for SYNCHRONOUS top-level
 throws (handler runs → no exit 1; may `process.exit`); the async sibling
-`unhandledRejection` stays unimplemented — the public JavaScriptCore API
-has no rejection hook (header-audited: only `exceptionHandler` + promise
-creation), so tracking it would false-positive on awaited rejections. Do
-not add a `Promise.prototype.then` patch for it. Part-2 surfaces verify the same way: ESM fixtures (all
+`unhandledRejection` is honored too, through JavaScriptCore's
+`JSGlobalContextSetUnhandledRejectionCallback`, resolved with `dlsym` and
+guarded so an OS without it keeps the older behavior. Still do NOT add a
+`Promise.prototype.then` patch as a fallback: `await` goes through JSC's
+internal `PerformPromiseThen` and calls a patched `then` zero times, so a
+userland tracker misses every awaited rejection. **That symbol is SPI**
+(WebKit's `JSContextRefPrivate.h`), which is a real App Store review risk
+and a NEW category of risk for this project — `NodeEngine.installRejectionHook()`
+is the single seam, and deleting that one function removes the dependency. Part-2 surfaces verify the same way: ESM fixtures (all
 import/export forms + chalk@5, a real ESM-only package), child_process
 with the harness bridge running /bin/sh (matching real node's /bin/sh
 exactly; msh semantics proven separately end-to-end), and fetch/https

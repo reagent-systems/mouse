@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **unhandled promise rejections exit 1**, as node's do, and
+  `process.on('unhandledRejection', …)` is honoured — a listener suppresses the exit and may
+  set its own code. Fires for a bare rejection, an awaited one, and a throw inside an async
+  function; silent when a handler is attached. Uses JavaScriptCore's
+  `JSGlobalContextSetUnhandledRejectionCallback`, resolved with `dlsym` and guarded, so a
+  system without the symbol keeps the previous behaviour. The symbol is SPI — see system.md §8
+  for the App Store consideration and the single seam that removes it.
 - Node layer: **mocha 10 runs a suite**, reporting the same passes, failures, pending tests,
   timeouts and exit code as real node.
 - Node layer: `process.exitCode = n` is honoured. It was a property nothing ever read back, so

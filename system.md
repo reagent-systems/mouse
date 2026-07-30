@@ -114,6 +114,7 @@ so a TUI navigates and edits.
 | **Phase G — multicast** | `addMembership`/`dropMembership` with `setMulticastTTL`, `setMulticastLoopback` and `setMulticastInterface` — the `IP_ADD_MEMBERSHIP` the refusal named. Both engines join a group on loopback, send to it and receive their own packet, identically. That empties the audit's "reachable but unbuilt" list: UDP, unix sockets and multicast were all on it |
 | **Phase G — eslint lints, and the clock is real** | **eslint 9 runs on the engine and reports the same findings on the same files as real node.** A real-package proof is different evidence from a surface sweep — it exercises capabilities in COMBINATION, and it found four defects no per-API sweep had. `process.hrtime` was built on `Date.now()`: wall-clock, millisecond-resolution, and free to run BACKWARDS across an NTP correction — so a diff could come out negative. It now reads a monotonic clock (`DispatchTime`, mach_absolute_time underneath, the same source node uses on Darwin) and carries the `bigint` property eslint destructures. `pathToFileURL`/`fileURLToPath` were stubs doing string surgery that round-tripped plain ASCII and lost on everything else; and our `URL` dropped the `//` from an empty authority (`file:///a` → `file:/a`), never percent-encoded the path, reported `file:` where node reports `null` for an opaque origin, and handed out a DETACHED `searchParams` — so eslint's mtime cache-bust vanished silently. 38 URL vectors are now byte-identical, and a query on a `file:` specifier busts the module cache as it is meant to |
 | **Phase G — mocha runs, and `assert` grew up** | **mocha 10 runs a suite on the engine and reports the same results as real node — every pass, failure, pending and timeout, in the same order, with the same exit code.** A test runner lives on the parts of a runtime hardest to fake, and it found the worst defect of the session: **`process.exitCode = n` was a property nothing ever read**, so a suite with failing tests exited **0** — a CI green light on a red build. Chasing the assertion messages then exposed the `assert` module as mostly a facade: no `AssertionError` class at all (every failure a bare `Error` with no `code`, `operator`, `actual` or `expected` — the exact fields a runner renders its diff from), `deepStrictEqual` implemented as `JSON.stringify` comparison (so key ORDER decided equality, `NaN` never equalled itself, `Map`/`Set`/`Date`/`RegExp` all collapsed to `{}`, and a circular structure threw), `deepEqual` aliased to the strict form, and **`assert.throws` ignoring its expected-error argument entirely** — so a test asserting a specific error passed on any throw at all. All rewritten: 18 message/field shapes and 37 behaviours byte-identical to node, including the `+ actual - expected` diff bodies. The one deep-equal now backs `util.isDeepStrictEqual` too, which had the same `JSON.stringify` bug copied into two more places |
+| **Phase G — unhandled rejections exit 1** | The last gap on record whose blocker was claimed to be a platform limit rather than effort, parked for most of this phase — and the parking was **wrong**. The empirical half was right: a patched `Promise.prototype.then` is called ZERO times by `await` (JSC routes it through the internal `PerformPromiseThen`), so the only userland tracker really was unusable. The unchecked step was the last one — *"the hook is private API"* was read as *"the hook cannot be called"*, on the strength of an audit that searched public HEADERS. `JSGlobalContextSetUnhandledRejectionCallback` is **exported**, `dlsym` finds it, and it fires for a bare rejection, an awaited one, and a throw inside an async function while staying silent when a handler is attached. 14 rejection shapes now exit exactly as node does, including a listener suppressing the exit and setting its own code. It is SPI, so it lives behind one removable seam with the review risk recorded in §8. **The lesson is the shape of the mistake**: a refusal is only as strong as its weakest link, and a long chain of verified reasoning ended in one inherited assumption that was never measured |
 
 ### Verification performed
 
@@ -167,15 +168,10 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   byte-for-byte), and **`fetch` + `http`/`https`.get/request** over
   URLSession (verified against a live local HTTP server, both engines).
   19 fixtures total, all matching. Remaining gaps (honest): `net`, the
-  WebView JIT surface (phase B) for speed, and unhandled promise
-  rejections don't exit(1) — that one is PARKED, not pending: JSC's
-  rejection tracker (`JSGlobalContextSetUnhandledRejectionCallback`) is
-  private API, and the public-surface workaround — patching
-  `Promise.prototype.then` — cannot see `await`'s internal
-  PerformPromiseThen, so every awaited rejection would look unhandled and
-  exit healthy programs. A wrong exit code is worse than a missing one;
-  revisit only if the API goes public or phase B's WebView engine offers
-  a hook
+  WebView JIT surface (phase B) for speed. **Unhandled promise rejections
+  now exit(1), and the long parking was wrong** — see the entry below:
+  the reasoning was sound but rested on one unchecked assumption, that
+  "not in the public headers" meant "not callable"
 - **Stream depth** — the `stream` sketch became the real thing: Readable
   with paused-vs-flowing modes, an internal buffer, `_read` pull,
   `'readable'`, async iteration, and `Readable.from`; Writable with
@@ -318,7 +314,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   bytes), so runtime behavior cannot change; all 35 fixtures still match
   real node, TTY/e2e/sh green, Swift 6 build passes. This is what makes
   running a real bundled CLI on device practical rather than a 40 s stall
-- **Unhandled-rejection exit codes — parking now EMPIRICALLY confirmed,
+- **The parking was OVERTURNED (2026-07-30) — the one assumption nobody tested.**
+  Everything below is still true except the conclusion. The empirical work was right:
+  a patched `Promise.prototype.then` really is called zero times by `await`, so a
+  userland tracker really would have been useless. What went unchecked was the last
+  step — "the symbol is private API" was read as "the symbol cannot be called". It is
+  exported: `dlsym` finds `JSGlobalContextSetUnhandledRejectionCallback` in the shipping
+  JavaScriptCore, and it behaves exactly as needed — it fires for a bare rejection, for
+  `await`ing one, and for a throw inside an async function, and stays SILENT when a
+  handler is attached. The audit that "confirmed" the parking searched public HEADERS,
+  which is a different question from what the binary exports, and the write-up did not
+  distinguish them. **The lesson is the shape of the error, not the symbol**: a refusal
+  is only as strong as its weakest link, and a long chain of verified reasoning can end
+  in one inherited assumption that was never a measurement. Fourteen rejection shapes now
+  exit exactly as node does. It is SPI, so `NodeEngine.installRejectionHook()` is kept as
+  a single removable seam and the App Store risk is recorded in §8.
+  The original entry follows.
+- **Unhandled-rejection exit codes — parking EMPIRICALLY confirmed,
   not just reasoned.** Tested directly in a bare JSContext: `await p`
   triggers a patched `Promise.prototype.then` ZERO times (JSC uses the
   internal PerformPromiseThen), and neither `reportUnhandledRejection` nor
@@ -1721,7 +1733,8 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   This distinguishes the two kinds of remaining gap. `scrypt` was arithmetic nobody had
   written yet. HTTP/2, a TLS server and finite-field DH are protocol or bignum work;
   `SharedArrayBuffer` and `Atomics.wait` need memory two JSContexts cannot share; and
-  unhandled-rejection exit codes need a private JSC hook. Those reasons survive.
+  and unhandled-rejection exit codes needed a JSC hook that turned out to be exported
+  after all. The rest of those reasons survive.
 - **The tick guarantee finished, and the caveat I wrote for it was wrong in BOTH
   directions.** The previous boundary said I/O-event callbacks were not trampolined.
   Testing six different routes out of the host showed four were already correct —
@@ -2679,6 +2692,15 @@ The engineering is the easy part.
 - **Bring-your-own is the rule** ([xcode.md](xcode.md) §1): Mouse never
   manufactures credentials, licenses, or trust. It accepts what the user
   holds and does the work with it. Apple-licensed SDKs come from the user.
+- **SPI is now a risk surface too (2026-07-30).** The Node layer's
+  `unhandledRejection` support calls
+  `JSGlobalContextSetUnhandledRejectionCallback`, which JavaScriptCore
+  exports but does not declare in a public header. It is resolved with
+  `dlsym` and fully guarded, so removing it is deleting one function
+  (`NodeEngine.installRejectionHook()`) and losing one exit code — but it
+  is a genuinely new category of review exposure for a project whose
+  stated position is that *signing*, not execution, is the risk. Decide
+  before submission, not after.
 - **App size** is a real budget. clang-wasm and CPython are tens of
   megabytes each. Bundle the core; download the rest as data.
 - **Idea on file (2026-07-27): Mouse Lite / Mouse Heavy.** Two app
