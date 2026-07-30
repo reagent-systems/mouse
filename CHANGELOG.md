@@ -16,6 +16,23 @@ carry breaking changes.
 - **`msh` shell** on both platforms: quoting, variables, globs, pipes,
   redirection, `&&`/`||`, history, and ~50 built-ins (incl. `sed`, `diff`,
   `base64`, checksums).
+- **`node` is real** — a Node-compatible runtime on JavaScriptCore, so the
+  terminal runs actual npm software on the phone. `npm install <pkg>` then
+  `<bin>` works: the CommonJS *and* ES-module systems, a real event loop,
+  `fs` (sync, callback and fd forms), `stream` (with streaming
+  compression), `crypto` (CryptoKit), `zlib` (libz), `readline`,
+  `child_process` bridged into `msh`, and the **fetch API** with streaming
+  response bodies. Full-screen programs get a real TTY: keystrokes,
+  arrows/F-keys/Ctrl-combos, bracketed paste, resize as `SIGWINCH`, and
+  terminal query replies — so **ink/React TUIs draw on the terminal
+  screen**. Verified against real `node` (65 byte-identical fixtures) and
+  by running the genuine articles: the Anthropic SDK with token streaming,
+  TypeScript's `tsc`, inquirer/prompts, commander/yargs, express routing,
+  tar, prettier, glob, and esbuild-wasm. Big bundles cache their transpile,
+  so a 9 MB CLI relaunches in a fifth of a second.
+- **`npm` / `npx` / `pnpm`**: real registry resolution (full semver),
+  integrity-checked tarballs, native unpacking, and a Node-compatible
+  `node_modules` layout — resolution verified identical to `pnpm`.
 - **Networking in the terminal**: `ping` (real ICMP), `curl`/`wget`,
   `sleep`, on async streaming-command machinery; any keypress interrupts a
   streaming command (the phone's Ctrl-C).
