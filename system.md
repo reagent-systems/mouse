@@ -1074,6 +1074,22 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The rest of the stream surface — `unpipe` was a TypeError.** What the instance-shape
+  sweep left. `unpipe` is the one that mattered: real code stops a pipe MID-FLIGHT — proxying,
+  extracting a tar, aborting a download — and calling it threw. `pipe` now remembers its
+  wiring (the data, drain and end listeners it installed) so `unpipe` can undo exactly that,
+  detach one destination or all of them, emit `'unpipe'` on each, and stop flowing when the
+  last one goes. Undoing a pipe is only possible if you recorded what you did.
+  Also `wrap` (the legacy old-stream adapter), `compose`, `setDefaultEncoding`, and the
+  introspection getters — `readableHighWaterMark`, `readableEncoding` (null, not undefined,
+  when unset), `writableHighWaterMark`, `writableNeedDrain` and `writableLength`.
+  **`writableLength` had the same in-flight blind spot** that made `highWaterMark` report no
+  backpressure two boundaries ago: a chunk handed to `_write` leaves the queue while still
+  outstanding, so the length read zero with bytes in flight. It now counts the outstanding
+  chunk too — which matters precisely because it is the number a caller compares AGAINST
+  `writableHighWaterMark`, so the two disagreeing is worse than either being wrong alone.
+  Every stream-dependent harness re-ran, since `pipe` itself changed: 96 fixtures, http,
+  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg and tsc --watch.
 - **An audit of the VERIFICATION ITSELF, after two harness bugs in two boundaries.** The
   rule this session keeps proving — when the same defect appears twice, sweep the class —
   applied to the test infrastructure rather than the engine. The console boundary was

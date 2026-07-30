@@ -6072,6 +6072,11 @@ final class NodeEngine: @unchecked Sendable {
           self._endEmitted = false;
           self._draining = false;
           self._readableEncoding = options.encoding || null;
+          // Remembered so `readableHighWaterMark` reports what the stream was actually built
+          // with rather than a constant.
+          self._readableHighWaterMark = options.highWaterMark !== undefined
+            ? Number(options.highWaterMark)
+            : (options.objectMode ? 16 : 16384);
           self.readable = true;
           self.destroyed = false;
           if (options.read) self._read = options.read;
@@ -6089,6 +6094,12 @@ final class NodeEngine: @unchecked Sendable {
           // node reports null before flowing starts, then true/false.
           readableFlowing: { get: function(){ return this._flowing ? true : (this._everFlowed ? false : null); }, configurable: true },
           readableLength: { get: function(){ return (this._buf || []).reduce(function(n, c){ return n + (c.length || 1); }, 0); }, configurable: true },
+          readableHighWaterMark: {
+            get: function(){ return this._readableHighWaterMark === undefined ? 16384 : this._readableHighWaterMark; },
+            configurable: true,
+          },
+          // null when no encoding is set, which is how node reports "you get Buffers".
+          readableEncoding: { get: function(){ return this._readableEncoding || null; }, configurable: true },
           readableObjectMode: { get: function(){ return !!this._objectMode; }, configurable: true },
           closed: { get: function(){ return !!this._closeEmitted; }, configurable: true },
           errored: { get: function(){ return this._errored || null; }, configurable: true },
@@ -6169,11 +6180,52 @@ final class NodeEngine: @unchecked Sendable {
           },
           pipe: function(dest, options) {
             const end = !options || options.end !== false;
-            this.on('data', chunk => { if (dest.write(chunk) === false && this.pause) { this.pause(); } });
-            if (dest.on) dest.on('drain', () => this.resume());
-            this.on('end', () => { if (end && dest.end) dest.end(); });
+            // The wiring is REMEMBERED so unpipe can undo exactly it. Without this, a pipe could
+            // be started but never stopped, and real code stops one mid-flight — proxying, tar,
+            // aborting a download.
+            const onData = chunk => { if (dest.write(chunk) === false && this.pause) { this.pause(); } };
+            const onDrain = () => this.resume();
+            const onEnd = () => { if (end && dest.end) dest.end(); };
+            this.on('data', onData);
+            if (dest.on) dest.on('drain', onDrain);
+            this.on('end', onEnd);
+            this._pipes = this._pipes || [];
+            this._pipes.push({ dest: dest, onData: onData, onDrain: onDrain, onEnd: onEnd });
             if (dest.emit) dest.emit('pipe', this);
             return dest;
+          },
+          /// Detach one destination, or every destination when called bare. node emits 'unpipe'
+          /// on each one it detaches.
+          unpipe: function(dest) {
+            const pipes = this._pipes || [];
+            const remaining = [];
+            for (const entry of pipes) {
+              if (dest !== undefined && entry.dest !== dest) { remaining.push(entry); continue; }
+              this.off('data', entry.onData);
+              this.off('end', entry.onEnd);
+              if (entry.dest.off) entry.dest.off('drain', entry.onDrain);
+              if (entry.dest.emit) entry.dest.emit('unpipe', this);
+            }
+            this._pipes = remaining;
+            // With nothing left listening, node stops flowing rather than discarding data.
+            if (!remaining.length && this.listenerCount('data') === 0) this._flowing = false;
+            return this;
+          },
+          /// node's legacy adapter for an old-style (pre-streams2) emitter. It is short because
+          /// the contract is small: forward data, end and error onto this stream.
+          wrap: function(old) {
+            const self = this;
+            old.on('data', function(chunk){ if (!self.push(chunk) && old.pause) old.pause(); });
+            old.on('end', function(){ self.push(null); });
+            if (old.on) old.on('error', function(error){ self.emit('error', error); });
+            this._read = function(){ if (old.resume) old.resume(); };
+            return this;
+          },
+          /// `readable.compose(transform)` — pipe through and hand back the far end.
+          compose: function(transform) {
+            if (typeof transform === 'function') return transform(this);
+            this.pipe(transform);
+            return transform;
           },
           [Symbol.asyncIterator]: function() {
             const self = this;
@@ -6366,6 +6418,8 @@ final class NodeEngine: @unchecked Sendable {
           // cork/uncork: node buffers writes while corked so a caller can coalesce several
           // into one packet. `ws` corks around every frame (header + payload + mask), so
           // without these a WebSocket send throws before a single byte goes out.
+          /// The encoding used for a string written without one of its own.
+          setDefaultEncoding(encoding) { this._defaultEncoding = String(encoding); return this; },
           cork() { this._corked = (this._corked || 0) + 1; },
           uncork() {
             if (!this._corked) return;
@@ -6382,7 +6436,12 @@ final class NodeEngine: @unchecked Sendable {
                 return;
               }
               const [chunk, encoding, callback] = this._wbuf.shift();
+              // A chunk handed to _write is no longer in the buffer but IS still outstanding, so
+              // it has to keep counting towards writableLength — otherwise a caller watching
+              // backpressure sees an empty queue while bytes are in flight.
+              this._writingLength = chunk && chunk.length !== undefined ? chunk.length : 1;
               this._write(chunk, encoding, (err) => {
+                this._writingLength = 0;
                 if (callback) callback(err);
                 if (err) { this._writing = false; this.emit('error', err); return; }
                 step();
@@ -6431,7 +6490,26 @@ final class NodeEngine: @unchecked Sendable {
           writableCorked: { get: function(){ return this._corked || 0; }, configurable: true },
           writableEnded: { get: function(){ return !!this._writableEnded; }, configurable: true },
           writableFinished: { get: function(){ return !!this._finishEmitted; }, configurable: true },
-          writableLength: { get: function(){ return (this._wbuf || []).length; }, configurable: true },
+          // node counts BYTES outside object mode, not entries — a caller watching backpressure
+          // compares this against writableHighWaterMark, so the units have to agree.
+          writableLength: {
+            get: function() {
+              const buffered = this._wbuf || [];
+              if (this._writableObjectMode) return buffered.length + (this._writingLength ? 1 : 0);
+              let total = this._writingLength || 0;
+              for (const entry of buffered) {
+                const value = entry[0];
+                total += value && value.length !== undefined ? value.length : 1;
+              }
+              return total;
+            },
+            configurable: true,
+          },
+          writableHighWaterMark: {
+            get: function(){ return this._writableHighWaterMark === undefined ? 16384 : this._writableHighWaterMark; },
+            configurable: true,
+          },
+          writableNeedDrain: { get: function(){ return !!this._needDrain; }, configurable: true },
           writableObjectMode: { get: function(){ return !!this._writableObjectMode; }, configurable: true },
           closed: { get: function(){ return !!this._closeEmitted; }, configurable: true },
           errored: { get: function(){ return this._errored || null; }, configurable: true },

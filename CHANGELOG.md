@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `readable.unpipe()` works — it was a TypeError, so a pipe could be started but
+  never stopped. Adds `wrap`, `compose`, `setDefaultEncoding` and the stream introspection
+  getters; `writableLength` now counts the chunk still in flight, so it agrees with
+  `writableHighWaterMark`.
 - Node layer: the console is complete. Sixteen methods were missing from the global
   console — `dir`, `table`, `group`, `count`, `time`, `assert` and more — so `console.dir(x)`
   threw and killed the program; `console.debug` wrote to stderr instead of stdout; and the
