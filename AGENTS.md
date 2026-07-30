@@ -168,6 +168,20 @@ watch mode must compile, detect an edit through our watcher, recompile, and
 report the same diagnostics as real node. That last one is the phase-D loop
 (edit → recompile → diagnostics) and the heaviest consumer of `fs.watch` there
 is; if it breaks, suspect the watcher or `Stats` before suspecting tsc.
+**`Buffer.from(arrayBuffer)` must SHARE memory, never copy** — node documents it
+as a view, and every wasm interop depends on it (webpack writes into
+`WebAssembly.Memory.buffer` through such a Buffer and reads the result back).
+Copying makes wasm hashes return the INPUT padded with NULs: a wrong answer with
+no error near it. Note the asymmetry, which is measured, not guessed:
+`Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
+`Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
+constructor already does that, so leave the default path alone.
+**WebAssembly RUNS on this engine** (JSC, interpreter mode) — wasm packages work
+today; the WebView JIT would buy speed, not capability. Keep the webpack proof
+green: it bundles byte-identically to real node and exercises wasm hashing,
+module resolution and terser at once.
+`require(".")` and `require("..")` are relative DIRECTORY requests — webpack's
+Compiler.js uses the first form.
 The `WebSocket` GLOBAL rides URLSession's WebSocket task — the only TLS-capable
 path here — while the `ws` PACKAGE rides our own sockets for `ws://`. Keep both.
 `open` must come from the delegate's handshake callback, never from a ping

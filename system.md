@@ -101,6 +101,7 @@ so a TUI navigates and edits.
 | **Phase G — connection pooling** | A real keep-alive `Agent`: idle sockets are pooled per host:port, reused LIFO, and **unref'd while idle** so a warm pool never holds a program open. Four sequential requests now travel over one connection, the same count node reports — the last recorded divergence in the HTTP client is closed. Pooling immediately exposed a server-side gap it was right to expose: `keepAliveTimeout` was stored and never enforced, so an idle connection was never dropped and `server.close()` waited on a peer with nothing left to say |
 | **Phase G — streaming responses** | The URLSession transport moved to its DELEGATE form, so `fetch` and `https.request` deliver the head first and then each chunk as it lands. Server-sent events now arrive as they are sent — three events half a second apart read as three reads spread over time, matching real node — which is the case that matters most here: **an agent CLI streaming tokens from an API**. `Response.body` is a live `ReadableStream`; `text()`/`json()` drain it once |
 | **Phase G — the `WebSocket` global, and `wss://`** | The standard `WebSocket` (which node 22 also exposes) on URLSession's WebSocket task — the one path to **TLS WebSockets** here, since `wss://` needs a handshake we cannot put on a raw socket. Text and binary frames, `binaryType`, `addEventListener`, clean close codes, and `CloseEvent`/`MessageEvent`. Behaves exactly as node 22's does against the same `ws` server. The `ws` PACKAGE keeps riding our own sockets for `ws://`, in both directions |
+| **Phase D — webpack bundles, and WebAssembly works** | **webpack 5 bundles a real project on the engine, byte-identical to real node's output, minified by terser, and the bundle runs.** That is the bundling half of phase D. Two bugs paid for it: `require(".")` did not resolve, and `Buffer.from(arrayBuffer)` COPIED where node shares — which silently broke every wasm interop, webpack's own hashes included. Fixing it revealed that **WebAssembly runs here** (JSC's interpreter-mode wasm), so wasm packages are viable without waiting for the JIT |
 
 ### Verification performed
 
@@ -1010,6 +1011,33 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   now reports the same adds, changes, unlinks and nested paths as real node.
   Same lesson as the Buffer bug, in a different module: **a missing field is
   not a missing feature, it is a wrong answer delivered quietly.**
+- **webpack bundles on the engine — and WebAssembly works, which I did not know.**
+  webpack 5 built a real multi-file project (ESM syntax, a JSON import, a nested
+  directory) in production mode on our engine, and the emitted bundle is
+  **byte-identical to real node's**, terser minification included, and it runs.
+  That closes the bundling half of phase D, on top of `tsc --watch` closing the
+  compile half. Two bugs stood in the way, and the second is the important one:
+  1. **`require(".")` did not resolve.** Our resolver recognised `./`, `../` and
+     `/` prefixes but not the bare forms — and webpack's own `Compiler.js` does
+     `require(".")` to reach its package entry. A one-line gap that stopped a
+     10 MB tool at its first import.
+  2. **`Buffer.from(arrayBuffer)` copied instead of sharing.** node documents it
+     as a VIEW without copying, and wasm interop lives on exactly that: webpack
+     writes into `WebAssembly.Memory.buffer` through such a Buffer and reads the
+     hash back out of the same bytes. Copying made every wasm hash return **the
+     input padded with NULs** — a wrong answer, no error, surfacing three layers
+     away as "Failed to parse String to BigInt" from
+     `BigInt('0x' + hash.digest('hex'))`.
+  Fixing that turned up something better than the fix: **WebAssembly runs on
+  this engine.** JSC compiles and instantiates modules in interpreter mode, so
+  webpack's md4 and xxhash64 now produce digests identical to node's. wasm
+  packages are therefore viable NOW, not only after the WebView JIT — which
+  matters for phase E, where the plan assumed otherwise. What the JIT would buy
+  is speed, not capability.
+  A guess of mine got corrected on the way, which is the fixture earning its
+  keep: I made `Buffer.from(typedArray)` copy the underlying BYTES, but node
+  copies the VALUES, each truncated to a byte — a `Uint16Array` of
+  `[0x0102, 0x0304]` becomes two bytes, not four.
 - **`wss://` is reachable after all, through the system's own WebSocket task.**
   I had written this off as structural: TLS needs a handshake we cannot put on a
   raw socket, so the `ws` package (which builds its client on `http.request`)
@@ -1599,8 +1627,9 @@ into one order. Each ships something usable alone.
 A  msh language           control flow, $(), script files      ✅ DONE — see §5
 B  WebView compute engine the only legal JIT; 10–30× on JS     small, huge leverage
 C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3×
-D  web toolchain          tsc, bundling, Preview container     PARTLY DONE — tsc compiles AND
-                          watches on the engine (see §0); bundling + Preview remain
+D  web toolchain          tsc, bundling, Preview container     MOSTLY DONE — tsc compiles and
+                          watches, and webpack bundles byte-identically to node
+                          (see §0); the Preview container remains
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
 G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch and JWTs on all four algorithms; gaps: TLS server, DSA/DH, worker_threads, WebView JIT)

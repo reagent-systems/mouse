@@ -1468,7 +1468,11 @@ final class NodeEngine: @unchecked Sendable {
             return .notFound("Cannot find module '\(rawRequest)'")
         }
 
-        if request.hasPrefix("./") || request.hasPrefix("../") || request.hasPrefix("/") {
+        // `require(".")` and `require("..")` are relative DIRECTORY requests — webpack's
+        // Compiler.js requires its own package that way (`require(".")`), and without the bare
+        // forms here they fell through to the node_modules walk and failed.
+        if request == "." || request == ".." ||
+           request.hasPrefix("./") || request.hasPrefix("../") || request.hasPrefix("/") {
             let base = request.hasPrefix("/") ? request : fromDir + "/" + request
             if let found = loadAsFileOrDirectory(normalize(base)) { return found }
             return .notFound("Cannot find module '\(rawRequest)'")
@@ -2018,7 +2022,7 @@ final class NodeEngine: @unchecked Sendable {
       }
 
       class Buffer extends Uint8Array {
-        static from(value, encoding) {
+        static from(value, encoding, length) {
           if (typeof value === 'string') {
             if (encoding === 'base64') return new Buffer(b64Decode(value));
             if (encoding === 'hex') {
@@ -2033,7 +2037,21 @@ final class NodeEngine: @unchecked Sendable {
             }
             return new Buffer(utf8Encode(value));
           }
-          if (value instanceof ArrayBuffer) return new Buffer(new Uint8Array(value));
+          // `Buffer.from(arrayBuffer[, byteOffset[, length]])` SHARES the memory — node
+          // documents it as a view without copying, and wasm interop depends on exactly that:
+          // webpack's hashes write into `WebAssembly.Memory.buffer` through such a Buffer and
+          // read the result back out. Copying here made every wasm hash return the INPUT
+          // padded with NULs, because the wasm function operated on memory nobody was reading.
+          if (value instanceof ArrayBuffer ||
+              (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer)) {
+            const offset = encoding === undefined ? 0 : Number(encoding) || 0;
+            const count = length === undefined ? value.byteLength - offset : Number(length);
+            return new Buffer(value, offset, count);
+          }
+          // NOT a byte-copy for other typed arrays: node copies their VALUES, each truncated
+          // to a byte, so a Uint16Array of [0x0102, 0x0304] becomes two bytes [2, 4] rather
+          // than four. Uint8Array's own constructor already does exactly that, so the default
+          // path below is the correct one — measured against node, which corrected a guess.
           return new Buffer(value);
         }
         static alloc(size, fill) {

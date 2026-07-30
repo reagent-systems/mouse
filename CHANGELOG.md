@@ -42,7 +42,8 @@ carry breaking changes.
   terminal query replies — so **ink/React TUIs draw on the terminal
   screen**. Verified against real `node` (65 byte-identical fixtures) and
   by running the genuine articles: the Anthropic SDK with token streaming,
-  TypeScript's `tsc` (`--watch` included — edit, recompile, diagnostics), inquirer/prompts, commander/yargs, express routing,
+  TypeScript's `tsc` (`--watch` included — edit, recompile, diagnostics),
+  **webpack 5** (bundles byte-identically to real node, terser and all), inquirer/prompts, commander/yargs, express routing,
   tar, prettier, glob, and esbuild-wasm. Big bundles cache their transpile,
   so a 9 MB CLI relaunches in a fifth of a second.
 - **`npm` / `npx` / `pnpm`**: real registry resolution (full semver),
