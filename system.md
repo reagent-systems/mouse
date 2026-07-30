@@ -448,6 +448,22 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   50 node fixtures, PHASE F, TTY, e2e, screen+pyte, Swift 6 build — green.
   This is the worst bug class the real-package method has found: not a
   crash, silent destruction of user data
+- **Where the claude-code chase ENDS (and why).** With config persisting,
+  startup was re-driven and traced: it runs its full init, writes its
+  enriched config, and then makes REAL HTTPS calls through our `fetch` —
+  `statsig.anthropic.com/v1/initialize` (feature flags) and `/v1/rgstr`
+  (telemetry), repeatedly — which independently proves the network layer
+  works under a real 9.3 MB bundle, not just against the local-server
+  fixture. Nothing draws yet (`stdout.write` count 0): the REPL is gated
+  behind feature-flag + auth resolution, and the probe's API key is a
+  placeholder. **That is the honest end of this thread**: the remaining
+  blocker is a real Anthropic credential and an authenticated session, not
+  an engine gap — so it is not something to fabricate or work around. What
+  the engine has proven it can do with this bundle: parse and load all
+  9.3 MB, run the whole module graph, write and persist config, speak
+  HTTPS, and render ink UIs (the config-recovery dialog, verified
+  byte-identical against pyte). Re-testing after a credential exists is a
+  one-command follow-up, recorded here so it is not re-derived
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the
