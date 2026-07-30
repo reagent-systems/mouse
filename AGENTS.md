@@ -465,6 +465,14 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **A behaviour can live in more than one place.** Stream finish exists on THREE paths here
+  (plain Writable, Duplex, Transform). Patching the first one looked complete and left the
+  others wrong; only re-running the sweep found it. After fixing a shared behaviour, grep for
+  its siblings before believing the fix.
+- **Sweep state VALUES, not just state properties.** A shape sweep proves a property exists;
+  it says nothing about whether it reports the truth. Snapshot every flag at each lifecycle
+  point and diff — that is how "streams never set destroyed" surfaced, invisible to every
+  earlier sweep.
 - **Audit the verification itself.** Two harness bugs in two boundaries each reported a
   working engine as broken. When that happens twice, sweep the harnesses the way you would
   sweep the code: every expected-output block, every capture. A harness that lies costs more

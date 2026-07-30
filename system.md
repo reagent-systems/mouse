@@ -1074,6 +1074,23 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **Stream STATE across a lifecycle — streams never destroyed themselves.** The in-flight
+  blind spot had now appeared twice (`highWaterMark`, then `writableLength`), which by this
+  session's own rule means sweep the class. The class: state VALUES, which a shape sweep
+  cannot see — it proves a property exists, not that it reports the truth. Fourteen snapshots
+  at each point a program would actually read them.
+  **node auto-destroys a finished stream** (its default since v14), and ours never did, so
+  `stream.destroyed` — the flag callers test to know they are done with something — stayed
+  false forever. And `destroy()` left `readable`/`writable` true, which invites a write to a
+  dead stream: the guard says yes and the write fails.
+  A Duplex waits for BOTH halves before destroying itself; destroying it when only the
+  readable side ended would kill a writable half still in use. The PassThrough cases pin that.
+  **Three separate finish paths** exist here — plain Writable, Duplex, Transform — and patching
+  one is not patching the others. The first fix looked right and left the plain-Writable case
+  wrong; only running the sweep again caught it. Worth remembering next time a behaviour looks
+  like it lives in one place.
+  autoDestroy changes stream LIFETIMES everywhere, so the full battery ran: 97 fixtures, http,
+  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch, chokidar, spawn.
 - **The rest of the stream surface — `unpipe` was a TypeError.** What the instance-shape
   sweep left. `unpipe` is the one that mattered: real code stops a pipe MID-FLIGHT — proxying,
   extracting a tar, aborting a download — and calling it threw. `pipe` now remembers its

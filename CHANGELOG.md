@@ -8,6 +8,9 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: streams auto-destroy when finished, as node's have since v14, so
+  `stream.destroyed` is finally a reliable "done with this" flag. `destroy()` now clears
+  `readable`/`writable` too. A Duplex waits for both halves.
 - Node layer: `readable.unpipe()` works — it was a TypeError, so a pipe could be started but
   never stopped. Adds `wrap`, `compose`, `setDefaultEncoding` and the stream introspection
   getters; `writableLength` now counts the chunk still in flight, so it agrees with

@@ -6138,6 +6138,14 @@ final class NodeEngine: @unchecked Sendable {
               process.nextTick(() => {
                 this.readable = false;
                 this.emit('end');
+                // node's autoDestroy (its default since v14): a finished stream destroys itself,
+                // which is how `stream.destroyed` becomes the reliable "done with this" flag that
+                // callers actually test. A DUPLEX waits for both halves — destroying it when only
+                // the readable side ended would kill a writable half still in use.
+                const duplex = typeof this._write === 'function' && this._wbuf !== undefined;
+                if (this._autoDestroy !== false && (!duplex || this._finishEmitted)) {
+                  this.destroy();
+                }
                 process.nextTick(() => emitCloseOnce(this));
               });
             }
@@ -6174,6 +6182,10 @@ final class NodeEngine: @unchecked Sendable {
           destroy: function(err) {
             if (this.destroyed) return this;
             this.destroyed = true;
+            // A destroyed stream is neither readable nor writable, and code guards on those
+            // before touching it. Leaving them true invites a write to a dead stream.
+            this.readable = false;
+            if (this._wbuf) this.writable = false;
             const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => emitCloseOnce(this)); };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
@@ -6467,6 +6479,10 @@ final class NodeEngine: @unchecked Sendable {
             const finish = () => {
               this.writable = false;
               this.emit('finish');
+              // autoDestroy, on the path a PLAIN Writable takes — there are three finish paths
+              // here (plain, Duplex, Transform) and patching one is not patching the others.
+              const duplex = typeof this._read === 'function';
+              if (this._autoDestroy !== false && !duplex) process.nextTick(() => this.destroy());
               process.nextTick(() => emitCloseOnce(this));
             };
             if (this._final) this._final((err) => { if (err) this.emit('error', err); finish(); });
@@ -6475,6 +6491,10 @@ final class NodeEngine: @unchecked Sendable {
           destroy(err) {
             if (this.destroyed) return this;
             this.destroyed = true;
+            // The writable half of the same rule as Readable.destroy: a destroyed stream is
+            // neither writable nor readable, and callers guard on those before touching it.
+            this.writable = false;
+            if (this._buf) this.readable = false;
             const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => emitCloseOnce(this)); };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
@@ -6557,6 +6577,14 @@ final class NodeEngine: @unchecked Sendable {
               self.writable = false;
               self.push(null);
               self.emit('finish');
+              // The writable half of the same rule; a Duplex waits for its readable side.
+              // "Is this a duplex?" is decided by whether a READ side was initialised, not by the
+              // presence of _buf — the writable methods are grafted onto a Readable ancestry, so
+              // _buf can exist on a plain Writable.
+              const duplex = typeof self._read === 'function';
+              if (self._autoDestroy !== false && (!duplex || self._endEmitted)) {
+                process.nextTick(function(){ self.destroy(); });
+              }
             };
             if (this._flush) this._flush(function(err, out) {
               if (err) { self.emit('error', err); return; }
