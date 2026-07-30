@@ -465,6 +465,11 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Give every async probe a fallback timer, and isolate each check.** A probe for an
+  ignored option must report a WRONG ANSWER, never hang: the abort-signal sweep had no
+  fallback and blocked for ten minutes instead of printing one line. And wrap each check
+  so one that throws cannot hide the others — an earlier run died on its first divergence
+  and masked eight more findings.
 - **A green suite says nothing about options it never passed.** Sweeping for existence
   (exports, prototypes, globals) cannot see an option that is accepted and dropped: the
   function is there, the signature takes it, nothing happens. Exercise each option whose

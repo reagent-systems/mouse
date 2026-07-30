@@ -1074,6 +1074,29 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   Verified against real node on a shared-port program: 3 workers, 12 concurrent
   requests, a worker killed mid-flight, then `cluster.disconnect()` — **25 rounds,
   byte-identical every time**.
+- **The options detector, second batch — and an AbortSignal that never aborted.** Applied
+  to `child_process`, `http` and `readline`. Most already worked (`http`'s `timeout`,
+  `request.setTimeout`, readline's `crlfDelay`), and two did not:
+  **`http.request({signal})` was accepted and dropped**, which is the worst shape this bug
+  can take. A caller's only way to cancel silently became a permanent wait — an
+  unabortable request, not a failed one. Now an abort (before OR during) raises `AbortError`
+  with `ABORT_ERR` and destroys the socket. Modern code aborts requests as a matter of
+  course, so this was a hang waiting to happen in anything that times out its own work.
+  **`spawnSync({encoding})` was ignored**, always returning Buffers where node returns
+  strings. `cwd` now works too, by prefixing a `cd`.
+  And a deliberate refusal rather than a silent one: `input`, `timeout`, `maxBuffer` and
+  `killSignal` CANNOT work on the msh path, because a synchronous run reports what a
+  command produced rather than handing back a live process to feed or kill. They now throw
+  and name that, pointing at `spawn()`. An ignored `input` is especially bad — the child
+  waits for stdin that never arrives, so the program waits for output that never comes.
+  **How the probe found it is the lesson.** The first version had no fallback timer on the
+  abort case, so an ignored `signal` did not report a wrong answer — it hung the sweep for
+  ten minutes. The finding arrived in the least useful possible form. Every async check now
+  races a fallback that reports "NO EFFECT (fell through)", and each check is isolated so
+  one that throws cannot hide the rest: an earlier run died on the first divergence and
+  masked eight more.
+  Re-ran everything downstream, including msh's own 25-script corpus against `/bin/sh`
+  (spawnSync goes through the shell, so a change there could have moved it). 88 fixtures.
 - **A fourth detector, for options ACCEPTED AND IGNORED — and it found the worst bugs
   of the session.** The previous sweep's lesson (a dropped options argument is a silent
   no-op) generalises into a detector: exercise each option whose effect is OBSERVABLE and

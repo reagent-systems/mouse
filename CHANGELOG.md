@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `http.request`/`get` honour an `AbortSignal`. It was accepted and ignored,
+  so a caller's only way to cancel became a permanent wait — an unabortable request.
+- Node layer: `spawnSync` honours `encoding` and `cwd`; `input`, `timeout`, `maxBuffer`
+  and `killSignal` now throw with a reason instead of being silently ignored, since a
+  synchronous run reports what a command produced rather than a live process.
 - Node layer: seven silently-ignored options now work. Two were destructive:
   `fs.writeFileSync(..., {flag:'a'})` truncated the file instead of appending, and
   `fs.rmSync(dir)` without `recursive` deleted the whole tree where node refuses. Also

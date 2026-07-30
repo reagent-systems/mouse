@@ -6262,11 +6262,32 @@ final class NodeEngine: @unchecked Sendable {
             return { on: function(){ return this; }, stdout: { on: function(){ return this; } }, stderr: { on: function(){ return this; } } };
           },
           spawnSync: function(command, argv, options) {
+            options = options || {};
+            // These cannot be honoured on the msh path — there is no live child to feed, kill or
+            // measure, because a synchronous run reports what the command PRODUCED. Saying so
+            // beats accepting them: an ignored `input` leaves a program waiting for output that
+            // depends on stdin it thinks it sent, and an ignored `timeout` never fires.
+            for (const unsupported of ['input', 'timeout', 'maxBuffer', 'killSignal']) {
+              if (options[unsupported] !== undefined) {
+                throw Object.assign(
+                  new Error("child_process.spawnSync's `" + unsupported + "` option is not " +
+                            'available: a synchronous run goes through msh, which reports what a ' +
+                            'command produced rather than handing back a live process. Use spawn() ' +
+                            'for a child you need to feed, time out or kill'),
+                  { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+              }
+            }
+            const prefix = options.cwd ? 'cd ' + shellQuote(String(options.cwd)) + ' && ' : '';
             const parts = [command].concat((argv || []).map(shellQuote));
-            const r = runShell(parts.join(' '));
+            const r = runShell(prefix + parts.join(' '));
+            // `encoding` decides strings versus Buffers, and 'buffer' explicitly means Buffers.
+            const encoding = options.encoding;
+            const shape = encoding && encoding !== 'buffer'
+              ? function(text){ return Buffer.from(text).toString(encoding); }
+              : function(text){ return Buffer.from(text); };
             return { status: r.status, signal: null, pid: 1,
-                     stdout: Buffer.from(r.stdout), stderr: Buffer.from(r.stderr),
-                     output: [null, Buffer.from(r.stdout), Buffer.from(r.stderr)] };
+                     stdout: shape(r.stdout), stderr: shape(r.stderr),
+                     output: [null, shape(r.stdout), shape(r.stderr)] };
           },
           execFileSync: function(command, argv, options) {
             const result = child_process.spawnSync(command, argv, options);
@@ -7437,6 +7458,24 @@ final class NodeEngine: @unchecked Sendable {
             this.socket.connect(this.port, this._host);
           }
           if (options.timeout) this.setTimeout(options.timeout);
+          // An AbortSignal was accepted and dropped, which is the worst possible shape for this
+          // particular option: a caller that relies on it to cancel gets a request that can
+          // never be cancelled, so the abort silently becomes a permanent wait.
+          if (options.signal) {
+            const signal = options.signal;
+            const onAbort = () => {
+              if (self._responded || self.destroyed) return;
+              const error = new Error('The operation was aborted');
+              error.name = 'AbortError';
+              error.code = 'ABORT_ERR';
+              self.emit('error', error);
+              try { self.socket && self.socket.destroy(); } catch (ignored) {}
+              self.destroy();
+            };
+            if (signal.aborted) process.nextTick(onAbort);
+            else if (typeof signal.addEventListener === 'function') signal.addEventListener('abort', onAbort);
+            else if (typeof signal.once === 'function') signal.once('abort', onAbort);
+          }
         }
         ClientRequest.prototype = Object.create(Writable.prototype);
         ClientRequest.prototype.constructor = ClientRequest;
