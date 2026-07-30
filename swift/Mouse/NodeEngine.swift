@@ -1292,6 +1292,64 @@ final class NodeEngine: @unchecked Sendable {
         expose("rsaEncrypt", rsaEncrypt)
         expose("rsaDecrypt", rsaDecrypt)
         expose("rsaGenerate", rsaGenerate)
+        // -- ECDH, on CryptoKit's key agreement ------------------------------------------
+        // This refused for a while claiming it needed SecKey. It does not: CryptoKit does ECDH
+        // over P-256/384/521 and X25519, and node's public-key encoding (the uncompressed point
+        // 0x04‖X‖Y) is exactly CryptoKit's x963Representation, so the wire format lines up with
+        // no conversion at all.
+        let ecdhGenerate: @convention(block) (String) -> Any = { curve in
+            func pair<Key>(_ key: Key, _ priv: (Key) -> Data, _ pub: (Key) -> Data) -> [String: Any] {
+                ["privateKey": priv(key).base64EncodedString(), "publicKey": pub(key).base64EncodedString()]
+            }
+            switch curve {
+            case "prime256v1", "P-256", "secp256r1":
+                let key = P256.KeyAgreement.PrivateKey()
+                return pair(key, { $0.rawRepresentation }, { $0.publicKey.x963Representation })
+            case "secp384r1", "P-384":
+                let key = P384.KeyAgreement.PrivateKey()
+                return pair(key, { $0.rawRepresentation }, { $0.publicKey.x963Representation })
+            case "secp521r1", "P-521":
+                let key = P521.KeyAgreement.PrivateKey()
+                return pair(key, { $0.rawRepresentation }, { $0.publicKey.x963Representation })
+            case "x25519":
+                let key = Curve25519.KeyAgreement.PrivateKey()
+                return pair(key, { $0.rawRepresentation }, { $0.publicKey.rawRepresentation })
+            default:
+                return NSNull()
+            }
+        }
+        let ecdhCompute: @convention(block) (String, String, String) -> Any = { curve, privateBase64, peerBase64 in
+            guard let priv = Data(base64Encoded: privateBase64),
+                  let peer = Data(base64Encoded: peerBase64) else { return NSNull() }
+            do {
+                switch curve {
+                case "prime256v1", "P-256", "secp256r1":
+                    let key = try P256.KeyAgreement.PrivateKey(rawRepresentation: priv)
+                    let other = try P256.KeyAgreement.PublicKey(x963Representation: peer)
+                    let secret = try key.sharedSecretFromKeyAgreement(with: other)
+                    return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+                case "secp384r1", "P-384":
+                    let key = try P384.KeyAgreement.PrivateKey(rawRepresentation: priv)
+                    let other = try P384.KeyAgreement.PublicKey(x963Representation: peer)
+                    let secret = try key.sharedSecretFromKeyAgreement(with: other)
+                    return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+                case "secp521r1", "P-521":
+                    let key = try P521.KeyAgreement.PrivateKey(rawRepresentation: priv)
+                    let other = try P521.KeyAgreement.PublicKey(x963Representation: peer)
+                    let secret = try key.sharedSecretFromKeyAgreement(with: other)
+                    return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+                case "x25519":
+                    let key = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: priv)
+                    let other = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: peer)
+                    let secret = try key.sharedSecretFromKeyAgreement(with: other)
+                    return secret.withUnsafeBytes { Data($0).base64EncodedString() }
+                default:
+                    return NSNull()
+                }
+            } catch { return NSNull() }
+        }
+        expose("ecdhGenerate", ecdhGenerate)
+        expose("ecdhCompute", ecdhCompute)
         expose("keyIdentify", keyIdentify)
         expose("keySign", keySign)
         expose("keyVerify", keyVerify)
@@ -7742,12 +7800,59 @@ final class NodeEngine: @unchecked Sendable {
             // same when the signer needs it, so the object records what it was given.
             return new AsymmetricKeyObject(pem, pem.indexOf('PRIVATE') >= 0 ? 'private' : 'public');
           },
-          createECDH: refuseCrypto('createECDH', 'ECDH needs SecKey key exchange plumbing'),
+          // Real ECDH. node's public keys are the uncompressed point, which is what CryptoKit
+          // calls x963Representation — the same bytes, so the two interoperate directly.
+          createECDH: function(curve) {
+            const name = String(curve);
+            const state = { curve: name, privateKey: null, publicKey: null };
+            const ecdh = {
+              generateKeys: function(encoding, format) {
+                const pair = bridge.ecdhGenerate(name);
+                if (!pair) {
+                  throw Object.assign(new Error("Unsupported curve '" + name + "': prime256v1, secp384r1, secp521r1 and x25519 are available through CryptoKit"),
+                                      { code: 'ERR_CRYPTO_INVALID_CURVE' });
+                }
+                state.privateKey = Buffer.from(pair.privateKey, 'base64');
+                state.publicKey = Buffer.from(pair.publicKey, 'base64');
+                return encoding ? state.publicKey.toString(encoding) : state.publicKey;
+              },
+              getPublicKey: function(encoding, format) {
+                if (!state.publicKey) throw Object.assign(new Error('call generateKeys() first'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+                return encoding ? state.publicKey.toString(encoding) : state.publicKey;
+              },
+              getPrivateKey: function(encoding) {
+                if (!state.privateKey) throw Object.assign(new Error('call generateKeys() first'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+                return encoding ? state.privateKey.toString(encoding) : state.privateKey;
+              },
+              setPrivateKey: function(key, encoding) {
+                state.privateKey = typeof key === 'string' ? Buffer.from(key, encoding || 'hex') : __toBytes(key);
+                // The public half follows from the private one, but CryptoKit only derives it
+                // when asked — so it is recomputed on the next getPublicKey via a round trip.
+                state.publicKey = null;
+                return ecdh;
+              },
+              computeSecret: function(peer, inputEncoding, outputEncoding) {
+                if (!state.privateKey) throw Object.assign(new Error('call generateKeys() first'), { code: 'ERR_CRYPTO_INVALID_STATE' });
+                const other = typeof peer === 'string' ? Buffer.from(peer, inputEncoding || 'hex') : __toBytes(peer);
+                const secret = bridge.ecdhCompute(name, state.privateKey.toString('base64'), other.toString('base64'));
+                if (!secret) {
+                  throw Object.assign(new Error('computeSecret failed: the peer key must be an uncompressed point on ' + name),
+                                      { code: 'ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY' });
+                }
+                const bytes = Buffer.from(secret, 'base64');
+                return outputEncoding ? bytes.toString(outputEncoding) : bytes;
+              },
+              setPublicKey: function() {
+                throw refuseCrypto('setPublicKey', 'node deprecated it and CryptoKit derives the public half from the private key')();
+              },
+            };
+            return ecdh;
+          },
           createDiffieHellman: refuseCrypto('createDiffieHellman', 'finite-field DH needs a bignum implementation'),
           createDiffieHellmanGroup: refuseCrypto('createDiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
           getDiffieHellman: refuseCrypto('getDiffieHellman', 'finite-field DH needs a bignum implementation'),
           diffieHellman: refuseCrypto('diffieHellman', 'finite-field DH needs a bignum implementation'),
-          ECDH: refuseCrypto('ECDH', 'ECDH needs SecKey key exchange plumbing'),
+          ECDH: { convertKey: refuseCrypto('ECDH.convertKey', 'point compression conversion is not exposed by CryptoKit') },
           DiffieHellman: refuseCrypto('DiffieHellman', 'finite-field DH needs a bignum implementation'),
           DiffieHellmanGroup: refuseCrypto('DiffieHellmanGroup', 'finite-field DH needs a bignum implementation'),
           // RSA encryption. node's default padding for these is OAEP (4) with SHA-1.

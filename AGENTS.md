@@ -176,6 +176,12 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+**A refusal must be TRUE, and re-checked when the surrounding capabilities grow.**
+`createECDH` refused for weeks claiming it needed SecKey; CryptoKit had done ECDH
+all along, and node's uncompressed-point encoding IS `x963Representation`, so
+nothing needed converting. A wrong refusal is worse than a gap — it stops anyone
+looking again. Verify a key agreement cross-engine: both sides must derive the
+SAME secret from each other's public key.
 `worker_threads` rides the same child-engine machinery as `fork`: a Worker is a
 second engine plus the message channel. Shared memory is the real limit — two
 JSContexts share none — so `SharedArrayBuffer` across threads,

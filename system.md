@@ -107,6 +107,7 @@ so a TUI navigates and edits.
 | **Phase D — esbuild-wasm runs** | **A whole compiler in WebAssembly transforms AND bundles on the engine, byte-identical to real node.** The last two pieces were one shared byte coercion (ten places stringified a plain `Uint8Array` instead of taking its bytes) and a REAL `child.unref()` — esbuild keeps its service alive with a ping loop and unrefs the child, so a no-op unref meant `transform()` resolved and then nothing ever exited |
 | **Phase G — `fork` has a real channel** | `process.send`/`child.send` with `message` events both ways, an open channel that holds the child's loop open (as node's does), `disconnect` that gives the handle back, and `process.send` left UNDEFINED without a channel — which is how every worker library asks whether it was forked. Plus `node -e` in a child. Verified against real node on a two-way job exchange, including that a plain `spawn` correctly has NO channel |
 | **Phase G — `worker_threads`** | `Worker`, `workerData`, `parentPort`, `postMessage` both ways, `terminate`, worker stdio, and an in-thread `MessageChannel` — on the child-engine machinery, matching node's transcript exactly. What cannot work is SHARED MEMORY between two JSContexts, so `receiveMessageOnPort`, the environment-data pair and `BroadcastChannel` refuse BY NAME rather than deadlocking an Atomics wait that never wakes |
+| **Phase G — real ECDH** | `createECDH` for P-256/384/521 and X25519 on CryptoKit's key agreement. It had been refusing with "needs SecKey", which was simply wrong — and node's public-key encoding (the uncompressed point `0x04‖X‖Y`) IS CryptoKit's `x963Representation`, so the wire format needed no conversion at all. Verified the only way a key agreement can be: **both engines derive the same shared secret** from each other's public keys, on every curve |
 
 ### Verification performed
 
@@ -1044,6 +1045,19 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   to a parent that wanted bytes.
   Verified against real node with a child that reads the way Go does — `fs.read(0)`
   with a callback, not events: identical bytes, counts and EOF.
+- **ECDH was never blocked; the refusal was wrong.** `createECDH` had been throwing
+  "ECDH needs SecKey key exchange plumbing" — but CryptoKit does ECDH over
+  P-256/384/521 and X25519, and node's public-key encoding is the uncompressed
+  point `0x04‖X‖Y`, which is exactly what CryptoKit calls `x963Representation`. The
+  formats line up byte for byte, so there was nothing to convert and nothing to
+  plumb. Verified the only way a key agreement can be: ours generates a pair, real
+  node generates a pair, each computes the secret from the other's public key, and
+  **the secrets are identical** on every curve.
+  Worth noting what the fixture caught about NODE: `createECDH('x25519')` does not
+  exist there — X25519 is reached through `crypto.diffieHellman` with key objects —
+  so the fixture tests the overlap while our implementation accepts x25519 as a
+  superset. An honest refusal is valuable; an honest refusal that is FACTUALLY
+  WRONG is worse than a gap, because it stops anyone looking again.
 - **`worker_threads` works, and it was the same machinery again.** I had written
   this off twice as "needs a second thread of JavaScript" — which is precisely what
   a child engine plus a message channel already is. `Worker`, `workerData`,
@@ -1762,7 +1776,7 @@ D  web toolchain          tsc, bundling, Preview container     MOSTLY DONE — t
                           (see §0); the Preview container remains
 E  wasm runtime           WASI, $PATH, real processes          the system substrate
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
-G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, live node children + child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch, webpack, JWTs; gaps: TLS server, DSA/DH, shared memory between threads, WebView JIT)
+G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, live node children + child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch, webpack, JWTs; gaps: TLS server, finite-field DH, shared memory between threads, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift
 I  MouseSign              Mach-O + CMS, user's own cert        xcode.md Phase 1–3
 J  clang-wasm             "Mouse compiles C"
