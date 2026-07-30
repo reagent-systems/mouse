@@ -505,6 +505,20 @@ final class NodeEngine: @unchecked Sendable {
         expose("stderr", stderrWrite)
         expose("exit", exitBlock)
 
+        // -- monotonic clock --
+        // `process.hrtime`, `hrtime.bigint` and `performance.now` all read a MONOTONIC clock:
+        // one that never runs backwards when the wall clock is corrected, with sub-millisecond
+        // resolution. `Date.now()` is neither, so a benchmark spanning an NTP step could report
+        // a negative duration. DispatchTime is mach_absolute_time underneath — the same source
+        // node uses on Darwin.
+        //
+        // Nanoseconds outgrow Double's exact-integer range, so the value crosses as a decimal
+        // string and the JS side rebuilds an exact BigInt from it.
+        let monotonicNanos: @convention(block) () -> String = {
+            String(DispatchTime.now().uptimeNanoseconds)
+        }
+        expose("monotonicNanos", monotonicNanos)
+
         // -- filesystem (workspace-virtual paths) --
         let readFile: @convention(block) (String) -> Any = { [weak self] path in
             guard let self, let data = try? Data(contentsOf: self.realURL(path)) else { return NSNull() }
@@ -1992,6 +2006,22 @@ final class NodeEngine: @unchecked Sendable {
         if request.hasPrefix("node:") { request = String(request.dropFirst(5)) }
         if Self.coreModules.contains(request) { return .core(request) }
 
+        // A `file://` URL is a legal specifier for dynamic import, and it is what a tool hands
+        // us when cache-busting an ESM config (eslint appends the file's mtime as a query).
+        // Neither query nor fragment is part of the filename, and the path is percent-encoded.
+        if request.lowercased().hasPrefix("file://") {
+            var rest = String(request.dropFirst("file://".count))
+            if let cut = rest.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+                rest = String(rest[rest.startIndex..<cut])
+            }
+            if !rest.hasPrefix("/") {   // an authority, which for a file URL carries no path
+                rest = rest.firstIndex(of: "/").map { String(rest[$0...]) } ?? "/"
+            }
+            request = rest.removingPercentEncoding ?? rest
+            if let found = loadAsFileOrDirectory(normalize(request)) { return found }
+            return .notFound("Cannot find module '\(rawRequest)'")
+        }
+
         // "#name": the package.json "imports" field of the requiring package.
         if request.hasPrefix("#") {
             var dir = fromDir
@@ -2142,6 +2172,12 @@ final class NodeEngine: @unchecked Sendable {
     }
 
     private func requireModule(_ request: String, fromDir: String) -> Any {
+        // A query on a file: specifier is a cache-bust, not part of the filename — its whole
+        // purpose is to force a fresh evaluation, so the cached copy has to go first.
+        if request.lowercased().hasPrefix("file://"), request.contains("?"),
+           case .file(let id) = resolveModule(request, fromDir: fromDir) {
+            moduleCache.removeValue(forKey: id)
+        }
         switch resolveModule(request, fromDir: fromDir) {
         case .core(let name):
             if let cached = moduleCache["core:" + name] { return cached }
@@ -3014,9 +3050,14 @@ final class NodeEngine: @unchecked Sendable {
           this.writable = inner.writable;
         }
       };
+      // timeOrigin is a WALL-clock instant by spec, but `now()` is an offset on the monotonic
+      // clock — mixing the two sources is the point, not an oversight.
+      globalThis.__perfStart = BigInt(bridge.monotonicNanos());
       globalThis.performance = {
         timeOrigin: Date.now(),
-        now: function(){ return Date.now() - globalThis.performance.timeOrigin; },
+        now: function(){
+          return Number(BigInt(bridge.monotonicNanos()) - globalThis.__perfStart) / 1e6;
+        },
         mark: function(){}, measure: function(){},
       };
       // The Web Crypto global (distinct from the `crypto` module): nanoid, uuid, and browser-
@@ -3317,12 +3358,16 @@ final class NodeEngine: @unchecked Sendable {
             for (const name of Object.keys(init)) this._pairs.push([name, String(init[name])]);
           }
         }
-        append(name, value) { this._pairs.push([String(name), String(value)]); }
+        // A URL's searchParams is LIVE: mutating it rewrites the URL's search and href. The hook
+        // is how the owning URL hears about it — eslint cache-busts an ESM config import by
+        // appending an mtime and then reading `href`, which a detached copy would never show.
+        _changed() { if (this._owner) this._owner(); }
+        append(name, value) { this._pairs.push([String(name), String(value)]); this._changed(); }
         set(name, value) { this.delete(name); this.append(name, value); }
         get(name) { const found = this._pairs.find(p => p[0] === name); return found ? found[1] : null; }
         getAll(name) { return this._pairs.filter(p => p[0] === name).map(p => p[1]); }
         has(name) { return this._pairs.some(p => p[0] === name); }
-        delete(name) { this._pairs = this._pairs.filter(p => p[0] !== name); }
+        delete(name) { this._pairs = this._pairs.filter(p => p[0] !== name); this._changed(); }
         forEach(fn, thisArg) { for (const [name, value] of this._pairs.slice()) fn.call(thisArg, value, name, this); }
         keys() { return this._pairs.map(p => p[0])[Symbol.iterator](); }
         values() { return this._pairs.map(p => p[1])[Symbol.iterator](); }
@@ -3332,7 +3377,7 @@ final class NodeEngine: @unchecked Sendable {
         toString() {
           return this._pairs.map(p => encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1])).join('&');
         }
-        sort() { this._pairs.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0); }
+        sort() { this._pairs.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0); this._changed(); }
       };
       if (typeof globalThis.URL === 'undefined') {
         // The slice Emscripten and fetch-y libraries touch: parse, href, protocol, pathname.
@@ -3393,13 +3438,40 @@ final class NodeEngine: @unchecked Sendable {
             this.host = this.hostname + (this.port ? ':' + this.port : '');
             // A hierarchical URL always has a path; node reports '/' where the text has none.
             const hierarchical = text.indexOf('//') === this.protocol.length;
-            this.pathname = match[5] || (hierarchical ? '/' : '');
+            // A path is percent-encoded text, not raw text. Existing '%' escapes are left alone
+            // (re-encoding them would corrupt any URL that arrived already encoded); everything
+            // in the path percent-encode set, plus controls and non-ASCII, gets encoded.
+            const encodePath = function(text) {
+              let out = '';
+              for (const ch of text) {
+                const code = ch.codePointAt(0);
+                if (code <= 0x20 || code === 0x7f || code > 0x7e ||
+                    ch === '"' || ch === '<' || ch === '>' || ch === '`' || ch === '{' || ch === '}') {
+                  // A lone surrogate has no UTF-8 form; pass it through rather than throwing.
+                  try { out += encodeURIComponent(ch); } catch (error) { out += ch; }
+                } else out += ch;
+              }
+              return out;
+            };
+            this.pathname = encodePath(match[5] || (hierarchical ? '/' : ''));
             this.search = match[6] || '';
             this.hash = match[7] || '';
-            this.origin = this.protocol + (this.hostname ? '//' + this.host : '');
+            // Without a host there is no tuple origin, and node reports the string 'null' —
+            // for file: URLs and for opaque schemes like mailto: alike.
+            this.origin = this.hostname ? this.protocol + '//' + this.host : 'null';
             this._authority = credentials ? credentials + '@' + this.host : this.host;
             this.searchParams = new URLSearchParams(this.search);
-            this.href = this.protocol + (this.hostname ? '//' + this._authority : '') +
+            // Re-derive search and href whenever the params are mutated.
+            const url = this;
+            this.searchParams._owner = function() {
+              const query = url.searchParams.toString();
+              url.search = query ? '?' + query : '';
+              url.href = url.protocol + (hierarchical ? '//' + url._authority : '') +
+                         url.pathname + url.search + url.hash;
+            };
+            // The '//' belongs to a hierarchical URL whether or not it has a host: 'file:///a'
+            // keeps its empty authority. Keying this off `hostname` produced 'file:/a'.
+            this.href = this.protocol + (hierarchical ? '//' + this._authority : '') +
                         this.pathname + this.search + this.hash;
           }
           toString() { return this.href; }
@@ -4103,12 +4175,23 @@ final class NodeEngine: @unchecked Sendable {
           // preserves node's tick-before-promise ordering.
           if (tickQueue.length === 1) Promise.resolve().then(globalThis.__drainTicks);
         },
-        hrtime: function(prev){
-          const now = Date.now();
-          const seconds = Math.floor(now / 1000), nanos = (now % 1000) * 1e6;
-          if (prev) return [seconds - prev[0], nanos - prev[1]];
-          return [seconds, nanos];
-        },
+        // hrtime is a function that also CARRIES a `bigint` property. eslint destructures
+        // `process.hrtime.bigint` and calls it unbound, so neither form may depend on `this`.
+        hrtime: (function(){
+          function nanos(){ return BigInt(bridge.monotonicNanos()); }
+          const hrtime = function(prev){
+            const total = nanos();
+            let seconds = Number(total / 1000000000n), rest = Number(total % 1000000000n);
+            if (prev) {
+              seconds -= prev[0]; rest -= prev[1];
+              // Borrow, so a smaller nanosecond field never surfaces as a negative component.
+              if (rest < 0) { rest += 1000000000; seconds -= 1; }
+            }
+            return [seconds, rest];
+          };
+          hrtime.bigint = nanos;
+          return hrtime;
+        })(),
         memoryUsage: function(){ return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0 }; },
         // Found by auditing process against real node's keys. `uptime` is the one packages
         // actually call (loggers, benchmarks, health endpoints); the rest are here so a
@@ -6813,8 +6896,45 @@ final class NodeEngine: @unchecked Sendable {
             return { protocol: match[1] || null, hostname: match[2] || null, port: match[4] || null,
                      pathname: match[5] || '/', search: match[6] || null, href: text };
           },
-          fileURLToPath: function(url) { return String(url).replace('file://', ''); },
-          pathToFileURL: function(p) { return { href: 'file://' + p }; },
+          // These two were stubs — string surgery that happened to round-trip plain ASCII paths
+          // and lost on everything else. A path is not a URL: '#' and '?' start a fragment and a
+          // query, '%' starts an escape, and a space is illegal. eslint reaches for the real
+          // contract, appending an mtime to `searchParams` to cache-bust an ESM config import,
+          // which needs an actual URL object rather than a bare { href }.
+          fileURLToPath: function(url) {
+            const href = typeof url === 'string' ? url : String((url && url.href) || url);
+            if (!/^file:\/\//i.test(href)) {
+              const error = new TypeError('The URL must be of scheme file');
+              error.code = 'ERR_INVALID_URL_SCHEME';
+              throw error;
+            }
+            // Query and fragment are URL structure, never part of the path.
+            let rest = href.slice('file://'.length).replace(/[?#][\s\S]*$/, '');
+            // An authority is allowed only when it is empty or localhost.
+            if (rest[0] !== '/') {
+              const slash = rest.indexOf('/');
+              const host = slash === -1 ? rest : rest.slice(0, slash);
+              if (host.toLowerCase() !== 'localhost') {
+                const error = new TypeError('File URL host must be "localhost" or empty');
+                error.code = 'ERR_INVALID_FILE_URL_HOST';
+                throw error;
+              }
+              rest = slash === -1 ? '/' : rest.slice(slash);
+            }
+            try { return decodeURIComponent(rest); } catch (error) { return rest; }
+          },
+          pathToFileURL: function(p) {
+            const path = String(p);
+            // Encode what the URL parser would otherwise read as structure. '%' goes first, so
+            // the escapes introduced below are not themselves re-encoded. The parser handles
+            // the remainder (a space becomes %20).
+            // Brackets are encoded here rather than by the parser: node encodes them when a path
+            // becomes a file URL, but leaves them alone in a URL parsed from text.
+            const encoded = path.replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F')
+                                .replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/\t/g, '%09')
+                                .replace(/\[/g, '%5B').replace(/\]/g, '%5D');
+            return new URL('file://' + encoded);
+          },
           URLSearchParams: globalThis.URLSearchParams,
           // The legacy url API. Deprecated in node, still imported by older packages.
           Url: function Url() {},

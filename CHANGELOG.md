@@ -8,6 +8,22 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **eslint 9 runs**, reporting the same findings on the same files as real node.
+  A real-package proof exercises capabilities in combination, and this one found four defects
+  no per-API sweep had.
+- Node layer: `process.hrtime` reads a MONOTONIC clock. It was built on `Date.now()` — wall
+  clock, millisecond resolution, and free to run backwards across a clock correction, so a
+  duration could come out negative. It now carries the `bigint` property too, as an own
+  property callable unbound. `performance.now()` moved to the same clock and is fractional.
+- Node layer: `url.pathToFileURL`/`fileURLToPath` are real rather than string surgery — paths
+  are percent-encoded and decoded, non-file schemes and foreign hosts are rejected with node's
+  error codes, and 38 vectors are byte-identical to node's.
+- Node layer: three `URL` defects. An empty authority lost its slashes (`file:///a` became
+  `file:/a`), the pathname was never percent-encoded, and `origin` reported the scheme where
+  node reports `null`. `searchParams` is now LIVE — mutating it rewrites `search` and `href`,
+  where before it was a detached copy and the change vanished.
+- Node layer: `import()` accepts a `file://` URL specifier, and a query on one busts the
+  module cache instead of silently returning the stale module — which is what the query is for.
 - Node layer: `crypto.privateEncrypt`/`publicDecrypt` work — the legacy direction where the
   private key seals and the public key opens. SecKey's RAW algorithms do it; only the PKCS#1
   type 1 padding was missing. Verified cross-engine against real node in both directions.

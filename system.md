@@ -112,6 +112,7 @@ so a TUI navigates and edits.
 | **Phase G — UDP** | `dgram` is real: a datagram table in the socket layer (`SOCK_DGRAM`, `recvfrom`, `sendto`), and node's socket API on top — bind with an assigned port, `message` with a full `rinfo`, implicit bind on first send, broadcast. Datagrams flow both ways with real node, sender addresses intact. Multicast still refuses (it needs `IP_ADD_MEMBERSHIP` on the fd). Written because last boundary's audit called this "reachable, just not built" — so building it was the follow-through |
 | **Phase G — unix domain sockets** | `net.connect({ path })` and `server.listen(path)` work on a real socket FILE, in both directions with real node — the same stream machinery with a different address family, plus the two things a socket file adds: a stale file removed before bind, and the file unlinked when the listener closes. A path longer than `sockaddr_un` fails loudly rather than being truncated into a different socket |
 | **Phase G — multicast** | `addMembership`/`dropMembership` with `setMulticastTTL`, `setMulticastLoopback` and `setMulticastInterface` — the `IP_ADD_MEMBERSHIP` the refusal named. Both engines join a group on loopback, send to it and receive their own packet, identically. That empties the audit's "reachable but unbuilt" list: UDP, unix sockets and multicast were all on it |
+| **Phase G — eslint lints, and the clock is real** | **eslint 9 runs on the engine and reports the same findings on the same files as real node.** A real-package proof is different evidence from a surface sweep — it exercises capabilities in COMBINATION, and it found four defects no per-API sweep had. `process.hrtime` was built on `Date.now()`: wall-clock, millisecond-resolution, and free to run BACKWARDS across an NTP correction — so a diff could come out negative. It now reads a monotonic clock (`DispatchTime`, mach_absolute_time underneath, the same source node uses on Darwin) and carries the `bigint` property eslint destructures. `pathToFileURL`/`fileURLToPath` were stubs doing string surgery that round-tripped plain ASCII and lost on everything else; and our `URL` dropped the `//` from an empty authority (`file:///a` → `file:/a`), never percent-encoded the path, reported `file:` where node reports `null` for an opaque origin, and handed out a DETACHED `searchParams` — so eslint's mtime cache-bust vanished silently. 38 URL vectors are now byte-identical, and a query on a `file:` specifier busts the module cache as it is meant to |
 
 ### Verification performed
 
@@ -1200,7 +1201,8 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   wrong; only running the sweep again caught it. Worth remembering next time a behaviour looks
   like it lives in one place.
   autoDestroy changes stream LIFETIMES everywhere, so the full battery ran: 97 fixtures, http,
-  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch, chokidar, spawn.
+  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch, chokidar, spawn,
+  eslint.
 - **The rest of the stream surface — `unpipe` was a TypeError.** What the instance-shape
   sweep left. `unpipe` is the one that mattered: real code stops a pipe MID-FLIGHT — proxying,
   extracting a tar, aborting a download — and calling it threw. `pipe` now remembers its
@@ -1216,7 +1218,7 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   chunk too — which matters precisely because it is the number a caller compares AGAINST
   `writableHighWaterMark`, so the two disagreeing is worse than either being wrong alone.
   Every stream-dependent harness re-ran, since `pipe` itself changed: 96 fixtures, http,
-  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg and tsc --watch.
+  express, ws, webpack (byte-identical), esbuild-wasm, sse, pkg, tsc --watch and eslint.
 - **An audit of the VERIFICATION ITSELF, after two harness bugs in two boundaries.** The
   rule this session keeps proving — when the same defect appears twice, sweep the class —
   applied to the test infrastructure rather than the engine. The console boundary was
@@ -1297,7 +1299,8 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
      PURPOSE is to hold a split character. It now holds an incomplete UTF-8 tail, an odd
      UTF-16 byte, a lone high surrogate, and a partial base64 group.
   Buffer encodings are load-bearing for everything, so every harness re-ran: 93 fixtures,
-  pkg, webpack (byte-identical), esbuild-wasm, express, ws, http, jsonwebtoken and tsc --watch.
+  pkg, webpack (byte-identical), esbuild-wasm, express, ws, http, jsonwebtoken, tsc --watch
+  and eslint.
 - **The event-sequence audit: two events that never fired.** Real code WAITS on events, so
   one that never fires is a hang and one that fires twice is a double-free — and ordering
   matters as much as presence. Nine lifecycles recorded as ordered lists and diffed against
