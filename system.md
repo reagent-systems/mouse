@@ -574,6 +574,25 @@ All against real tooling, per [AGENTS.md](AGENTS.md):
   correctly on their own and under `stream.pipeline` — proven in the same
   fixture), so the gap is in readable-stream's pipe interplay, not our
   emitters. 59 node fixtures, full battery green
+- **The ES5-shape audit: every stream class was un-inheritable.** Acting on
+  the pattern from the previous three fixes, the core objects were audited
+  against the legacy idiom directly — and `Readable`, `Writable`, `Duplex`,
+  `Transform`, `Stream` and `StringDecoder` ALL failed
+  `util.inherits(Sub, Base); Base.call(this, opts)`, the single most common
+  way npm packages subclass streams (readable-stream, under a large share
+  of the registry, does exactly this). Every one is now a constructor
+  FUNCTION with prototype methods and `Object.create` chains: `new` works,
+  `class extends` still works, and the ES5 `.call` path works. Verified by
+  a 10-case shape audit and fixture `stream-es5-inherits` (all six bases
+  ES5-callable, an inherited Writable collecting real data end to end, and
+  a `class extends Transform` still transforming). The conversion was done
+  with `node --check` on the extracted bootstrap in the loop, which caught
+  two transformation slips (single-line methods, missing object commas)
+  before they ever reached a test. Also, real node disagreed with the first
+  draft of the fixture and was RIGHT: node's `StringDecoder` validates its
+  encoding and throws `ERR_UNKNOWN_ENCODING`, ours accepted anything —
+  now fixed and asserted. All 60 node fixtures, PHASE F, TTY, e2e, the
+  package batches, and the Swift 6 build green
 - **A real claude-code ink frame renders ALIGNED on the phase-T screen —
   ONLCR.** Captured 1748 bytes of claude-code 1.0.128's config-recovery
   UI (a bordered "Configuration Error / Choose an option" dialog) from the

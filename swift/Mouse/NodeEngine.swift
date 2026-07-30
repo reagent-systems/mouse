@@ -2831,11 +2831,20 @@ final class NodeEngine: @unchecked Sendable {
       };
 
       coreFactories.string_decoder = function() {
-        class StringDecoder {
-          constructor(encoding) { this.encoding = encoding || 'utf8'; }
-          write(buffer) { return buffer.toString(this.encoding); }
-          end(buffer) { return buffer ? buffer.toString(this.encoding) : ''; }
+        // node validates the encoding name and throws ERR_UNKNOWN_ENCODING otherwise.
+        function StringDecoder(encoding) {
+          const name = encoding === undefined || encoding === null ? 'utf8' : String(encoding).toLowerCase();
+          const known = ['utf8', 'utf-8', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le', 'latin1',
+                         'binary', 'base64', 'base64url', 'hex', 'ascii'];
+          if (!known.includes(name)) {
+            const error = new TypeError('Unknown encoding: ' + encoding);
+            error.code = 'ERR_UNKNOWN_ENCODING';
+            throw error;
+          }
+          this.encoding = name === 'utf-8' ? 'utf8' : name;
         }
+        StringDecoder.prototype.write = function(buffer) { return buffer.toString(this.encoding); };
+        StringDecoder.prototype.end = function(buffer) { return buffer ? buffer.toString(this.encoding) : ''; };
         return { StringDecoder };
       };
 
@@ -2843,8 +2852,10 @@ final class NodeEngine: @unchecked Sendable {
         const EventEmitter = coreRequire('events');
         // The legacy Stream base carries the classic `pipe` — packages that extend Stream
         // directly (mute-stream under inquirer) call `super.pipe`.
-        class Stream extends EventEmitter {
-          pipe(dest, options) {
+        function Stream() { EventEmitter.call(this); }
+        Stream.prototype = Object.create(EventEmitter.prototype);
+        Stream.prototype.constructor = Stream;
+        Stream.prototype.pipe = function pipe(dest, options) {
             const source = this;
             function onData(chunk) {
               if (dest.write && dest.write(chunk) === false && source.pause) source.pause();
@@ -2857,34 +2868,39 @@ final class NodeEngine: @unchecked Sendable {
             }
             if (dest.emit) dest.emit('pipe', source);
             return dest;
-          }
-        }
+        };
 
         // Real Readable semantics: an internal buffer, paused vs flowing modes, 'readable'
         // in paused mode, _read pull, async iteration, and pipe with backpressure.
-        class Readable extends Stream {
-          constructor(options) {
-            super();
-            options = options || {};
-            this._buf = [];
-            this._flowing = false;
-            this._sawEOF = false;
-            this._endEmitted = false;
-            this._draining = false;
-            this._readableEncoding = options.encoding || null;
-            this.readable = true;
-            this.destroyed = false;
-            if (options.read) this._read = options.read;
-            if (options.destroy) this._destroy = options.destroy;
-            this._objectMode = !!options.objectMode;
-          }
-          _read() {}
-          _coerce(chunk) {
+        // Constructor FUNCTIONS, not classes: the dominant legacy stream idiom in npm is
+        // `util.inherits(MyStream, Readable); Readable.call(this, opts)`, and a class
+        // constructor throws when called without `new` — the same reason EventEmitter is a
+        // function here. Methods live on the prototype so util.inherits chains find them.
+        function initReadable(self, options) {
+          options = options || {};
+          self._buf = [];
+          self._flowing = false;
+          self._sawEOF = false;
+          self._endEmitted = false;
+          self._draining = false;
+          self._readableEncoding = options.encoding || null;
+          self.readable = true;
+          self.destroyed = false;
+          if (options.read) self._read = options.read;
+          if (options.destroy) self._destroy = options.destroy;
+          self._objectMode = !!options.objectMode;
+        }
+        function Readable(options) { Stream.call(this); initReadable(this, options); }
+        Readable.prototype = Object.create(Stream.prototype);
+        Readable.prototype.constructor = Readable;
+        Object.assign(Readable.prototype, {
+          _read: function() {},
+          _coerce: function(chunk) {
             if (this._objectMode) return chunk;
             if (this._readableEncoding) return typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString(this._readableEncoding);
             return typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-          }
-          push(chunk) {
+          },
+          push: function(chunk) {
             if (chunk === null) {
               this._sawEOF = true;
               this._maybeEnd();
@@ -2894,8 +2910,8 @@ final class NodeEngine: @unchecked Sendable {
             if (this._flowing) this._drain();
             else this.emit('readable');
             return true;
-          }
-          _drain() {
+          },
+          _drain: function() {
             if (this._draining) return;
             this._draining = true;
             process.nextTick(() => {
@@ -2904,8 +2920,8 @@ final class NodeEngine: @unchecked Sendable {
               if (this._flowing && !this._sawEOF && !this._buf.length) this._read(16384);
               this._maybeEnd();
             });
-          }
-          _maybeEnd() {
+          },
+          _maybeEnd: function() {
             if (this._sawEOF && !this._buf.length && !this._endEmitted) {
               this._endEmitted = true;
               process.nextTick(() => {
@@ -2914,42 +2930,42 @@ final class NodeEngine: @unchecked Sendable {
                 process.nextTick(() => this.emit('close'));
               });
             }
-          }
-          on(event, handler) {
-            super.on(event, handler);
+          },
+          on: function(event, handler) {
+            Stream.prototype.on.call(this, event, handler);
             if (event === 'data') this.resume();
             else if (event === 'readable' && this._buf.length) process.nextTick(() => this.emit('readable'));
             return this;
-          }
-          read(size) {
+          },
+          read: function(size) {
             if (!this._buf.length) { if (!this._sawEOF) this._read(size || 16384); if (!this._buf.length) { this._maybeEnd(); return null; } }
             if (this._objectMode) return this._buf.shift();
             let out = this._buf.map(c => typeof c === 'string' ? c : Buffer.from(c).toString()).join('');
             this._buf = [];
             this._maybeEnd();
             return this._readableEncoding ? out : Buffer.from(out);
-          }
-          resume() { if (!this._flowing) { this._flowing = true; this._drain(); } return this; }
-          pause() { this._flowing = false; return this; }
-          isPaused() { return !this._flowing; }
-          setEncoding(enc) { this._readableEncoding = enc; return this; }
-          unshift(chunk) { if (chunk !== null && chunk !== undefined) this._buf.unshift(chunk); return this; }
-          destroy(err) {
+          },
+          resume: function() { if (!this._flowing) { this._flowing = true; this._drain(); } return this; },
+          pause: function() { this._flowing = false; return this; },
+          isPaused: function() { return !this._flowing; },
+          setEncoding: function(enc) { this._readableEncoding = enc; return this; },
+          unshift: function(chunk) { if (chunk !== null && chunk !== undefined) this._buf.unshift(chunk); return this; },
+          destroy: function(err) {
             if (this.destroyed) return this;
             this.destroyed = true;
             const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => this.emit('close')); };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
-          }
-          pipe(dest, options) {
+          },
+          pipe: function(dest, options) {
             const end = !options || options.end !== false;
             this.on('data', chunk => { if (dest.write(chunk) === false && this.pause) { this.pause(); } });
             if (dest.on) dest.on('drain', () => this.resume());
             this.on('end', () => { if (end && dest.end) dest.end(); });
             if (dest.emit) dest.emit('pipe', this);
             return dest;
-          }
-          [Symbol.asyncIterator]() {
+          },
+          [Symbol.asyncIterator]: function() {
             const self = this;
             return {
               next() {
@@ -2969,8 +2985,10 @@ final class NodeEngine: @unchecked Sendable {
               return() { self.destroy(); return Promise.resolve({ value: undefined, done: true }); },
               [Symbol.asyncIterator]() { return this; },
             };
-          }
-          static from(iterable) {
+          },
+        });
+
+        Readable.from = function(iterable) {
             const readable = new Readable({ objectMode: true });
             process.nextTick(async () => {
               try {
@@ -2979,8 +2997,7 @@ final class NodeEngine: @unchecked Sendable {
               } catch (e) { readable.emit('error', e); }
             });
             return readable;
-          }
-        }
+        };
 
         // Writable init + methods live free-standing so Duplex/Transform can graft them
         // onto a Readable ancestry (JS has one prototype chain).
@@ -3056,50 +3073,58 @@ final class NodeEngine: @unchecked Sendable {
           },
         };
 
-        class Writable extends Stream {
-          constructor(options) { super(); this.destroyed = false; initWritable(this, options); }
-        }
+        function Writable(options) { Stream.call(this); this.destroyed = false; initWritable(this, options); }
+        Writable.prototype = Object.create(Stream.prototype);
+        Writable.prototype.constructor = Writable;
         Object.assign(Writable.prototype, writableMethods);
 
-        class Duplex extends Readable {
-          constructor(options) { super(options); initWritable(this, options); }
-        }
-        Object.assign(Duplex.prototype, writableMethods, {
-          destroy: writableMethods.destroy,
-        });
+        // Duplex inherits Readable's prototype and GRAFTS the writable methods on — JS gives
+        // one prototype chain, and node does the same thing.
+        function Duplex(options) { Readable.call(this, options); initWritable(this, options); }
+        Duplex.prototype = Object.create(Readable.prototype);
+        Duplex.prototype.constructor = Duplex;
+        Object.assign(Duplex.prototype, writableMethods);
 
-        class Transform extends Duplex {
-          constructor(options) {
-            options = options || {};
-            super(Object.assign({}, options, { objectMode: options.objectMode || options.readableObjectMode || options.writableObjectMode }));
-            if (options.transform) this._transform = options.transform;
-            if (options.flush) this._flush = options.flush;
-          }
-          _transform(chunk, encoding, callback) { callback(null, chunk); }
-          _write(chunk, encoding, callback) {
-            this._transform(chunk, encoding, (err, out) => {
+        function Transform(options) {
+          options = options || {};
+          Duplex.call(this, Object.assign({}, options, {
+            objectMode: options.objectMode || options.readableObjectMode || options.writableObjectMode,
+          }));
+          if (options.transform) this._transform = options.transform;
+          if (options.flush) this._flush = options.flush;
+        }
+        Transform.prototype = Object.create(Duplex.prototype);
+        Transform.prototype.constructor = Transform;
+        Object.assign(Transform.prototype, {
+          _transform: function(chunk, encoding, callback) { callback(null, chunk); },
+          _write: function(chunk, encoding, callback) {
+            const self = this;
+            this._transform(chunk, encoding, function(err, out) {
               if (err) return callback(err);
-              if (out !== undefined && out !== null) this.push(out);
+              if (out !== undefined && out !== null) self.push(out);
               callback();
             });
-          }
-          _maybeFinish() {
+          },
+          _maybeFinish: function() {
             if (!this._writableEnded || this._writing || this._wbuf.length || this._finishEmitted) return;
             this._finishEmitted = true;
-            const finish = () => {
-              this.writable = false;
-              this.push(null);
-              this.emit('finish');
+            const self = this;
+            const finish = function() {
+              self.writable = false;
+              self.push(null);
+              self.emit('finish');
             };
-            if (this._flush) this._flush((err, out) => {
-              if (err) { this.emit('error', err); return; }
-              if (out !== undefined && out !== null) this.push(out);
+            if (this._flush) this._flush(function(err, out) {
+              if (err) { self.emit('error', err); return; }
+              if (out !== undefined && out !== null) self.push(out);
               finish();
             });
             else finish();
-          }
-        }
-        class PassThrough extends Transform {}
+          },
+        });
+        function PassThrough(options) { Transform.call(this, options); }
+        PassThrough.prototype = Object.create(Transform.prototype);
+        PassThrough.prototype.constructor = PassThrough;
 
         function finished(stream, callback) {
           let done = false;
