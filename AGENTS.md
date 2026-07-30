@@ -176,6 +176,14 @@ no error near it. Note the asymmetry, which is measured, not guessed:
 `Buffer.from(typedArray)` copies the VALUES (each truncated to a byte), so a
 `Uint16Array` of `[0x0102, 0x0304]` becomes two bytes — Uint8Array's own
 constructor already does that, so leave the default path alone.
+`worker_threads` rides the same child-engine machinery as `fork`: a Worker is a
+second engine plus the message channel. Shared memory is the real limit — two
+JSContexts share none — so `SharedArrayBuffer` across threads,
+`receiveMessageOnPort`, `get/setEnvironmentData` and `BroadcastChannel` must REFUSE
+by name; an Atomics wait that never wakes is far worse than an error. When writing
+a worker fixture, note that node requires the Worker path to start with `./`, and
+always surface the real node peer's STDERR — a fixture that hides its error wastes
+every run.
 **`process.send` must be UNDEFINED without an IPC channel** — `if (process.send)`
 is how a worker library asks whether it was forked, so a stub sends every one of
 them down its IPC path to talk into nothing. An open channel HOLDS the child's

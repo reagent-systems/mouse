@@ -143,6 +143,11 @@ final class NodeEngine: @unchecked Sendable {
         }
     }
 
+    /// This engine IS a worker thread, with its `workerData` as JSON. nil in the main engine,
+    /// which is what `isMainThread` reports.
+    private var workerData: String?
+    func markAsWorker(data: String) { workerData = data }
+
     /// This engine's stdout/stderr/stdin are a pipe to a parent, not a terminal.
     private var stdioIsPipe = false
     /// Mark stdio as a pipe before `run` — a spawned child does this.
@@ -639,8 +644,8 @@ final class NodeEngine: @unchecked Sendable {
         // output at all.
         // `mode` is "" | "ipc" | "eval" | "eval-ipc": the eval forms mean `script` IS the source
         // rather than a path to it, which is how `node -e` reaches a child.
-        let spawnNode: @convention(block) (String, [String], String, String, JSValue) -> Int32 = {
-            [weak self] script, argv, cwd, mode, callback in
+        let spawnNode: @convention(block) (String, [String], String, String, String, JSValue) -> Int32 = {
+            [weak self] script, argv, cwd, mode, workerData, callback in
             guard let self else { return 0 }
             let wantsIPC = mode.contains("ipc")
             let isEval = mode.hasPrefix("eval")
@@ -659,6 +664,7 @@ final class NodeEngine: @unchecked Sendable {
                 rows: 24, columns: 80,
                 rawModeChanged: { _ in }))
             child.markStdioAsPipe()
+            if mode.contains("worker") { child.markAsWorker(data: workerData) }
             if wantsIPC {
                 // fork(): the child's `process.send` reaches the parent as a 'message' event.
                 child.attachIPC { [weak self] json in
@@ -1390,6 +1396,8 @@ final class NodeEngine: @unchecked Sendable {
         // UTF-8, which is what a screen wants.
         context.setObject(stdioIsPipe, forKeyedSubscript: "__stdioBinary" as NSString)
         context.setObject(ipcSink != nil, forKeyedSubscript: "__hasIPC" as NSString)
+        context.setObject(workerData ?? "", forKeyedSubscript: "__workerData" as NSString)
+        context.setObject(workerData != nil, forKeyedSubscript: "__isWorker" as NSString)
         context.setObject(tty?.rows ?? 24, forKeyedSubscript: "__ttyRows" as NSString)
         context.setObject(tty?.columns ?? 80, forKeyedSubscript: "__ttyColumns" as NSString)
     }
@@ -5356,9 +5364,12 @@ final class NodeEngine: @unchecked Sendable {
           // collide with a real path.
           let isEval = false;
           if (script === '\u0000eval') { isEval = true; script = rest.shift() || ''; }
-          const mode = (isEval ? 'eval' : '') + (wantsIPC ? (isEval ? '-ipc' : 'ipc') : '');
+          const wantsWorker = !!(options && options.worker);
+          const mode = (isEval ? 'eval' : '') + (wantsIPC ? (isEval ? '-ipc' : 'ipc') : '') +
+                       (wantsWorker ? '-worker' : '');
           const id = bridge.spawnNode(script, rest, String((options && options.cwd) || '/'),
-                                      mode, function(event, payload) {
+                                      mode, String((options && options.workerData) || ''),
+                                      function(event, payload) {
             // latin1 both ways: the child wrote bytes, and these are those bytes.
             if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload), 'latin1')); return; }
             if (event === 'stderr') { child.stderr.push(Buffer.from(String(payload), 'latin1')); return; }
@@ -6910,13 +6921,116 @@ final class NodeEngine: @unchecked Sendable {
         }
         return dns;
       };
+      // worker_threads, on the same machinery as a forked child: a second engine on its own
+      // queue, talking over the message channel. What separate JSContexts cannot share is
+      // MEMORY, so SharedArrayBuffer-based APIs refuse by name rather than pretending — an
+      // Atomics-based pool would otherwise deadlock instead of failing.
       coreFactories.worker_threads = function() {
+        const EventEmitter = coreRequire('events');
+        let nextThreadId = 1;
+
+        function Worker(script, options) {
+          EventEmitter.call(this);
+          options = options || {};
+          const self = this;
+          this.threadId = nextThreadId++;
+          const child_process = coreRequire('child_process');
+          // eval: true is node's "the string IS the program" form, same as `node -e`.
+          const argv = options.eval ? ['-e', String(script)] : [String(script)];
+          this._child = child_process.spawn('node', argv, {
+            ipc: true, worker: true,
+            workerData: JSON.stringify(options.workerData === undefined ? null : options.workerData),
+            cwd: options.cwd,
+          });
+          this._child.on('message', function(message){ self.emit('message', message); });
+          this._child.on('exit', function(code){ self.emit('exit', code); });
+          this._child.on('error', function(error){ self.emit('error', error); });
+          this.stdout = this._child.stdout;
+          this.stderr = this._child.stderr;
+          this.stdin = this._child.stdin;
+        }
+        Worker.prototype = Object.create(EventEmitter.prototype);
+        Worker.prototype.constructor = Worker;
+        Worker.prototype.postMessage = function(message) { this._child.send(message); };
+        Worker.prototype.terminate = function() {
+          this._child.kill();
+          return Promise.resolve(0);
+        };
+        Worker.prototype.ref = function(){ this._child.ref(); return this; };
+        Worker.prototype.unref = function(){ this._child.unref(); return this; };
+        Worker.prototype.getHeapSnapshot = function() {
+          return Promise.reject(refuseWorker('getHeapSnapshot', 'heap snapshots need a V8 API JSC does not expose'));
+        };
+
+        // A port pair WITHIN one engine — no threads involved, so this is exact.
+        function MessagePort() {
+          EventEmitter.call(this);
+          this._peer = null;
+          this._started = false;
+        }
+        MessagePort.prototype = Object.create(EventEmitter.prototype);
+        MessagePort.prototype.constructor = MessagePort;
+        MessagePort.prototype.postMessage = function(message) {
+          const peer = this._peer;
+          if (!peer) return;
+          // Structured clone, as far as JSON reaches: the same limit the child channel has.
+          const copy = message === undefined ? undefined : JSON.parse(JSON.stringify(message));
+          process.nextTick(function(){ peer.emit('message', copy); });
+        };
+        MessagePort.prototype.start = function(){ this._started = true; };
+        MessagePort.prototype.close = function(){ this.emit('close'); if (this._peer) this._peer.emit('close'); };
+        MessagePort.prototype.ref = function(){ return this; };
+        MessagePort.prototype.unref = function(){ return this; };
+        function MessageChannel() {
+          this.port1 = new MessagePort();
+          this.port2 = new MessagePort();
+          this.port1._peer = this.port2;
+          this.port2._peer = this.port1;
+        }
+
+        function refuseWorker(name, reason) {
+          const error = new Error('worker_threads.' + name + ' is not available: ' + reason);
+          error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
+          return error;
+        }
+
+        // The worker's own end of the channel, which exists only inside a worker.
+        let parentPort = null;
+        if (__isWorker) {
+          parentPort = new EventEmitter();
+          parentPort.postMessage = function(message) {
+            if (process.send) process.send(message);
+          };
+          parentPort.start = function(){};
+          parentPort.close = function(){ if (process.disconnect) process.disconnect(); };
+          parentPort.ref = function(){ return parentPort; };
+          parentPort.unref = function(){ return parentPort; };
+          process.on('message', function(message){ parentPort.emit('message', message); });
+        }
+        let parsedWorkerData = null;
+        if (__isWorker && __workerData) {
+          try { parsedWorkerData = JSON.parse(__workerData); } catch (error) { parsedWorkerData = null; }
+        }
+
         return {
-          isMainThread: true,
-          threadId: 0,
-          parentPort: null,
-          workerData: null,
-          Worker: function() { throw new Error('worker_threads are not available (single JS thread on this device)'); },
+          isMainThread: !__isWorker,
+          threadId: __isWorker ? 1 : 0,
+          parentPort: parentPort,
+          workerData: parsedWorkerData,
+          Worker: Worker,
+          MessageChannel: MessageChannel,
+          MessagePort: MessagePort,
+          BroadcastChannel: function BroadcastChannel(){ throw refuseWorker('BroadcastChannel', 'it needs a shared registry across threads'); },
+          // Everything below needs SHARED MEMORY between contexts, which two JSContexts do not
+          // have. Refusing by name beats an Atomics wait that never wakes.
+          receiveMessageOnPort: function(){ throw refuseWorker('receiveMessageOnPort', 'synchronous port draining needs shared memory between contexts'); },
+          moveMessagePortToContext: function(){ throw refuseWorker('moveMessagePortToContext', 'contexts here are separate engines with no shared memory'); },
+          markAsUntransferable: function(){},
+          isMarkedAsUntransferable: function(){ return false; },
+          setEnvironmentData: function(){ throw refuseWorker('setEnvironmentData', 'shared environment data needs memory both engines can see'); },
+          getEnvironmentData: function(){ throw refuseWorker('getEnvironmentData', 'shared environment data needs memory both engines can see'); },
+          SHARE_ENV: Symbol('nodejs.worker_threads.SHARE_ENV'),
+          resourceLimits: {},
         };
       };
       coreFactories.async_hooks = function() {
