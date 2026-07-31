@@ -7897,8 +7897,31 @@ final class NodeEngine: @unchecked Sendable {
             if (typeof input === 'string') return input;
             if (input && input.href) return input.href;
             const parts = input || {};
-            return (parts.protocol || '') + '//' + (parts.host || parts.hostname || '') +
-                   (parts.pathname || '') + (parts.search || '') + (parts.hash || '');
+            // This dropped the PORT whenever the object carried `hostname` rather than `host`,
+            // and follow-redirects builds its redirect target with exactly that shape — so a
+            // 302 from a server on any port sent the next hop to port 80. It also emitted `//`
+            // unconditionally, which is wrong for a non-slashed protocol like mailto:.
+            const protocol = parts.protocol || '';
+            const slashed = parts.slashes === true ||
+              ['http:', 'https:', 'ftp:', 'gopher:', 'file:', 'ws:', 'wss:'].indexOf(protocol) >= 0;
+            const host = parts.host !== undefined && parts.host !== null && parts.host !== ''
+              ? parts.host
+              : (parts.hostname || '') +
+                (parts.port !== undefined && parts.port !== null && parts.port !== ''
+                  ? ':' + parts.port : '');
+            const auth = parts.auth ? parts.auth + '@' : '';
+            // node uses `pathname`, never `path` — an options object carrying `path` formats
+            // to the origin alone, which is what the redirect resolver then resolves against.
+            let search = parts.search || '';
+            if (!search && parts.query && typeof parts.query === 'object') {
+              const encoded = new URLSearchParams(parts.query).toString();
+              if (encoded) search = '?' + encoded;
+            }
+            if (search && search[0] !== '?') search = '?' + search;
+            let hash = parts.hash || '';
+            if (hash && hash[0] !== '#') hash = '#' + hash;
+            return protocol + (slashed ? '//' : '') + auth + host +
+                   (parts.pathname || '') + search + hash;
           },
           resolve: function(from, to) {
             try { return new URL(to, from).href; } catch (error) { return to; }
@@ -8730,6 +8753,7 @@ final class NodeEngine: @unchecked Sendable {
                   .reduce(function(all, key){ all.push(key, payload.headers[key]); return all; }, []);
                 response.httpVersion = '1.1';
                 response.complete = false;
+                response.req = clientRequest;   // node's back-reference; follow-redirects reads it
                 response.setEncoding = function(name) { encoding = name; response._readableEncoding = name; return response; };
                 if (callback) callback(response);
                 clientRequest.emit('response', response);
@@ -9493,7 +9517,14 @@ final class NodeEngine: @unchecked Sendable {
             const values = Array.isArray(value) ? value : [value];
             for (const one of values) lines.push(name + ': ' + one);
           }
-          if (!sawHost) lines.push('Host: ' + this._host + (this.port === 80 ? '' : ':' + this.port));
+          if (!sawHost) {
+            // Record it as a real header, not just a line on the wire: node's implicit Host is
+            // readable through getHeader, and follow-redirects rebuilds the redirect target
+            // from exactly that — reading undefined there sent the next hop to port 80.
+            const host = this._host + (this.port === 80 ? '' : ':' + this.port);
+            this._order.push(['host', 'Host', host]);
+            lines.push('Host: ' + host);
+          }
           if (!sawConnection) lines.push('Connection: keep-alive');
           else this._sentClose = String(this.getHeader('connection')).toLowerCase().indexOf('close') >= 0;
           if (!sawLength && !sawEncoding && framelessMethods.indexOf(this.method) < 0) {
@@ -9687,6 +9718,10 @@ final class NodeEngine: @unchecked Sendable {
             }
 
             request._responded = true;
+            // node points the response back at the request that produced it, and libraries use
+            // it: follow-redirects reads `response.req.getHeader(...)` to carry headers onto the
+            // redirected request, so without this a 302 fails instead of being followed.
+            message.req = request;
             request.emit('response', message);
 
             const encoding = String(message.headers['transfer-encoding'] || '').toLowerCase();
@@ -12999,6 +13034,37 @@ final class NodeEngine: @unchecked Sendable {
         coreCache[name] = exports;
         return exports;
       }
+      // `Object.prototype.toString.call(x)` is how a library asks what something IS when it
+      // cannot rely on instanceof across realms, and node tags its objects for exactly that.
+      // Ours were all plain `[object Object]`, and the cost was not cosmetic: axios decides
+      // whether the Node http adapter is usable with `kindOf(process) === 'process'`, so it
+      // silently fell back to the fetch adapter — bypassing the entire agent stack, including
+      // the proxy agents this session just made work.
+      (function tagGlobals(){
+        const tags = [
+          [globalThis.process, 'process'],
+          [globalThis.URL && globalThis.URL.prototype, 'URL'],
+          [globalThis.URLSearchParams && globalThis.URLSearchParams.prototype, 'URLSearchParams'],
+          [globalThis.Headers && globalThis.Headers.prototype, 'Headers'],
+          [globalThis.AbortSignal && globalThis.AbortSignal.prototype, 'AbortSignal'],
+          [globalThis.AbortController && globalThis.AbortController.prototype, 'AbortController'],
+          [globalThis.Blob && globalThis.Blob.prototype, 'Blob'],
+          [globalThis.File && globalThis.File.prototype, 'File'],
+          [globalThis.FormData && globalThis.FormData.prototype, 'FormData'],
+          [globalThis.Response && globalThis.Response.prototype, 'Response'],
+          [globalThis.Request && globalThis.Request.prototype, 'Request'],
+          [globalThis.Event && globalThis.Event.prototype, 'Event'],
+          [globalThis.performance, 'Performance'],
+        ];
+        for (const [target, tag] of tags) {
+          if (!target) continue;
+          try {
+            Object.defineProperty(target, Symbol.toStringTag, {
+              value: tag, configurable: true, enumerable: false, writable: false,
+            });
+          } catch (error) { /* a frozen built-in keeps whatever it has */ }
+        }
+      })();
       globalThis.__coreModule = coreRequire;
       // Now that every factory is registered, give the stdio objects their real prototypes.
       globalThis.__linkStdioPrototypes();

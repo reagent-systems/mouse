@@ -38,6 +38,17 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `Symbol.toStringTag` on `process` and the web globals, so
+  `Object.prototype.toString.call(x)` reports what node reports. Libraries detect the
+  environment this way — axios was silently choosing its fetch adapter over the Node http one,
+  bypassing every configured agent.
+- Node layer: `url.format()` keeps the port when given `hostname`/`port` rather than `host`,
+  emits `//` only for slashed protocols, and honours `auth`, `query` and `hash`. The dropped
+  port sent redirects to port 80.
+- Node layer: a client response carries `.req`, and the implicit `Host` header is readable
+  through `getHeader` rather than only written to the wire. Both are what `follow-redirects`
+  needs, so **axios follows redirects**.
+
 - Node layer: `https.globalAgent` reports `https:` and port 443. Both protocol modules built
   their agent with the same defaults, so the https one claimed `http:` and 80 — a wrong value
   a caller would act on rather than an error it could catch.
