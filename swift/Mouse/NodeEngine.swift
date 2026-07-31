@@ -9386,6 +9386,31 @@ final class NodeEngine: @unchecked Sendable {
             clearKeepAliveTimeout();
             const lines = head.split('\r\n');
             const parts = lines[0].split(' ');
+            // A malformed request line was accepted and turned into a message with a nonsense
+            // method. node rejects it: 'clientError' is emitted, and with no listener the
+            // default is a 400 and a closed socket. Accepting garbage is worse than refusing
+            // it — the peer learns nothing and the connection leaks.
+            const METHODS = ['GET','POST','PUT','DELETE','HEAD','OPTIONS','PATCH','TRACE',
+                             'CONNECT','PROPFIND','PROPPATCH','MKCOL','COPY','MOVE','LOCK',
+                             'UNLOCK','REPORT','MKACTIVITY','CHECKOUT','MERGE','SEARCH','PURGE'];
+            if (parts.length < 2 || METHODS.indexOf(parts[0]) < 0 ||
+                (parts[2] !== undefined && parts[2].slice(0, 5) !== 'HTTP/')) {
+              const error = new Error('Parse Error: Invalid method encountered');
+              error.code = parts.length >= 2 && METHODS.indexOf(parts[0]) < 0
+                ? 'HPE_INVALID_METHOD' : 'HPE_INVALID_CONSTANT';
+              error.rawPacket = Buffer.from(head);
+              const listeners = server.listenerCount ? server.listenerCount('clientError') : 0;
+              if (listeners > 0) {
+                server.emit('clientError', error, socket);
+              } else {
+                // node's default: answer 400 and close, so the peer is told rather than left
+                // waiting on a connection that will never reply.
+                try { socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); } catch (ignored) {}
+                socket.destroy();
+              }
+              buffer = '';
+              return;
+            }
             message = new IncomingMessage(socket);
             message.method = parts[0];
             message.url = parts[1] || '/';

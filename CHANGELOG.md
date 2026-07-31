@@ -38,6 +38,11 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `http.Server` emits `'clientError'` for a malformed request, carrying node's
+  `HPE_INVALID_METHOD` code and the socket; with no listener it answers `400 Bad Request` and
+  closes, as node does. A bad request line was previously accepted as a message with a nonsense
+  method, so the peer was never told and the connection was left open.
+
 - Node layer: `process.emitWarning` emits the `'warning'` event as well as printing, so code
   that attaches a listener to observe or route warnings actually receives them; the `{ type,
   code, detail }` options form works. And `process.on('uncaughtExceptionMonitor')` fires before
