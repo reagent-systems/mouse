@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`node app.ts` runs TypeScript**, compiled with the project's own `typescript`
+  package (`.ts`, `.tsx`, `.mts`, `.cts`, and as an import target). Verified line-for-line
+  against real node's `--experimental-transform-types` across generics, enums, `satisfies`,
+  abstract classes, type-only imports and parameter properties. A project without typescript
+  installed is told that, rather than shown a SyntaxError on a type annotation. This is a
+  deliberate step BEYOND the node version the engine reports, in the direction node itself
+  took in 22.6.
 - Node layer: **ES module exports are live bindings**, as node's are. Every export is a getter
   defined before the module body, so a later mutation shows through `import * as ns`, a cycle
   reaching back into a module finds its hoisted function declarations, and a `const` read too
@@ -205,6 +212,9 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: a syntax error in the entry script is reported. It printed nothing and exited 0
+  — a program that neither runs nor says so — and now prints the file and the SyntaxError and
+  exits 1, as node does.
 - Node layer: `util.debuglog`, `util.debug` and `crypto.generateKey` work when destructured.
   They reached through `this` for a sibling function, which is undefined the moment the
   function travels alone — and `const { debuglog } = require('node:util')` is avvio's first

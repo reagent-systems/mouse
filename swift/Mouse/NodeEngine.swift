@@ -287,13 +287,27 @@ final class NodeEngine: @unchecked Sendable {
         installRejectionHook()
 
         let dir = virtualDirname(path)
+        switch typeScriptSource(id: normalize(path), source: source) {
+        case .failed(let message):
+            err += message + "\n"
+            exitCode = 1
+        case .compiled(let compiled): source = compiled
+        case .notTypeScript: break
+        }
         let entryIsESM = isESModule(id: normalize(path), source: source)
         if entryIsESM {
             source = transpileCached(source)
         } else if source.contains("import") {
             source = Self.rewriteDynamicImport(source)
         }
-        if let function = wrapModule(source, async: entryIsESM, sourceURL: path) {
+        if exitCode == nil, wrapModule(source, async: entryIsESM, sourceURL: path) == nil {
+            // node prints the file, the SyntaxError and exits 1. This printed NOTHING and
+            // exited 0 — a program that does not run and does not say so, which is the worst
+            // outcome available: every other failure at least tells you it happened.
+            err += "\(path)\n" + (lastParseProblem ?? "SyntaxError: could not parse") + "\n"
+            exitCode = 1
+        }
+        if exitCode == nil, let function = wrapModule(source, async: entryIsESM, sourceURL: path) {
             let module = context.evaluateScript("({exports: {}})")!
             let require = makeRequire(fromDir: dir, esm: entryIsESM)
             if entryIsESM {
@@ -2320,7 +2334,7 @@ final class NodeEngine: @unchecked Sendable {
         if fm.fileExists(atPath: realURL(path).path, isDirectory: &isDirectory), !isDirectory.boolValue {
             return fileResolution(path)
         }
-        for suffix in [".js", ".cjs", ".json", ".node"] {
+        for suffix in [".js", ".cjs", ".json", ".node", ".ts", ".tsx", ".mts", ".cts"] {
             let candidate = path + suffix
             if fm.fileExists(atPath: realURL(candidate).path, isDirectory: &isDirectory), !isDirectory.boolValue {
                 return fileResolution(candidate)
@@ -2548,6 +2562,11 @@ final class NodeEngine: @unchecked Sendable {
             if source.hasPrefix("#!") {   // strip before transpile — the prologue would bury it mid-source
                 source = source.drop(while: { $0 != "\n" }).isEmpty ? "" : String(source.drop(while: { $0 != "\n" }))
             }
+            switch typeScriptSource(id: id, source: source) {
+            case .failed(let message): return throwInJS(message)
+            case .compiled(let compiled): source = compiled
+            case .notTypeScript: break
+            }
             let esm = isESModule(id: id, source: source)
             if esm {
                 source = transpileCached(source)
@@ -2630,6 +2649,29 @@ final class NodeEngine: @unchecked Sendable {
 
     /// .mjs is ESM, .cjs is CJS; .js follows the nearest package.json "type"; and a file
     /// with top-of-line import/export statements is ESM regardless (entry scripts).
+    /// TypeScript, if this file is TypeScript. Returns nil when it is not, and throws the
+    /// compiler's absence as a MESSAGE rather than a crash — "install typescript" is something
+    /// the reader can act on, where a SyntaxError on a type annotation is not.
+    private enum TypeScript {
+        case notTypeScript
+        case compiled(String)
+        case failed(String)
+    }
+
+    private func typeScriptSource(id: String, source: String) -> TypeScript {
+        guard [".ts", ".tsx", ".mts", ".cts"].contains(where: { id.hasSuffix($0) }) else {
+            return .notTypeScript
+        }
+        guard let helper = context.objectForKeyedSubscript("__transpileTypeScript"),
+              let result = helper.call(withArguments: [source, id]) else {
+            return .failed("Cannot compile '\(id)': the TypeScript bridge is missing")
+        }
+        if let problem = result.forProperty("error"), !problem.isUndefined, !problem.isNull {
+            return .failed(problem.toString())
+        }
+        return .compiled(result.forProperty("text")?.toString() ?? source)
+    }
+
     private func isESModule(id: String, source: String) -> Bool {
         if id.hasSuffix(".mjs") { return true }
         if id.hasSuffix(".cjs") { return false }
@@ -4555,6 +4597,39 @@ final class NodeEngine: @unchecked Sendable {
         }
         if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
         return Buffer.from(String(value), encoding && encoding !== 'buffer' ? encoding : 'utf8');
+      };
+      // TypeScript, compiled by the project's OWN typescript package — the ts-node model, and
+      // the only honest one available: type erasure is not a text substitution (enums, decorators,
+      // parameter properties, `satisfies`) and a partial stripper would be wrong on real code.
+      // Modules are left as ESM so the ordinary ESM→CJS path handles them, which keeps live
+      // bindings and every other semantic identical to a .js file's.
+      globalThis.__transpileTypeScript = function(source, fileName) {
+        let compiler = globalThis.__tsCompiler;
+        if (compiler === undefined) {
+          try { compiler = bridge.createRequire(fileName)('typescript'); }
+          catch (error) { compiler = null; }
+          globalThis.__tsCompiler = compiler;
+        }
+        if (!compiler) {
+          return { error: "Cannot run '" + fileName + "': TypeScript needs the typescript "
+                          + "package, and this project has none installed" };
+        }
+        const output = compiler.transpileModule(source, {
+          fileName: fileName,
+          reportDiagnostics: false,
+          compilerOptions: {
+            target: compiler.ScriptTarget.ES2022,
+            module: compiler.ModuleKind.ESNext,
+            moduleResolution: compiler.ModuleResolutionKind.Bundler,
+            jsx: compiler.JsxEmit.ReactJSX,
+            esModuleInterop: true,
+            isolatedModules: true,
+            verbatimModuleSyntax: false,
+            useDefineForClassFields: true,
+            experimentalDecorators: true,
+          },
+        });
+        return { text: output.outputText };
       };
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
       // An ES module exports BINDINGS, not values: `export let count` seen by an importer
