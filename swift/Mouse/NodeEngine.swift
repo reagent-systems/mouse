@@ -1238,8 +1238,13 @@ final class NodeEngine: @unchecked Sendable {
                     for (name, value) in http?.allHeaderFields ?? [:] {
                         headerMap[String(describing: name).lowercased()] = String(describing: value)
                     }
+                    // Same rule as the streaming path: a non-HTTP response is a success without
+                    // a status line, not a failure.
+                    if http == nil, let response {
+                        headerMap["content-type"] = response.mimeType ?? "application/octet-stream"
+                    }
                     carried.value.call(withArguments: [[
-                        "status": http?.statusCode ?? 0,
+                        "status": http?.statusCode ?? 200,
                         "headers": headerMap,
                         "body": (data ?? Data()).base64EncodedString(),
                     ]])
@@ -11440,6 +11445,15 @@ final class NodeEngine: @unchecked Sendable {
       // iterate headers, and stream `response.body.getReader()`. The old fetch returned a
       // hand-rolled literal with a two-method headers stub and no body stream, so all of
       // that failed. These are the real shapes, built on our ReadableStream.
+      // A header name is an HTTP TOKEN. Accepting a name with a space in it builds a request
+      // that cannot be serialised, and the failure surfaces far from the line that caused it.
+      function validHeaderName(name) {
+        const text = String(name);
+        if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(text)) {
+          throw new TypeError('Headers.append: "' + text + '" is an invalid header name.');
+        }
+        return text.toLowerCase();
+      }
       globalThis.Headers = class Headers {
         constructor(init) {
           this._pairs = [];
@@ -11447,7 +11461,10 @@ final class NodeEngine: @unchecked Sendable {
           else if (Array.isArray(init)) { for (const [k, v] of init) this.append(k, v); }
           else if (init && typeof init === 'object') { for (const k of Object.keys(init)) this.append(k, init[k]); }
         }
-        append(name, value) { this._pairs.push([String(name).toLowerCase(), String(value)]); }
+        append(name, value) {
+          const key = validHeaderName(name);
+          this._pairs.push([key, String(value).trim()]);
+        }
         set(name, value) { this.delete(name); this.append(name, value); }
         get(name) {
           const key = String(name).toLowerCase();
@@ -11458,10 +11475,22 @@ final class NodeEngine: @unchecked Sendable {
         has(name) { const key = String(name).toLowerCase(); return this._pairs.some(p => p[0] === key); }
         delete(name) { const key = String(name).toLowerCase(); this._pairs = this._pairs.filter(p => p[0] !== key); }
         forEach(fn, thisArg) { for (const [k, v] of this.entries()) fn.call(thisArg, v, k, this); }
-        keys() { return this._names()[Symbol.iterator](); }
-        values() { return this._names().map(n => this.get(n))[Symbol.iterator](); }
-        entries() { return this._names().map(n => [n, this.get(n)])[Symbol.iterator](); }
+        keys() { return this._entryList().map(function(e){ return e[0]; })[Symbol.iterator](); }
+        values() { return this._entryList().map(function(e){ return e[1]; })[Symbol.iterator](); }
+        // Set-Cookie is the one header that does NOT combine: `get` joins the values with a
+        // comma like any other, but iteration yields each cookie on its own, because a client
+        // that rejoins them cannot split them again — a cookie value may contain a comma.
+        entries() { return this._entryList()[Symbol.iterator](); }
         [Symbol.iterator]() { return this.entries(); }
+        _entryList() {
+          const out = [];
+          for (const name of this._names()) {
+            if (name === 'set-cookie') {
+              for (const pair of this._pairs) if (pair[0] === 'set-cookie') out.push(['set-cookie', pair[1]]);
+            } else out.push([name, this.get(name)]);
+          }
+          return out;
+        }
         _names() { const seen = []; for (const [k] of this._pairs) if (!seen.includes(k)) seen.push(k); return seen.sort(); }
       };
       globalThis.Blob = class Blob {
@@ -11512,12 +11541,25 @@ final class NodeEngine: @unchecked Sendable {
         [Symbol.iterator]() { return this.entries(); }
       };
       // A body mixin shared by Request and Response.
-      function defineBody(target, bytes) {
+      function defineBody(target, bytes, present) {
         target._bytes = bytes;
         target.bodyUsed = false;
+        // A body can be consumed EXACTLY ONCE. Letting a second read succeed hides the bug it
+        // is meant to expose: two pieces of code both think they own the payload, and in a real
+        // request only one of them would have got it.
+        target._consume = function(what) {
+          if (target.bodyUsed) {
+            throw new TypeError('Body is unusable: Body has already been read');
+          }
+          target.bodyUsed = true;
+          return what;
+        };
         Object.defineProperty(target, 'body', {
           configurable: true,
           get: function() {
+            // No body at all is NULL, not an empty stream — `response.body === null` is how a
+            // caller tells a 204 from a 200 that happens to be empty.
+            if (!present) return null;
             // A one-shot stream over bytes already in hand. A response that is still ARRIVING
             // uses defineStreamBody instead, which hands over the live stream.
             return new ReadableStream({ start: function(controller) {
@@ -11526,21 +11568,21 @@ final class NodeEngine: @unchecked Sendable {
             } });
           },
         });
-        target.text = function() { target.bodyUsed = true; return Promise.resolve(bytes.toString()); };
-        target.json = function() { target.bodyUsed = true; return Promise.resolve(JSON.parse(bytes.toString())); };
+        target.text = function() { target._consume(); return Promise.resolve(bytes.toString()); };
+        target.json = function() { target._consume(); return Promise.resolve(JSON.parse(bytes.toString())); };
         // The body readers are a SET — text, json, arrayBuffer, blob, bytes and formData. Only
         // this one was missing, so a handler reading a posted form got "not a function".
         target.formData = function() {
-          target.bodyUsed = true;
+          target._consume();
           return Promise.resolve(globalThis.__parseFormBody(bytes.toString(), target.headers));
         };
-        target.bytes = function() { target.bodyUsed = true; return Promise.resolve(new Uint8Array(bytes)); };
+        target.bytes = function() { target._consume(); return Promise.resolve(new Uint8Array(bytes)); };
         target.arrayBuffer = function() {
-          target.bodyUsed = true;
+          target._consume();
           const copy = Buffer.from(bytes);
           return Promise.resolve(copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.length));
         };
-        target.blob = function() { target.bodyUsed = true; return Promise.resolve(new Blob([bytes])); };
+        target.blob = function() { target._consume(); return Promise.resolve(new Blob([bytes])); };
       }
       // A body that is still arriving: `body` IS the live stream, and the one-shot readers
       // (text/json/bytes) drain it — once, like node, since a stream cannot be read twice.
@@ -11548,6 +11590,10 @@ final class NodeEngine: @unchecked Sendable {
         target.bodyUsed = false;
         target._streaming = true;
         let drained = null;
+        target._consume = function() {
+          if (target.bodyUsed) throw new TypeError('Body is unusable: Body has already been read');
+          target.bodyUsed = true;
+        };
         Object.defineProperty(target, 'body', {
           configurable: true,
           get: function() { return stream; },
@@ -11606,10 +11652,19 @@ final class NodeEngine: @unchecked Sendable {
           this.isHistoryNavigation = false;
           this.isReloadNavigation = false;
           const body = options.body !== undefined ? options.body : (input instanceof Request ? input._bytes : undefined);
-          defineBody(this, body === undefined || body === null ? Buffer.alloc(0)
-                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))));
+          const hasBody = body !== undefined && body !== null;
+          // A GET or HEAD has no body by definition, and a caller who passes one has made a
+          // mistake the server would answer with a puzzle rather than an error.
+          if (hasBody && (this.method === 'GET' || this.method === 'HEAD')) {
+            throw new TypeError('Request with GET/HEAD method cannot have body.');
+          }
+          defineBody(this, !hasBody ? Buffer.alloc(0)
+                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))), hasBody);
         }
-        clone() { return new Request(this, {}); }
+        clone() {
+          if (this.bodyUsed) throw new TypeError('Body is unusable: Body has already been read');
+          return new Request(this, {});
+        }
       };
       globalThis.Response = class Response {
         constructor(body, options) {
@@ -11620,19 +11675,35 @@ final class NodeEngine: @unchecked Sendable {
           this.url = options.url || '';
           this.redirected = !!options.redirected;
           this.type = options.type || 'default';
+          const hasBody = body !== undefined && body !== null;
+          // `type: 'error'` is how Response.error() builds the one response with status 0; every
+          // other status has to be one HTTP can actually carry.
+          if (this.type !== 'error' && (this.status < 200 || this.status > 599)) {
+            throw new RangeError('init["status"] must be in the range of 200 to 599, inclusive.');
+          }
+          // 204, 205 and 304 are defined as bodyless. A body attached to one is silently
+          // dropped by every real client, so node refuses it at construction instead.
+          if (hasBody && (this.status === 204 || this.status === 205 || this.status === 304)) {
+            throw new TypeError('Response with null body status cannot have body');
+          }
           // A ReadableStream body stays a stream — that is what makes a streaming response
           // readable as it arrives instead of after it finishes.
           if (body && typeof body.getReader === 'function') { defineStreamBody(this, body); return; }
-          defineBody(this, body === undefined || body === null ? Buffer.alloc(0)
-                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))));
+          defineBody(this, !hasBody ? Buffer.alloc(0)
+                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))), hasBody);
         }
         get ok() { return this.status >= 200 && this.status < 300; }
         clone() {
+          if (this.bodyUsed) throw new TypeError('Body is unusable: Body has already been read');
+          // A live body is TEE'd, so both halves read the same bytes as they arrive. This used
+          // to refuse, on the true-at-the-time grounds that our ReadableStream had no tee; it
+          // has one now, and a refusal that outlives its reason is just a false statement.
           if (this._streaming) {
-            // node tees the stream here; teeing needs a tee, which our ReadableStream does not
-            // have. Saying so beats handing back a response whose body is already spent.
-            throw Object.assign(new Error('cannot clone a response whose body is still streaming: read it once, or buffer it with text()/arrayBuffer() first'),
-                                { code: 'ERR_INVALID_STATE' });
+            const [mine, theirs] = this.body.tee();
+            const copy = new Response(theirs, { status: this.status, statusText: this.statusText,
+                                                headers: this.headers, url: this.url });
+            defineStreamBody(this, mine);
+            return copy;
           }
           return new Response(this._bytes, { status: this.status, statusText: this.statusText,
                                              headers: this.headers, url: this.url });
@@ -17004,8 +17075,14 @@ private final class StreamCollector: NSObject, URLSessionDataDelegate, @unchecke
         for (name, value) in http?.allHeaderFields ?? [:] {
             headerMap[String(describing: name).lowercased()] = String(describing: value)
         }
+        // A response that is not HTTP still SUCCEEDED — a `data:` URL is the common one, and it
+        // is how a wasm module travels inside a bundle. node answers those with 200 and the
+        // media type from the URL; reporting 0 says "no response", which is a failure.
+        if http == nil {
+            headerMap["content-type"] = response.mimeType ?? "application/octet-stream"
+        }
         reportedHead = true
-        deliver("head", ["status": http?.statusCode ?? 0, "headers": headerMap])
+        deliver("head", ["status": http?.statusCode ?? 200, "headers": headerMap])
         completionHandler(.allow)
     }
 

@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **the fetch value types match node** — 32 behaviours across `Headers`,
+  `Request`, `Response`, `Blob` and `FormData`. A body is now readable exactly once (and a
+  clone gives a second read), `response.body` is `null` when there is no body, 204/205/304
+  refuse a body, a status outside 200..599 is a `RangeError`, `GET` with a body throws, header
+  names are validated, and `Set-Cookie` iterates one entry per cookie.
 - Node layer: **web streams match node** — 26 behaviours swept against it, and the node
   bridges exist at last: `Readable.toWeb`/`fromWeb`, `Writable.toWeb`/`fromWeb`,
   `Duplex.toWeb`/`fromWeb`. Streams lock to one reader or writer, `desiredSize` reports real
@@ -186,6 +191,13 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: a `fetch` of a `data:` URL reported `status: 0` — the bridge only had a status
+  when the response was HTTP. node answers 200 with the media type from the URL, and 0 reads
+  as a failed fetch; a wasm module embedded in a bundle (how ink loads its layout engine)
+  arrives this way.
+- Node layer: `Response.clone()` refused when the body was still streaming, because the
+  `ReadableStream` had no `tee`. It has one now, so the response tees and both halves read the
+  same bytes as they arrive.
 - Node layer: `process.nextTick` rode a microtask, so a tick queued from inside a promise
   reaction ran BEFORE the reactions queued beside it. node runs the tick queue at the edges of
   a microtask checkpoint, never inside one — and which edge depends on whether the caller is
