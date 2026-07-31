@@ -2295,7 +2295,7 @@ final class NodeEngine: @unchecked Sendable {
         "fs/promises", "stream/promises", "process", "module", "timers", "timers/promises",
         "path/posix", "path/win32", "http2", "tls", "dns", "worker_threads", "async_hooks",
         "v8", "vm", "perf_hooks", "inspector", "dgram", "cluster", "diagnostics_channel",
-        "console", "util/types", "domain",
+        "console", "util/types", "domain", "wasi",
     ]
 
     /// `esm` is the syntax the REQUEST was written in, which is what picks the export
@@ -6052,6 +6052,466 @@ final class NodeEngine: @unchecked Sendable {
         Object.setPrototypeOf(process.stdin, streams.Readable.prototype);
       };
       const coreFactories = {};
+
+      // `node:wasi` — WASI preview1, the syscall surface a wasm module compiled for "the system"
+      // expects to find. It is what stands between this engine and every napi-rs package's
+      // portable build (rolldown, oxc, lightningcss all ship one), and it is ordinary work:
+      // the calls are pointers into the instance's memory, and the file ones are our own fs.
+      coreFactories.wasi = function() {
+        const fs = coreRequire('fs');
+        const pathModule = coreRequire('path');
+        // preview1 errno, by its own numbering — a wrong number here is a wrong error there.
+        const E = { success: 0, badf: 8, exist: 20, fault: 21, inval: 28, io: 29, isdir: 31,
+                    loop: 32, nametoolong: 37, noent: 44, nomem: 48, nosys: 52, notdir: 54,
+                    notempty: 55, notsup: 58, perm: 63, spipe: 70, notcapable: 76 };
+        const FILETYPE = { unknown: 0, directory: 3, regular: 4, symlink: 7, character: 2 };
+        const RIGHTS_ALL = 0xffffffffffffffffn;
+        // Rights are the whole point of WASI: a descriptor carries the capabilities it was
+        // opened with, and an operation outside them is refused with ENOTCAPABLE rather than
+        // performed. Ignoring them makes a sandbox that is not one, and node enforces them.
+        const RIGHT = {
+          fd_datasync: 1n << 0n, fd_read: 1n << 1n, fd_seek: 1n << 2n, fd_sync: 1n << 4n,
+          fd_tell: 1n << 5n, fd_write: 1n << 6n, fd_advise: 1n << 7n, fd_allocate: 1n << 8n,
+          path_create_directory: 1n << 9n, path_create_file: 1n << 10n, path_open: 1n << 13n,
+          fd_readdir: 1n << 14n, path_rename_source: 1n << 16n, path_filestat_get: 1n << 18n,
+          fd_filestat_get: 1n << 21n, path_remove_directory: 1n << 25n, path_unlink_file: 1n << 26n,
+        };
+
+        function utf8(text) { return Buffer.from(String(text), 'utf8'); }
+
+        class WASI {
+          constructor(options) {
+            options = options || {};
+            const version = options.version || 'preview1';
+            if (version !== 'preview1' && version !== 'unstable') {
+              throw Object.assign(new TypeError("Unsupported WASI version '" + version + "'"),
+                                  { code: 'ERR_INVALID_ARG_VALUE' });
+            }
+            this._args = (options.args || []).map(String);
+            const env = options.env || {};
+            this._env = Object.keys(env).filter((key) => env[key] !== undefined)
+              .map((key) => key + '=' + env[key]);
+            this._returnOnExit = options.returnOnExit !== false;
+            this._exitCode = null;
+            this._memory = null;
+            this._instance = null;
+            // 0,1,2 are the standard streams; a preopened directory gets the next descriptor,
+            // which is the ONLY way a wasi module can reach the filesystem at all.
+            this._table = new Map([
+              [0, { kind: 'stdin' }], [1, { kind: 'stdout' }], [2, { kind: 'stderr' }],
+            ]);
+            this._next = 3;
+            for (const virtual of Object.keys(options.preopens || {})) {
+              this._table.set(this._next++, { kind: 'preopen', name: virtual,
+                                              real: String(options.preopens[virtual]) });
+            }
+            this.wasiImport = this._buildImports();
+          }
+
+          get [Symbol.toStringTag]() { return 'WASI'; }
+
+          getImportObject() { return { wasi_snapshot_preview1: this.wasiImport }; }
+
+          _bind(instance) {
+            this._instance = instance;
+            const memory = instance && instance.exports && instance.exports.memory;
+            if (!memory || typeof memory.buffer === 'undefined') {
+              throw Object.assign(new TypeError('instance.exports.memory is not a WebAssembly.Memory'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            this._memory = memory;
+          }
+
+          start(instance) {
+            this._bind(instance);
+            const entry = instance.exports._start;
+            if (typeof entry !== 'function') {
+              throw Object.assign(new TypeError('instance.exports._start is not a function'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            if (typeof instance.exports._initialize === 'function') {
+              throw Object.assign(new TypeError('instance.exports._initialize must not be a function'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            try { entry(); } catch (error) {
+              if (error && error.__wasiExit !== undefined) return error.__wasiExit;
+              throw error;
+            }
+            return this._exitCode === null ? 0 : this._exitCode;
+          }
+
+          initialize(instance) {
+            this._bind(instance);
+            const entry = instance.exports._initialize;
+            if (typeof instance.exports._start === 'function') {
+              throw Object.assign(new TypeError('instance.exports._start must not be a function'),
+                                  { code: 'ERR_INVALID_ARG_TYPE' });
+            }
+            if (typeof entry === 'function') entry();
+          }
+
+          // --- memory helpers: the view is rebuilt per call because a module may grow it ---
+          get _view() { return new DataView(this._memory.buffer); }
+          get _bytes() { return new Uint8Array(this._memory.buffer); }
+          _writeString(pointer, text) { this._bytes.set(utf8(text), pointer); }
+          _readString(pointer, length) {
+            return Buffer.from(this._bytes.subarray(pointer, pointer + length)).toString('utf8');
+          }
+          /// A path as the module gave it, resolved under the preopen it came through — a wasi
+          /// module cannot name anything it was not handed a descriptor for.
+          _resolve(fd, path) {
+            const entry = this._table.get(fd);
+            if (!entry || (entry.kind !== 'preopen' && entry.kind !== 'directory')) return null;
+            const base = entry.real;
+            const joined = pathModule.resolve(base, path);
+            return joined;
+          }
+
+          _buildImports() {
+            const wasi = this;
+            function view() { return wasi._view; }
+            function bytes() { return wasi._bytes; }
+            function fdOf(fd) { return wasi._table.get(fd); }
+
+            /// The iovec array every read and write is expressed in.
+            function iovecs(pointer, count) {
+              const out = [];
+              const memory = view();
+              for (let index = 0; index < count; index += 1) {
+                const base = pointer + index * 8;
+                out.push({ pointer: memory.getUint32(base, true), length: memory.getUint32(base + 4, true) });
+              }
+              return out;
+            }
+
+            /// The descriptor, if it carries this capability — otherwise the caller gets
+            /// ENOTCAPABLE, which is a different answer from "no such file" and means it.
+            function capable(entry, right) {
+              return entry.rights === undefined || (entry.rights & right) !== 0n;
+            }
+
+            return {
+              args_sizes_get(countPointer, sizePointer) {
+                const memory = view();
+                let size = 0;
+                for (const argument of wasi._args) size += utf8(argument).length + 1;
+                memory.setUint32(countPointer, wasi._args.length, true);
+                memory.setUint32(sizePointer, size, true);
+                return E.success;
+              },
+              args_get(pointersPointer, bufferPointer) {
+                const memory = view();
+                let cursor = bufferPointer;
+                wasi._args.forEach((argument, index) => {
+                  memory.setUint32(pointersPointer + index * 4, cursor, true);
+                  const encoded = utf8(argument);
+                  bytes().set(encoded, cursor);
+                  bytes()[cursor + encoded.length] = 0;
+                  cursor += encoded.length + 1;
+                });
+                return E.success;
+              },
+              environ_sizes_get(countPointer, sizePointer) {
+                const memory = view();
+                let size = 0;
+                for (const pair of wasi._env) size += utf8(pair).length + 1;
+                memory.setUint32(countPointer, wasi._env.length, true);
+                memory.setUint32(sizePointer, size, true);
+                return E.success;
+              },
+              environ_get(pointersPointer, bufferPointer) {
+                const memory = view();
+                let cursor = bufferPointer;
+                wasi._env.forEach((pair, index) => {
+                  memory.setUint32(pointersPointer + index * 4, cursor, true);
+                  const encoded = utf8(pair);
+                  bytes().set(encoded, cursor);
+                  bytes()[cursor + encoded.length] = 0;
+                  cursor += encoded.length + 1;
+                });
+                return E.success;
+              },
+              clock_res_get(id, pointer) {
+                view().setBigUint64(pointer, 1000n, true);
+                return E.success;
+              },
+              clock_time_get(id, precision, pointer) {
+                // realtime is the wall clock; the monotonic ones come off the loop's own clock,
+                // which is what a program timing itself must not see run backwards.
+                const nanos = id === 0
+                  ? BigInt(Date.now()) * 1000000n
+                  : BigInt(globalThis.__monotonicNanos ? globalThis.__monotonicNanos() : Date.now() * 1e6);
+                view().setBigUint64(pointer, nanos, true);
+                return E.success;
+              },
+              random_get(pointer, length) {
+                const random = coreRequire('crypto').randomBytes(length);
+                bytes().set(random, pointer);
+                return E.success;
+              },
+              fd_write(fd, iovsPointer, iovsCount, writtenPointer) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                let written = 0;
+                const chunks = [];
+                for (const piece of iovecs(iovsPointer, iovsCount)) {
+                  chunks.push(Buffer.from(bytes().subarray(piece.pointer, piece.pointer + piece.length)));
+                  written += piece.length;
+                }
+                const payload = Buffer.concat(chunks);
+                if (entry.kind === 'stdout') process.stdout.write(payload);
+                else if (entry.kind === 'stderr') process.stderr.write(payload);
+                else if (entry.kind === 'file') {
+                  if (!capable(entry, RIGHT.fd_write)) return E.notcapable;
+                  try {
+                    fs.writeSync(entry.fd, payload, 0, payload.length, entry.position);
+                    entry.position += payload.length;
+                  } catch (error) { return E.io; }
+                } else return E.badf;
+                view().setUint32(writtenPointer, written, true);
+                return E.success;
+              },
+              fd_read(fd, iovsPointer, iovsCount, readPointer) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                if (entry.kind !== 'file') { view().setUint32(readPointer, 0, true); return E.success; }
+                if (!capable(entry, RIGHT.fd_read)) return E.notcapable;
+                let read = 0;
+                for (const piece of iovecs(iovsPointer, iovsCount)) {
+                  const buffer = Buffer.alloc(piece.length);
+                  let count = 0;
+                  try { count = fs.readSync(entry.fd, buffer, 0, piece.length, entry.position); }
+                  catch (error) { return E.io; }
+                  if (count > 0) {
+                    bytes().set(buffer.subarray(0, count), piece.pointer);
+                    entry.position += count;
+                    read += count;
+                  }
+                  if (count < piece.length) break;
+                }
+                view().setUint32(readPointer, read, true);
+                return E.success;
+              },
+              fd_close(fd) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                if (entry.kind === 'file') { try { fs.closeSync(entry.fd); } catch (error) {} }
+                wasi._table.delete(fd);
+                return E.success;
+              },
+              fd_seek(fd, offset, whence, pointer) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                if (entry.kind !== 'file') return E.spipe;
+                if (!capable(entry, RIGHT.fd_seek)) return E.notcapable;
+                const delta = Number(offset);
+                if (whence === 0) entry.position = delta;
+                else if (whence === 1) entry.position += delta;
+                else if (whence === 2) {
+                  try { entry.position = fs.fstatSync(entry.fd).size + delta; } catch (error) { return E.io; }
+                } else return E.inval;
+                view().setBigUint64(pointer, BigInt(entry.position), true);
+                return E.success;
+              },
+              fd_tell(fd, pointer) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                if (entry.kind !== 'file') return E.spipe;
+                if (!capable(entry, RIGHT.fd_tell)) return E.notcapable;
+                view().setBigUint64(pointer, BigInt(entry.position), true);
+                return E.success;
+              },
+              fd_fdstat_get(fd, pointer) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                const memory = view();
+                const type = entry.kind === 'preopen' || entry.kind === 'directory' ? FILETYPE.directory
+                           : entry.kind === 'file' ? FILETYPE.regular : FILETYPE.character;
+                memory.setUint8(pointer, type);
+                memory.setUint16(pointer + 2, 0, true);
+                memory.setBigUint64(pointer + 8, RIGHTS_ALL, true);
+                memory.setBigUint64(pointer + 16, RIGHTS_ALL, true);
+                return E.success;
+              },
+              fd_fdstat_set_flags() { return E.success; },
+              fd_prestat_get(fd, pointer) {
+                const entry = fdOf(fd);
+                if (!entry || entry.kind !== 'preopen') return E.badf;
+                const memory = view();
+                memory.setUint8(pointer, 0);                                   // tag: directory
+                memory.setUint32(pointer + 4, utf8(entry.name).length, true);
+                return E.success;
+              },
+              fd_prestat_dir_name(fd, pointer, length) {
+                const entry = fdOf(fd);
+                if (!entry || entry.kind !== 'preopen') return E.badf;
+                const encoded = utf8(entry.name);
+                if (encoded.length > length) return E.nametoolong;
+                bytes().set(encoded, pointer);
+                return E.success;
+              },
+              fd_filestat_get(fd, pointer) {
+                const entry = fdOf(fd);
+                if (!entry) return E.badf;
+                if (!capable(entry, RIGHT.fd_filestat_get)) return E.notcapable;
+                try {
+                  const stat = entry.kind === 'file' ? fs.fstatSync(entry.fd)
+                             : entry.real ? fs.statSync(entry.real) : null;
+                  writeFilestat(view(), pointer, stat, entry);
+                  return E.success;
+                } catch (error) { return E.io; }
+              },
+              fd_readdir(fd, bufferPointer, bufferLength, cookie, usedPointer) {
+                const entry = fdOf(fd);
+                if (!entry || (entry.kind !== 'preopen' && entry.kind !== 'directory')) return E.badf;
+                if (!capable(entry, RIGHT.fd_readdir)) return E.notcapable;
+                let names;
+                try { names = fs.readdirSync(entry.real); } catch (error) { return E.notdir; }
+                const memory = view();
+                let cursor = bufferPointer;
+                let index = Number(cookie);
+                while (index < names.length) {
+                  const name = utf8(names[index]);
+                  const needed = 24 + name.length;
+                  if (cursor + needed > bufferPointer + bufferLength) break;
+                  memory.setBigUint64(cursor, BigInt(index + 1), true);          // next cookie
+                  memory.setBigUint64(cursor + 8, 0n, true);                     // inode
+                  memory.setUint32(cursor + 16, name.length, true);
+                  let type = FILETYPE.unknown;
+                  try {
+                    type = fs.statSync(pathModule.join(entry.real, names[index])).isDirectory()
+                      ? FILETYPE.directory : FILETYPE.regular;
+                  } catch (error) {}
+                  memory.setUint8(cursor + 20, type);
+                  bytes().set(name, cursor + 24);
+                  cursor += needed;
+                  index += 1;
+                }
+                memory.setUint32(usedPointer, cursor - bufferPointer, true);
+                return E.success;
+              },
+              path_open(dirFd, dirFlags, pathPointer, pathLength, openFlags,
+                        rightsBase, rightsInheriting, fdFlags, fdPointer) {
+                const name = wasi._readString(pathPointer, pathLength);
+                const target = wasi._resolve(dirFd, name);
+                if (target === null) return E.badf;
+                let stat = null;
+                try { stat = fs.statSync(target); } catch (error) { stat = null; }
+                const rights = BigInt(rightsBase);
+                if (stat && stat.isDirectory()) {
+                  const fd = wasi._next++;
+                  wasi._table.set(fd, { kind: 'directory', real: target, name: name, rights: rights });
+                  view().setUint32(fdPointer, fd, true);
+                  return E.success;
+                }
+                // oflags: 1 = create, 2 = directory, 4 = exclusive, 8 = truncate.
+                const create = (openFlags & 1) !== 0, exclusive = (openFlags & 4) !== 0;
+                const truncate = (openFlags & 8) !== 0;
+                if ((openFlags & 2) !== 0 && !stat) return E.noent;
+                if (!stat && !create) return E.noent;
+                if (stat && exclusive) return E.exist;
+                // rights_base bit 6 is fd_write; anything asking for it opens for writing.
+                const wants = (BigInt(rightsBase) & 0x40n) !== 0n;
+                const mode = truncate ? 'w+' : (wants || create ? 'a+' : 'r');
+                let handle;
+                try { handle = fs.openSync(target, mode); } catch (error) { return E.noent; }
+                const fd = wasi._next++;
+                wasi._table.set(fd, { kind: 'file', fd: handle, position: 0, real: target, rights: rights });
+                view().setUint32(fdPointer, fd, true);
+                return E.success;
+              },
+              path_filestat_get(dirFd, flags, pathPointer, pathLength, pointer) {
+                const target = wasi._resolve(dirFd, wasi._readString(pathPointer, pathLength));
+                if (target === null) return E.badf;
+                try {
+                  writeFilestat(view(), pointer, fs.statSync(target), null);
+                  return E.success;
+                } catch (error) { return E.noent; }
+              },
+              path_create_directory(dirFd, pathPointer, pathLength) {
+                const target = wasi._resolve(dirFd, wasi._readString(pathPointer, pathLength));
+                if (target === null) return E.badf;
+                try { fs.mkdirSync(target); return E.success; } catch (error) { return E.exist; }
+              },
+              path_remove_directory(dirFd, pathPointer, pathLength) {
+                const target = wasi._resolve(dirFd, wasi._readString(pathPointer, pathLength));
+                if (target === null) return E.badf;
+                try { fs.rmdirSync(target); return E.success; } catch (error) { return E.notempty; }
+              },
+              path_unlink_file(dirFd, pathPointer, pathLength) {
+                const target = wasi._resolve(dirFd, wasi._readString(pathPointer, pathLength));
+                if (target === null) return E.badf;
+                try { fs.unlinkSync(target); return E.success; } catch (error) { return E.noent; }
+              },
+              path_rename(oldFd, oldPointer, oldLength, newFd, newPointer, newLength) {
+                const from = wasi._resolve(oldFd, wasi._readString(oldPointer, oldLength));
+                const to = wasi._resolve(newFd, wasi._readString(newPointer, newLength));
+                if (from === null || to === null) return E.badf;
+                try { fs.renameSync(from, to); return E.success; } catch (error) { return E.noent; }
+              },
+              path_symlink() { return E.nosys; },
+              path_readlink() { return E.inval; },
+              path_link() { return E.nosys; },
+              path_filestat_set_times() { return E.nosys; },
+              fd_advise() { return E.success; },
+              fd_allocate() { return E.nosys; },
+              fd_datasync() { return E.success; },
+              fd_sync() { return E.success; },
+              fd_renumber(from, to) {
+                const entry = fdOf(from);
+                if (!entry) return E.badf;
+                wasi._table.set(to, entry);
+                wasi._table.delete(from);
+                return E.success;
+              },
+              fd_pread() { return E.nosys; },
+              fd_pwrite() { return E.nosys; },
+              fd_filestat_set_size() { return E.nosys; },
+              fd_filestat_set_times() { return E.nosys; },
+              poll_oneoff(inPointer, outPointer, count, usedPointer) {
+                // Nothing here blocks: a subscription is answered immediately, which is the
+                // truthful answer for a single-threaded host with no pollable handles.
+                view().setUint32(usedPointer, 0, true);
+                return E.nosys;
+              },
+              proc_exit(code) {
+                wasi._exitCode = code;
+                if (wasi._returnOnExit) {
+                  const stop = new Error('WASI exit');
+                  stop.__wasiExit = code;
+                  throw stop;
+                }
+                process.exit(code);
+              },
+              proc_raise() { return E.nosys; },
+              sched_yield() { return E.success; },
+              // A socket call on something that is not a socket: node answers EINVAL, and the
+              // distinction matters — ENOSYS would say the host lacks the call rather than that
+              // the descriptor is the wrong kind.
+              sock_accept() { return E.inval; },
+              sock_recv() { return E.inval; },
+              sock_send() { return E.inval; },
+              sock_shutdown() { return E.inval; },
+            };
+          }
+        }
+
+        function writeFilestat(memory, pointer, stat, entry) {
+          const isDirectory = stat ? stat.isDirectory() : (entry && entry.kind !== 'file');
+          const size = stat ? stat.size : 0;
+          const time = stat && stat.mtimeMs ? BigInt(Math.round(stat.mtimeMs)) * 1000000n : 0n;
+          memory.setBigUint64(pointer, 0n, true);                      // dev
+          memory.setBigUint64(pointer + 8, 0n, true);                  // ino
+          memory.setUint8(pointer + 16, isDirectory ? FILETYPE.directory : FILETYPE.regular);
+          memory.setBigUint64(pointer + 24, 1n, true);                 // nlink
+          memory.setBigUint64(pointer + 32, BigInt(size), true);
+          memory.setBigUint64(pointer + 40, time, true);
+          memory.setBigUint64(pointer + 48, time, true);
+          memory.setBigUint64(pointer + 56, time, true);
+        }
+
+        return { WASI };
+      };
 
       coreFactories.path = function() {
         function normalizeParts(path) {

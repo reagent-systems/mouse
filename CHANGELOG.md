@@ -8,6 +8,15 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`node:wasi`** — WASI preview1 over the engine's own fs. Args, environ, both
+  clocks, `random_get`, the fd family (read/write/seek/tell/fdstat/filestat/readdir/close), the
+  path family (open/filestat/mkdir/rmdir/unlink/rename), preopened directories, and rights
+  enforcement — a descriptor carries the capabilities it was opened with and an operation
+  outside them is `ENOTCAPABLE`, as node's is. Verified against node's own WASI on a wasm module
+  assembled by hand for the purpose. A napi-rs package's wasm build now loads as far as its own
+  threading: rolldown's is compiled with shared memory, which JavaScriptCore will not parse, and
+  that wall has its own gate — the `Memory` constructor accepts `shared: true` and silently
+  returns ordinary memory, so feature-detecting on it would miss the problem.
 - msh: **`npm create <starter>`** (and `npm init <starter>`, and bare `npm init` to write a
   package.json) — npm's rule that `create vite` runs `create-vite`, so `npm create vite@latest
   app -- --template vanilla-ts` scaffolds a real project on the phone.
