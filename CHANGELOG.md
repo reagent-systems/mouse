@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`EventEmitter` matches node** — 41 behaviours swept against it. `'newListener'`
+  and `'removeListener'` are emitted (they never were), `errorMonitor` works, `listeners()`
+  unwraps `once`, `eventNames()` includes symbols and drops emptied names, `listenerCount` takes
+  a listener, `setMaxListeners`/`getMaxListeners` are real and carry node's leak warning,
+  `captureRejections` routes an async listener's rejection to `'error'` (or to the
+  `nodejs.rejection` handler), and `emit('error', nonError)` throws `ERR_UNHANDLED_ERROR`.
 - Node layer: **the stream lifecycle matches node** — a 33-scenario sweep run on both
   engines and diffed event for event and flag for flag. `'pause'` and `'resume'` are emitted
   (they were not, at all), the two read modes are exclusive as node's are, `autoDestroy: false`
@@ -165,6 +171,10 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `events.once()` left its own `'error'` listener on the emitter after resolving —
+  a subscription the caller never made, on an object that usually outlives the promise.
+- Node layer: `process.emitWarning` delivered the warning synchronously; node hands it to the
+  loop, so a warning could reorder the caller's own work.
 - Node layer: `push()` after EOF, `write()` after `end()`, and an error out of `_write` all
   went unpunished — the first was accepted in silence, the second announced a clean finish
   anyway, and the third left the stream alive and writable. Each now errors with node's code

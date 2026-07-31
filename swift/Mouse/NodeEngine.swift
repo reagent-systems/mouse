@@ -6105,12 +6105,19 @@ final class NodeEngine: @unchecked Sendable {
           // node emits AND prints: a listener observes warnings, it does not suppress them
           // (that is what --no-warnings is for). Emitting instead of printing would have made
           // every warning invisible to anyone who attached a listener to read them.
-          const handlers = processEvents.warning;
-          if (handlers && handlers.length) {
-            for (const handler of handlers.slice()) handler(error);
-          }
-          process.stderr.write('(mouse:' + process.pid + ') ' +
-            (code !== undefined ? '[' + code + '] ' : '') + label + ': ' + text + '\n');
+          // node hands a warning to the LOOP rather than raising it inside whatever was
+          // running, so a warning never reorders the caller's own work — and a listener
+          // attached and removed around the code that triggers one sees it the way node's does.
+          const deliver = function() {
+            const handlers = processEvents.warning;
+            if (handlers && handlers.length) {
+              for (const handler of handlers.slice()) handler(error);
+            }
+            process.stderr.write('(mouse:' + process.pid + ') ' +
+              (code !== undefined ? '[' + code + '] ' : '') + label + ': ' + text + '\n');
+          };
+          if (typeof queueMicrotask === 'function') process.nextTick(deliver);
+          else deliver();
         },
         argv0: 'node',
         // No process table to signal into: only this process exists, and killing it is what
@@ -7226,47 +7233,154 @@ final class NodeEngine: @unchecked Sendable {
         // `Object.assign(app, EventEmitter.prototype)` mixin needs.
         // `_events` initializes LAZILY in every method: express mixes the prototype into a
         // plain function without ever calling the constructor, and node tolerates that.
-        function EventEmitter() { this._events = {}; }
+        function EventEmitter(options) {
+          this._events = {};
+          if (options && options.captureRejections) this._captureRejections = true;
+        }
         const P = EventEmitter.prototype;
         P._bucket = function() { return this._events || (this._events = {}); };
-        P.on = function(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).push(handler); return this; };
+        // The listener a caller GAVE us, not the wrapper we may have put around it. Everything
+        // that reports or matches listeners speaks in the caller's terms.
+        function plainListener(handler) { return handler && handler.listener ? handler.listener : handler; }
+        P._add = function(name, handler, prepend) {
+          const bucket = this._bucket();
+          // 'newListener' fires BEFORE the listener is added — that is the whole point of it,
+          // and it is how a caller wires up a source the first time somebody subscribes.
+          if (bucket.newListener && bucket.newListener.length && name !== 'newListener') {
+            this.emit('newListener', name, plainListener(handler));
+          }
+          const list = bucket[name] || (bucket[name] = []);
+          if (prepend) list.unshift(handler); else list.push(handler);
+          const limit = this._maxListeners === undefined ? EventEmitter.defaultMaxListeners : this._maxListeners;
+          // node's leak warning: crossing the limit is almost always a subscription in a loop
+          // that nobody unsubscribes, and it is silent damage until the process runs out.
+          if (limit > 0 && limit !== Infinity && list.length > limit && !list._warned) {
+            list._warned = true;
+            if (typeof process !== 'undefined' && typeof process.emitWarning === 'function') {
+              const warning = new Error('Possible EventEmitter memory leak detected. '
+                + list.length + ' ' + String(name) + ' listeners added to [' +
+                (this.constructor && this.constructor.name ? this.constructor.name : 'EventEmitter')
+                + ']. Use emitter.setMaxListeners() to increase limit');
+              warning.name = 'MaxListenersExceededWarning';
+              warning.emitter = this;
+              warning.type = name;
+              warning.count = list.length;
+              process.emitWarning(warning);
+            }
+          }
+          return this;
+        };
+        P.on = function(name, handler) { return this._add(name, handler, false); };
         P.addListener = function(name, handler) { return this.on(name, handler); };
         P.once = function(name, handler) {
           const self = this;
           const wrapper = function(...args) { self.off(name, wrapper); handler.apply(self, args); };
           wrapper.listener = handler;
-          return this.on(name, wrapper);
+          return this._add(name, wrapper, false);
         };
         P.off = function(name, handler) {
-          const list = this._bucket()[name] || [];
+          const bucket = this._bucket();
+          const list = bucket[name];
+          if (!list) return this;
           const index = list.findIndex(h => h === handler || h.listener === handler);
-          if (index >= 0) list.splice(index, 1);
+          if (index < 0) return this;
+          const removed = list.splice(index, 1)[0];
+          // An event with no listeners left is GONE, not empty: eventNames() reports what a
+          // caller can still be reached on, and a name kept around after its last listener
+          // reads as a live subscription.
+          if (!list.length) delete bucket[name];
+          if (bucket.removeListener && bucket.removeListener.length) {
+            this.emit('removeListener', name, plainListener(removed));
+          }
           return this;
         };
         P.removeListener = function(name, handler) { return this.off(name, handler); };
-        P.removeAllListeners = function(name) { if (name) delete this._bucket()[name]; else this._events = {}; return this; };
-        P.emit = function(name, ...args) {
-          const list = (this._bucket()[name] || []).slice();
-          // Node semantics: an 'error' with no listener THROWS — otherwise failures
-          // dissolve into silence (and awaited events dangle forever).
-          if (name === 'error' && list.length === 0) {
-            throw args[0] instanceof Error ? args[0] : new Error('Unhandled error: ' + args[0]);
+        P.removeAllListeners = function(name) {
+          const bucket = this._bucket();
+          const announcing = !!(bucket.removeListener && bucket.removeListener.length);
+          if (!announcing) {
+            if (arguments.length === 0) this._events = {};
+            else delete bucket[name];
+            return this;
           }
-          for (const handler of list) handler.apply(this, args);
+          // With somebody listening for removals, each one is announced — and 'removeListener'
+          // itself goes last, so it is still there to report the others.
+          if (arguments.length === 0) {
+            for (const key of Reflect.ownKeys(bucket)) {
+              if (key === 'removeListener') continue;
+              this.removeAllListeners(key);
+            }
+            this.removeAllListeners('removeListener');
+            this._events = {};
+            return this;
+          }
+          const list = bucket[name];
+          if (list) for (let i = list.length - 1; i >= 0; i--) this.removeListener(name, plainListener(list[i]));
+          return this;
+        };
+        P.emit = function(name, ...args) {
+          const bucket = this._bucket();
+          // The list is COPIED for the emit in flight: a listener that unsubscribes itself, or
+          // subscribes another, must not change the emit it is running inside.
+          const list = (bucket[name] || []).slice();
+          if (name === 'error') {
+            // errorMonitor sees the error WITHOUT counting as handling it — that is what
+            // separates observing failures from taking responsibility for them.
+            const monitors = bucket[EventEmitter.errorMonitor];
+            if (monitors && monitors.length) {
+              for (const monitor of monitors.slice()) monitor.apply(this, args);
+            }
+            if (list.length === 0) {
+              if (args[0] instanceof Error) throw args[0];
+              const error = new Error('Unhandled error.' + (args.length ? ' (' + String(args[0]) + ')' : ''));
+              error.code = 'ERR_UNHANDLED_ERROR';
+              error.context = args[0];
+              throw error;
+            }
+          }
+          for (const handler of list) {
+            const result = handler.apply(this, args);
+            // With captureRejections, a listener that returns a rejected promise reports the
+            // failure through the emitter instead of becoming an unhandled rejection nobody
+            // can attribute to the event that caused it.
+            if (this._captureRejections && result && typeof result.then === 'function') {
+              const self = this;
+              result.then(undefined, function(error) {
+                const custom = self[EventEmitter.captureRejectionSymbol];
+                if (typeof custom === 'function') custom.call(self, error, name, ...args);
+                else self.emit('error', error);
+              });
+            }
+          }
           return list.length > 0;
         };
-        P.listenerCount = function(name) { return (this._bucket()[name] || []).length; };
-        P.listeners = function(name) { return (this._bucket()[name] || []).slice(); };
+        P.listenerCount = function(name, handler) {
+          const list = this._bucket()[name] || [];
+          if (typeof handler !== 'function') return list.length;
+          let count = 0;
+          for (const entry of list) if (entry === handler || entry.listener === handler) count += 1;
+          return count;
+        };
+        P.listeners = function(name) { return (this._bucket()[name] || []).map(plainListener); };
         P.rawListeners = function(name) { return (this._bucket()[name] || []).slice(); };
-        P.eventNames = function() { return Object.keys(this._bucket()); };
-        P.setMaxListeners = function() { return this; };
-        P.getMaxListeners = function() { return Infinity; };
-        P.prependListener = function(name, handler) { const ev = this._bucket(); (ev[name] = ev[name] || []).unshift(handler); return this; };
+        // Reflect.ownKeys, not Object.keys: an event named by a SYMBOL is a real event, and
+        // node's own errorMonitor is one.
+        P.eventNames = function() {
+          const bucket = this._bucket();
+          return Reflect.ownKeys(bucket).filter(function(key) {
+            return bucket[key] && bucket[key].length > 0;
+          });
+        };
+        P.setMaxListeners = function(count) { this._maxListeners = Number(count); return this; };
+        P.getMaxListeners = function() {
+          return this._maxListeners === undefined ? EventEmitter.defaultMaxListeners : this._maxListeners;
+        };
+        P.prependListener = function(name, handler) { return this._add(name, handler, true); };
         P.prependOnceListener = function(name, handler) {
           const self = this;
           const wrapper = function(...args) { self.off(name, wrapper); handler.apply(self, args); };
           wrapper.listener = handler;
-          return this.prependListener(name, wrapper);
+          return this._add(name, wrapper, true);
         };
         EventEmitter.EventEmitter = EventEmitter;
         EventEmitter.default = EventEmitter;
@@ -7304,8 +7418,16 @@ final class NodeEngine: @unchecked Sendable {
         };
         EventEmitter._onceNoSignal = function(emitter, name) {
           return new Promise(function(resolve, reject) {
-            emitter.once(name, function(){ resolve(Array.from(arguments)); });
-            if (name !== 'error' && emitter.once) emitter.once('error', reject);
+            const onEvent = function() { cleanup(); resolve(Array.from(arguments)); };
+            const onError = function(error) { cleanup(); reject(error); };
+            const cleanup = function() {
+              if (emitter.off) {
+                emitter.off(name, onEvent);
+                if (name !== 'error') emitter.off('error', onError);
+              }
+            };
+            emitter.once(name, onEvent);
+            if (name !== 'error' && emitter.once) emitter.once('error', onError);
           });
         };
         // `for await (const [value] of events.on(emitter, 'data'))` — the modern way to read
@@ -7350,7 +7472,13 @@ final class NodeEngine: @unchecked Sendable {
         EventEmitter.usingDomains = false;
         EventEmitter.init = function() {};
         EventEmitter.getEventListeners = function(emitter, name) { return emitter.listeners(name); };
-        EventEmitter.setMaxListeners = function() {};
+        EventEmitter.setMaxListeners = function(count, ...targets) {
+          const limit = count === undefined ? EventEmitter.defaultMaxListeners : Number(count);
+          if (!targets.length) { EventEmitter.defaultMaxListeners = limit; return; }
+          for (const target of targets) {
+            if (target && typeof target.setMaxListeners === 'function') target.setMaxListeners(limit);
+          }
+        };
         // Named by the module-surface audit. `EventEmitterAsyncResource` pairs an emitter with
         // an async-resource handle; without async_hooks context propagation the handle is inert,
         // and the emitter half — which is what callers use it for — is fully real.
