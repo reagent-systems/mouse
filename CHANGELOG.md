@@ -38,6 +38,11 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `url.parse()` is a real parser rather than one regex. A bare path parsed to `/`,
+  `user:pass@host` put the user in `hostname`, `mailto:` returned nulls, and `host`, `hash` and
+  `path` were never populated at all. 13 vectors match node, including IPv6 literals and the
+  `//host/path` case that stays a path without a protocol.
+
 - Node layer: `Symbol.toStringTag` on `process` and the web globals, so
   `Object.prototype.toString.call(x)` reports what node reports. Libraries detect the
   environment this way — axios was silently choosing its fetch adapter over the Node http one,

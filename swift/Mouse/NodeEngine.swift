@@ -7846,10 +7846,68 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories.url = function() {
         return {
           URL: globalThis.URL || function(){ throw new Error('URL is not available'); },
-          parse: function(text) {
-            const match = String(text).match(/^(\w+:)?\/\/([^/:]+)(:(\d+))?([^?#]*)(\?[^#]*)?/) || [];
-            return { protocol: match[1] || null, hostname: match[2] || null, port: match[4] || null,
-                     pathname: match[5] || '/', search: match[6] || null, href: text };
+          // The legacy parser, which older packages still use — and which this had been
+          // approximating with one regex that assumed every input was `scheme://host/path`.
+          // A bare path came back as '/', losing it entirely; `user:pass@host` put the user in
+          // hostname and the rest in pathname; and `host`, `hash` and `path` were simply absent.
+          parse: function(text, parseQueryString) {
+            const input = String(text);
+            const result = { protocol: null, slashes: null, auth: null, host: null, port: null,
+                             hostname: null, hash: null, search: null, query: null,
+                             pathname: null, path: null, href: input };
+            let rest = input;
+
+            const protocolMatch = /^([a-zA-Z][a-zA-Z0-9.+-]*:)/.exec(rest);
+            if (protocolMatch) { result.protocol = protocolMatch[1].toLowerCase(); rest = rest.slice(protocolMatch[1].length); }
+
+            // A host section follows only after `//`. Without a protocol, node's default leaves
+            // `//h/p` as a PATH rather than reading a host from it.
+            const slashed = ['http:', 'https:', 'ftp:', 'gopher:', 'file:', 'ws:', 'wss:'];
+            const hasSlashes = rest.slice(0, 2) === '//';
+            // Without a protocol the `//` is NOT consumed: node leaves `//h/p` as a path
+            // unless the caller opts into slashesDenoteHost, which this signature does not.
+            const readsHost = !!result.protocol && (hasSlashes ||
+                              slashed.indexOf(result.protocol) >= 0 ||
+                              // `mailto:a@b.com` — a non-slashed protocol still names a host.
+                              (rest.indexOf('/') < 0 && rest.length > 0));
+            if (hasSlashes && readsHost) { result.slashes = true; rest = rest.slice(2); }
+
+            const hash = rest.indexOf('#');
+            if (hash >= 0) { result.hash = rest.slice(hash); rest = rest.slice(0, hash); }
+
+            if (readsHost) {
+              let authority = rest;
+              const slash = authority.search(/[/?]/);
+              if (slash >= 0) { rest = authority.slice(slash); authority = authority.slice(0, slash); }
+              else rest = '';
+              const at = authority.lastIndexOf('@');
+              if (at >= 0) { result.auth = authority.slice(0, at); authority = authority.slice(at + 1); }
+              // An IPv6 literal keeps its brackets in `host` and loses them in `hostname`.
+              const portMatch = /:(\d*)$/.exec(authority);
+              if (portMatch && authority[0] !== '[' || (portMatch && authority.indexOf(']') >= 0 && authority.lastIndexOf(']') < authority.lastIndexOf(':'))) {
+                result.port = portMatch[1] || null;
+                authority = authority.slice(0, authority.length - portMatch[0].length);
+              }
+              result.host = authority + (result.port ? ':' + result.port : '');
+              result.hostname = authority[0] === '[' && authority[authority.length - 1] === ']'
+                ? authority.slice(1, -1) : authority;
+              result.hostname = result.hostname.toLowerCase();
+              result.host = result.host.toLowerCase();
+            }
+
+            const question = rest.indexOf('?');
+            if (question >= 0) { result.search = rest.slice(question); rest = rest.slice(0, question); }
+            if (rest.length) result.pathname = rest;
+            else if (readsHost && result.host !== null && result.protocol && slashed.indexOf(result.protocol) >= 0) {
+              result.pathname = '/';
+            }
+            if (result.pathname !== null || result.search !== null) {
+              result.path = (result.pathname || '') + (result.search || '');
+            }
+            result.query = parseQueryString
+              ? Object.fromEntries(new URLSearchParams(result.search || ''))
+              : (result.search ? result.search.slice(1) : null);
+            return result;
           },
           // These two were stubs — string surgery that happened to round-trip plain ASCII paths
           // and lost on everything else. A path is not a URL: '#' and '?' start a fragment and a
