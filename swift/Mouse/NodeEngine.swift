@@ -9337,7 +9337,7 @@ final class NodeEngine: @unchecked Sendable {
             buffer: { get: () => stream._buf || [] },
             length: { get: () => (stream._buf || []).reduce((n, c) => n + (c.length || 1), 0) },
             pipes: { get: () => [] },
-            flowing: { get: () => (stream._flowing ? true : (stream._everFlowed ? false : null)) },
+            flowing: { get: () => (stream._flowing === null || stream._flowing === undefined ? null : !!stream._flowing) },
             ended: { get: () => !!stream._sawEOF, set: (v) => { stream._sawEOF = !!v; } },
             endEmitted: { get: () => !!stream._endEmitted, set: (v) => { stream._endEmitted = !!v; } },
             reading: { get: () => false },
@@ -9353,7 +9353,7 @@ final class NodeEngine: @unchecked Sendable {
             errored: { get: () => stream._errored || null },
             errorEmitted: { get: () => !!stream._errored },
             encoding: { get: () => stream._readableEncoding || null },
-            autoDestroy: { get: () => true },
+            autoDestroy: { get: () => stream._autoDestroy !== false },
             awaitDrainWriters: { get: () => null },
           };
         }
@@ -9378,13 +9378,13 @@ final class NodeEngine: @unchecked Sendable {
             destroyed: { get: () => !!stream.destroyed, set: (v) => { stream.destroyed = !!v; } },
             errored: { get: () => stream._errored || null },
             errorEmitted: { get: () => !!stream._errored },
-            autoDestroy: { get: () => true },
+            autoDestroy: { get: () => stream._autoDestroy !== false },
           };
         }
         function initReadable(self, options) {
           options = options || {};
           self._buf = [];
-          self._flowing = false;
+          self._flowing = null;                 // null until something reads: node's tri-state
           self._sawEOF = false;
           self._endEmitted = false;
           self._draining = false;
@@ -9398,6 +9398,7 @@ final class NodeEngine: @unchecked Sendable {
           self.destroyed = false;
           if (options.read) self._read = options.read;
           if (options.destroy) self._destroy = options.destroy;
+          if (options.autoDestroy !== undefined) self._autoDestroy = !!options.autoDestroy;
           self._objectMode = !!options.objectMode;
         }
         function Readable(options) { Stream.call(this); initReadable(this, options); }
@@ -9409,7 +9410,7 @@ final class NodeEngine: @unchecked Sendable {
         Object.defineProperties(Readable.prototype, {
           readableEnded: { get: function(){ return !!this._endEmitted; }, configurable: true },
           // node reports null before flowing starts, then true/false.
-          readableFlowing: { get: function(){ return this._flowing ? true : (this._everFlowed ? false : null); }, configurable: true },
+          readableFlowing: { get: function(){ return this._flowing === null || this._flowing === undefined ? null : !!this._flowing; }, configurable: true },
           readableLength: { get: function(){ return (this._buf || []).reduce(function(n, c){ return n + (c.length || 1); }, 0); }, configurable: true },
           readableHighWaterMark: {
             get: function(){ return this._readableHighWaterMark === undefined ? 16384 : this._readableHighWaterMark; },
@@ -9439,13 +9440,36 @@ final class NodeEngine: @unchecked Sendable {
           push: function(chunk) {
             if (chunk === null) {
               this._sawEOF = true;
+              // EOF is READABLE news: a consumer parked on 'readable' has to be told the stream
+              // is over, or it waits for a chunk that will never come.
+              if (this._buf.length && this.listenerCount('readable')) this._announceReadable();
               this._maybeEnd();
               return false;
             }
+            if (this._sawEOF) {
+              this.destroy(Object.assign(new Error('stream.push() after EOF'),
+                                         { code: 'ERR_STREAM_PUSH_AFTER_EOF' }));
+              return false;
+            }
+            // Every chunk is BUFFERED and delivered from the drain, never straight out of
+            // push(). node does deliver synchronously when a flowing stream has nothing queued,
+            // and matching that moves two tick-orderings closer — but it re-enters the consumer
+            // from inside its own push(), and a caller that pushes from within its state machine
+            // (grpc-js hands a decoded message to its listener that way) is re-entered halfway
+            // through and drops the message. The orderings it would buy are pinned; a lost
+            // message is not a trade worth making.
             this._buf.push(chunk);
             if (this._flowing) this._drain();
-            else this.emit('readable');
+            else this._announceReadable();
             return true;
+          },
+          _announceReadable: function() {
+            if (this._readableScheduled) return;
+            this._readableScheduled = true;
+            process.nextTick(() => {
+              this._readableScheduled = false;
+              if (!this.destroyed) this.emit('readable');
+            });
           },
           _drain: function() {
             if (this._draining) return;
@@ -9456,14 +9480,33 @@ final class NodeEngine: @unchecked Sendable {
                 this._didRead = true;   // backs `readableDidRead`
                 this.emit('data', this._coerce(this._buf.shift()));
               }
-              if (this._flowing && !this._sawEOF && !this._buf.length) this._read(16384);
-              this._maybeEnd();
+              if (this._flowing && !this._sawEOF && !this._buf.length) {
+                this._read(16384);
+              }
+              this._maybeEnd(true);
             });
           },
-          _maybeEnd: function() {
-            if (this._sawEOF && !this._buf.length && !this._endEmitted) {
+          // 'end' means THE CONSUMER HAS READ EVERYTHING, not "the producer is done". A stream
+          // that announces it the moment EOF is pushed ends before anybody has read a byte, and
+          // it lands in the wrong tick relative to the writable half's 'finish'.
+          _maybeEnd: function(immediate) {
+            // ATTEMPTED, not satisfied. A read that finds the stream already over is still a
+            // read — an empty stream produces no chunk to mark, and gating on delivered data
+            // left `Readable.from([])` and every operator that yields nothing waiting forever.
+            // Being read is a HISTORY, not a current state. A consumer that took the last
+            // chunk and paused inside its own handler has read to the end — node announces it
+            // and does not wait for a resume that the consumer may be withholding until it
+            // hears the end. Attempted counts too: a read that finds the stream already over is
+            // still a read, which is the only thing an empty stream can offer.
+            const beingRead = this._flowing || this._readAttempted || this._didRead;
+            if (beingRead && this._sawEOF && !this._buf.length && !this._endEmitted && !this.destroyed) {
               this._endEmitted = true;
-              process.nextTick(() => {
+              // Called FROM the drain that emptied the buffer, 'end' belongs to that same
+              // turn: the read that emptied it is the read that reached the end. Deferring it
+              // again opens a window in which a socket the peer has closed is destroyed first,
+              // and a destroyed stream never announces the end its consumer was waiting for.
+              const announce = () => {
+                if (this.destroyed) { this._endEmitted = false; return; }
                 this.readable = false;
                 this.emit('end');
                 // node's autoDestroy (its default since v14): a finished stream destroys itself,
@@ -9471,6 +9514,9 @@ final class NodeEngine: @unchecked Sendable {
                 // callers actually test. A DUPLEX waits for both halves — destroying it when only
                 // the readable side ended would kill a writable half still in use.
                 const duplex = typeof this._write === 'function' && this._wbuf !== undefined;
+                // A duplex built with allowHalfOpen:false ends its writable side when the
+                // readable side ends — the half-open state is exactly what that option refuses.
+                if (duplex && this._allowHalfOpen === false && !this._writableEnded) this.end();
                 if (this._autoDestroy !== false && (!duplex || this._finishEmitted)) {
                   this.destroy();
                   // 'close' belongs to the DESTROY, not to the end of reading. A duplex whose
@@ -9480,17 +9526,33 @@ final class NodeEngine: @unchecked Sendable {
                   // write.
                   process.nextTick(() => emitCloseOnce(this));
                 }
-              });
+              };
+              if (immediate) announce(); else process.nextTick(announce);
             }
           },
           on: function(event, handler) {
             Stream.prototype.on.call(this, event, handler);
-            if (event === 'data') this.resume();
-            else if (event === 'readable' && this._buf.length) process.nextTick(() => this.emit('readable'));
+            // The two read modes are MUTUALLY EXCLUSIVE. A 'data' listener starts the stream
+            // flowing — unless the caller has explicitly paused it, which node does not
+            // override. A 'readable' listener does the opposite: it takes the stream out of
+            // flowing mode, because that consumer reads on its own schedule with read(). A
+            // stream that keeps flowing anyway hands chunks to a consumer that never asked for
+            // them, and the read() it does call finds the buffer already empty.
+            if (event === 'data') { if (this._flowing !== false) this.resume(); }
+            else if (event === 'readable') {
+              this._flowing = false;
+              if (this._buf.length || this._sawEOF) this._announceReadable();
+            }
             return this;
           },
           read: function(size) {
-            if (!this._buf.length) { if (!this._sawEOF) this._read(size || 16384); if (!this._buf.length) { this._maybeEnd(); return null; } }
+            this._readAttempted = true;
+            if (!this._buf.length) {
+              if (!this._sawEOF) {
+                this._read(size || 16384);
+              }
+              if (!this._buf.length) { this._maybeEnd(); return null; }
+            }
             if (this._objectMode) return this._buf.shift();
             // Concatenate as BYTES. This used to decode each chunk as UTF-8 into a string, join,
             // and re-encode — which corrupts anything that is not UTF-8 text (a digest, a gzip
@@ -9511,14 +9573,40 @@ final class NodeEngine: @unchecked Sendable {
                 ? taken.toString(this._readableEncoding) : taken;
             }
             this._buf = [];
+            this._didRead = true;
             this._maybeEnd();
             if (this._readableEncoding && this._readableEncoding !== 'buffer') {
               return joined.toString(this._readableEncoding);
             }
             return joined;
           },
-          resume: function() { if (!this._flowing) { this._flowing = true; this._everFlowed = true; this._drain(); } return this; },
-          pause: function() { this._flowing = false; return this; },
+          // node ANNOUNCES the mode change. A library that pipes by hand — and every stream
+          // that pipes to a slow destination — listens for 'pause' and 'resume' to know when to
+          // stop and start producing; without them a producer runs flat out into a full buffer.
+          resume: function() {
+            if (this._flowing !== true) {
+              // A 'readable' listener WINS: resume() on a stream being read that way announces
+              // itself but does not start flowing, because that consumer calls read().
+              this._flowing = this.listenerCount('readable') === 0;
+              this._everFlowed = true;
+              // Announced on a TICK, not here. `stream.on('data', …)` resumes as a side effect,
+              // so a caller that attaches 'data' and 'resume' in that order would never see the
+              // event its own attachment caused.
+              if (!this._resumeScheduled) {
+                this._resumeScheduled = true;
+                process.nextTick(() => {
+                  this._resumeScheduled = false;
+                  this.emit('resume');
+                  this._drain();
+                });
+              }
+            }
+            return this;
+          },
+          pause: function() {
+            if (this._flowing !== false) { this._flowing = false; this.emit('pause'); }
+            return this;
+          },
           isPaused: function() { return !this._flowing; },
           setEncoding: function(enc) { this._readableEncoding = enc; return this; },
           unshift: function(chunk) { if (chunk !== null && chunk !== undefined) this._buf.unshift(chunk); return this; },
@@ -9529,7 +9617,12 @@ final class NodeEngine: @unchecked Sendable {
             // before touching it. Leaving them true invites a write to a dead stream.
             this.readable = false;
             if (this._wbuf) this.writable = false;
-            const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => emitCloseOnce(this)); };
+            if (err) this._errored = err;
+            if (this._pipes && this._pipes.length) this.unpipe();
+            const done = (e) => {
+              if (e) process.nextTick(() => this.emit('error', e));
+              process.nextTick(() => emitCloseOnce(this));
+            };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
           },
@@ -9540,7 +9633,11 @@ final class NodeEngine: @unchecked Sendable {
             // aborting a download.
             const onData = chunk => { if (dest.write(chunk) === false && this.pause) { this.pause(); } };
             const onDrain = () => this.resume();
-            const onEnd = () => { if (end && dest.end) dest.end(); };
+            const onEnd = () => {
+              if (end && dest.end) dest.end();
+              this.unpipe(dest);
+              this.pause();
+            };
             this.on('data', onData);
             if (dest.on) dest.on('drain', onDrain);
             this.on('end', onEnd);
@@ -9556,6 +9653,7 @@ final class NodeEngine: @unchecked Sendable {
             const remaining = [];
             for (const entry of pipes) {
               if (dest !== undefined && entry.dest !== dest) { remaining.push(entry); continue; }
+              this.pause();
               this.off('data', entry.onData);
               this.off('end', entry.onEnd);
               if (entry.dest.off) entry.dest.off('drain', entry.onDrain);
@@ -9582,24 +9680,68 @@ final class NodeEngine: @unchecked Sendable {
             this.pipe(transform);
             return transform;
           },
+          // An async iterator READS; it does not put the stream into flowing mode. Consuming by
+          // resuming and pausing around every chunk delivered each one to any 'data' listener as
+          // well, churned two mode changes per item, and left `readableFlowing` true for a
+          // stream nobody was flowing. node consumes with read() behind a 'readable' listener,
+          // which is also what makes the two modes exclusive.
           [Symbol.asyncIterator]: function() {
             const self = this;
+            let released = false;
+            // The waiter that a pending next() has parked on, so abandoning the iteration can
+            // settle it before tearing the stream down rather than rejecting it with the abort
+            // that the abandonment itself caused.
+            let parked = null;
             return {
               next() {
                 return new Promise((resolve, reject) => {
-                  const chunk = self._objectMode || self._buf.length === 0 ? null : self.read();
-                  if (chunk !== null && chunk !== undefined) return resolve({ value: chunk, done: false });
-                  if (self._buf.length) return resolve({ value: self._coerce(self._buf.shift()), done: false });
-                  if (self._endEmitted || (self._sawEOF && !self._buf.length)) { self._maybeEnd(); return resolve({ value: undefined, done: true }); }
-                  const onData = (c) => { cleanup(); self.pause(); resolve({ value: c, done: false }); };
-                  const onEnd = () => { cleanup(); resolve({ value: undefined, done: true }); };
-                  const onError = (e) => { cleanup(); reject(e); };
-                  const cleanup = () => { self.off('data', onData); self.off('end', onEnd); self.off('error', onError); };
-                  self.on('data', onData); self.on('end', onEnd); self.on('error', onError);
-                  self.resume();
+                  const attempt = () => {
+                    // Always through read(): it is what asks _read() for more, and a lazy
+                    // source (Readable.from over a generator) produces nothing until asked.
+                    const chunk = self.read();
+                    if (chunk !== null && chunk !== undefined) {
+                      self._didRead = true;
+                      return resolve({ value: chunk, done: false });
+                    }
+                    if (self._endEmitted || (self._sawEOF && !self._buf.length)) {
+                      self._maybeEnd();
+                      return resolve({ value: undefined, done: true });
+                    }
+                    if (self.destroyed) return resolve({ value: undefined, done: true });
+                    const onReadable = () => { cleanup(); attempt(); };
+                    const onEnd = () => { cleanup(); resolve({ value: undefined, done: true }); };
+                    const onClose = () => { cleanup(); resolve({ value: undefined, done: true }); };
+                    const onError = (e) => { cleanup(); reject(e); };
+                    const cleanup = () => {
+                      parked = null;
+                      self.off('readable', onReadable); self.off('end', onEnd);
+                      self.off('close', onClose); self.off('error', onError);
+                    };
+                    parked = () => { cleanup(); resolve({ value: undefined, done: true }); };
+                    self.on('readable', onReadable);
+                    self.on('end', onEnd);
+                    self.on('close', onClose);
+                    self.on('error', onError);
+                  };
+                  attempt();
                 });
               },
-              return() { self.destroy(); return Promise.resolve({ value: undefined, done: true }); },
+              // Leaving the loop early — `break`, `return`, a throw — ABANDONS the source, and
+              // node aborts it rather than leaving a producer filling a buffer nobody will read.
+              return() {
+                if (!released) {
+                  released = true;
+                  const settle = parked;
+                  if (settle) settle();
+                  // The abort belongs to the SOURCE, not to the consumer that walked away: it
+                  // is why the stream stopped, and a `take(2)` that has what it came for must
+                  // not be handed an error for having stopped asking.
+                  if (self.listenerCount('error') === 0) self.once('error', function() {});
+                  self.destroy(Object.assign(new Error('The operation was aborted'),
+                                             { code: 'ABORT_ERR', name: 'AbortError' }));
+                }
+                return Promise.resolve({ value: undefined, done: true });
+              },
               [Symbol.asyncIterator]() { return this; },
             };
           },
@@ -9712,12 +9854,25 @@ final class NodeEngine: @unchecked Sendable {
         });
 
         Readable.from = function(iterable) {
-            const readable = new Readable({ objectMode: true });
-            process.nextTick(async () => {
-              try {
-                for await (const item of iterable) readable.push(item);
-                readable.push(null);
-              } catch (e) { readable.emit('error', e); }
+            const source = iterable && typeof iterable[Symbol.asyncIterator] === 'function'
+              ? iterable[Symbol.asyncIterator]()
+              : iterable[Symbol.iterator]();
+            let pulling = false;
+            const readable = new Readable({
+              objectMode: true,
+              read() {
+                if (pulling) return;
+                pulling = true;
+                Promise.resolve(source.next()).then((step) => {
+                  pulling = false;
+                  if (this.destroyed) {
+                    if (typeof source.return === 'function') source.return();
+                    return;
+                  }
+                  if (step.done) this.push(null);
+                  else this.push(step.value);
+                }, (error) => { pulling = false; this.destroy(error); });
+              },
             });
             return readable;
         };
@@ -9734,6 +9889,8 @@ final class NodeEngine: @unchecked Sendable {
           self.writable = true;
           if (options.write) self._write = options.write;
           if (options.final) self._final = options.final;
+          if (options.autoDestroy !== undefined) self._autoDestroy = !!options.autoDestroy;
+          if (options.allowHalfOpen !== undefined) self._allowHalfOpen = !!options.allowHalfOpen;
           if (options.destroy && !self._destroy) self._destroy = options.destroy;
           self._writableObjectMode = !!options.objectMode;
           // `highWaterMark` was accepted and dropped: write() compared against a hardcoded 16,
@@ -9747,7 +9904,11 @@ final class NodeEngine: @unchecked Sendable {
           _write(chunk, encoding, callback) { callback(); },
           write(chunk, encoding, callback) {
             if (typeof encoding === 'function') { callback = encoding; encoding = null; }
-            if (this._writableEnded) { this.emit('error', new Error('write after end')); return false; }
+            if (this._writableEnded) {
+              this.destroy(Object.assign(new Error('write after end'),
+                                         { code: 'ERR_STREAM_WRITE_AFTER_END' }));
+              return false;
+            }
             // A string is DECODED here, by the encoding given or the stream's default, and
             // `_write` is then told 'buffer' — node's `decodeStrings` behaviour, and the reason
             // `write(text, 'hex')` means bytes rather than the characters "68690a". Passing the
@@ -9806,7 +9967,7 @@ final class NodeEngine: @unchecked Sendable {
               this._write(chunk, encoding, (err) => {
                 this._writingLength = 0;
                 if (callback) callback(err);
-                if (err) { this._writing = false; this.emit('error', err); return; }
+                if (err) { this._writing = false; this.destroy(err); return; }
                 step();
               });
             };
@@ -9819,25 +9980,38 @@ final class NodeEngine: @unchecked Sendable {
             if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
             this._corked = 0;           // end() implies uncork, as in node
             this._flushWrites();
+            if (this.destroyed) return this;
             this._writableEnded = true;
-            if (callback) this.once('finish', callback);
+            if (callback) (this._endCallbacks = this._endCallbacks || []).push(callback);
             this._maybeFinish();
             return this;
           },
           _maybeFinish() {
-            if (!this._writableEnded || this._writing || this._wbuf.length || this._finishEmitted) return;
-            this._finishEmitted = true;
+            if (!this._writableEnded || this._writing || this._wbuf.length || this._finishScheduled) return;
+            this._finishScheduled = true;
             const finish = () => {
+              if (this.destroyed) { this._finishScheduled = false; return; }
+              this._finishEmitted = true;
               this.writable = false;
+              // node runs the end() callback first and announces 'finish' after it.
+              const pending = this._endCallbacks;
+              this._endCallbacks = null;
+              if (pending) for (const callback of pending) callback();
               this.emit('finish');
               // autoDestroy, on the path a PLAIN Writable takes — there are three finish paths
-              // here (plain, Duplex, Transform) and patching one is not patching the others.
+              // here (plain, Duplex, Transform) and patching one is not patching the others. A
+              // duplex waits for its readable half; 'close' belongs to the destroy, so a stream
+              // built with autoDestroy:false does not get one at all.
               const duplex = typeof this._read === 'function';
-              if (this._autoDestroy !== false && !duplex) process.nextTick(() => this.destroy());
-              process.nextTick(() => emitCloseOnce(this));
+              if (this._autoDestroy !== false && (!duplex || this._endEmitted)) {
+                process.nextTick(() => this.destroy());
+              }
             };
-            if (this._final) this._final((err) => { if (err) this.emit('error', err); finish(); });
-            else finish();
+            // A tick, so a caller that misuses the stream between end() and the finish — a
+            // write after end, an error out of the sink — is heard first and the stream is not
+            // announced as cleanly finished when it was not.
+            if (this._final) this._final((err) => { if (err) { this.destroy(err); return; } process.nextTick(finish); });
+            else process.nextTick(finish);
           },
           destroy(err) {
             if (this.destroyed) return this;
@@ -9846,7 +10020,11 @@ final class NodeEngine: @unchecked Sendable {
             // neither writable nor readable, and callers guard on those before touching it.
             this.writable = false;
             if (this._buf) this.readable = false;
-            const done = (e) => { if (e) this.emit('error', e); process.nextTick(() => emitCloseOnce(this)); };
+            if (err) this._errored = err;
+            const done = (e) => {
+              if (e) process.nextTick(() => this.emit('error', e));
+              process.nextTick(() => emitCloseOnce(this));
+            };
             if (this._destroy) this._destroy(err || null, done); else done(err);
             return this;
           },
@@ -9926,24 +10104,29 @@ final class NodeEngine: @unchecked Sendable {
             });
           },
           _maybeFinish: function() {
-            if (!this._writableEnded || this._writing || this._wbuf.length || this._finishEmitted) return;
-            this._finishEmitted = true;
+            if (!this._writableEnded || this._writing || this._wbuf.length || this._finishScheduled) return;
+            this._finishScheduled = true;
             const self = this;
             const finish = function() {
+              if (self.destroyed) { self._finishScheduled = false; return; }
               self.writable = false;
               self.push(null);
+              self._finishEmitted = true;
+              const pending = self._endCallbacks;
+              self._endCallbacks = null;
+              if (pending) for (const callback of pending) callback();
               self.emit('finish');
               // The writable half of the same rule; a Duplex waits for its readable side.
-              // "Is this a duplex?" is decided by whether a READ side was initialised, not by the
-              // presence of _buf — the writable methods are grafted onto a Readable ancestry, so
-              // _buf can exist on a plain Writable.
+              // "Is this a duplex?" is decided by whether a READ side was initialised, not by
+              // the presence of _buf — the writable methods are grafted onto a Readable
+              // ancestry, so _buf can exist on a plain Writable.
               const duplex = typeof self._read === 'function';
               if (self._autoDestroy !== false && (!duplex || self._endEmitted)) {
                 process.nextTick(function(){ self.destroy(); });
               }
             };
             if (this._flush) this._flush(function(err, out) {
-              if (err) { self.emit('error', err); return; }
+              if (err) { self.destroy(err); return; }
               if (out !== undefined && out !== null) self.push(out);
               finish();
             });
@@ -9985,7 +10168,17 @@ final class NodeEngine: @unchecked Sendable {
             options = parts.pop();
           }
           let failed = false;
-          const fail = (err) => { if (!failed) { failed = true; stopAbort(); callback(err); } };
+          const fail = (err) => {
+            if (failed) return;
+            failed = true;
+            stopAbort();
+            for (const part of parts) {
+              if (part && typeof part.destroy === 'function' && !part.destroyed) {
+                try { part.destroy(err); } catch (ignored) {}
+              }
+            }
+            callback(err);
+          };
           const stopAbort = globalThis.__onAbort(options && options.signal, function() {
             for (const part of parts) { try { part && part.destroy && part.destroy(); } catch (ignored) {} }
             fail(globalThis.__abortError());
@@ -10020,8 +10213,11 @@ final class NodeEngine: @unchecked Sendable {
           const right = new Duplex({ read: function(){}, write: function(chunk, encoding, callback){ left.push(chunk); callback(); } });
           return [left, right];
         };
+        // "Has anything been taken out of this?" — which now includes a stream drained by read()
+        // rather than by flowing, because that is how an async iterator consumes one.
         Stream.isDisturbed = function(stream) {
-          return !!(stream && (stream._everFlowed || stream._endEmitted || stream.destroyed));
+          return !!(stream && (stream._everFlowed || stream._didRead || stream._endEmitted
+                               || stream.destroyed));
         };
         Stream._isArrayBufferView = function(value) { return ArrayBuffer.isView(value); };
         Stream._isUint8Array = function(value) { return value instanceof Uint8Array; };
@@ -11661,7 +11857,17 @@ final class NodeEngine: @unchecked Sendable {
             if (!message || message.complete) { phase = 'idle'; return; }
             message.complete = true;
             phase = 'idle';
-            message.push(null);
+            const finished = message;
+            finished.push(null);
+            // node's `_dump`: a request body nobody consumed is read and discarded, so a
+            // handler that only waits for 'end' hears it. 'end' means the CONSUMER reached the
+            // end, so a message with no consumer would otherwise never announce one.
+            process.nextTick(function() {
+              if (finished.listenerCount('data') === 0 && finished.listenerCount('readable') === 0
+                  && !finished._didRead && !finished.destroyed) {
+                finished.resume();
+              }
+            });
           }
 
           function responseDone(response, keepAlive) {
@@ -15521,14 +15727,24 @@ final class NodeEngine: @unchecked Sendable {
               for (let i = 0; i < waiters.length; i++) waiters[i]();
               break;
             }
-            case 'close':
+            case 'close': {
               this.writable = false;
-              this.readable = false;
-              this.destroyed = true;
               this._clearTimeout();
               if (!this._sawEOF) this.push(null);
-              if (!this._closeEmitted) { this._closeEmitted = true; this.emit('close', !!this._errored); }
+              // The FD is gone, but BYTES ALREADY RECEIVED are not. node lets a consumer read
+              // what arrived before the close and announces 'end' first; tearing the stream
+              // down here loses the tail of every transfer whose peer hangs up promptly — and
+              // 'end' never comes, because a destroyed stream has nothing left to announce.
+              const unread = this._buf && this._buf.length > 0 && !this._endEmitted;
+              const shutDown = () => {
+                this.readable = false;
+                this.destroyed = true;
+                if (!this._closeEmitted) { this._closeEmitted = true; this.emit('close', !!this._errored); }
+              };
+              if (unread) this.once('end', () => process.nextTick(shutDown));
+              else shutDown();
               break;
+            }
             case 'error': {
               // node's socket errors carry a syscall, and its message is "connect ECONNREFUSED
               // 127.0.0.1:1" rather than a bare description. The host layer's message already

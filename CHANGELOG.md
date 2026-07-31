@@ -8,6 +8,15 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **the stream lifecycle matches node** — a 33-scenario sweep run on both
+  engines and diffed event for event and flag for flag. `'pause'` and `'resume'` are emitted
+  (they were not, at all), the two read modes are exclusive as node's are, `autoDestroy: false`
+  and `allowHalfOpen: false` are honoured, `errored` is set, `'end'` waits for the consumer
+  rather than the producer, `'readable'` coalesces per tick, a flowing stream with an empty
+  buffer keeps buffering (node delivers it synchronously; matching that re-enters a caller's
+  own `push()` and loses messages, so this one is a deliberate divergence), a finished pipe
+  unpipes and pauses its source, `pipeline()` destroys its destination when it fails, and
+  `Readable.from` PULLS instead of draining the whole iterable up front.
 - Node layer: **gRPC runs** — `@grpc/grpc-js` works on this engine as both client and server,
   verified with real node's nghttp2 as the peer in each direction: unary calls, initial
   metadata, a server-streaming call over one stream, and a failure whose status arrives in the
@@ -156,6 +165,15 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `push()` after EOF, `write()` after `end()`, and an error out of `_write` all
+  went unpunished — the first was accepted in silence, the second announced a clean finish
+  anyway, and the third left the stream alive and writable. Each now errors with node's code
+  and destroys, so a caller cannot keep writing into a stream whose sink has given up.
+- Node layer: breaking out of `for await` over a stream left the source running with a buffer
+  nobody would read. It is aborted, as node does.
+- Node layer: a socket whose peer closed promptly was destroyed with received bytes still
+  unread — the tail of the transfer was dropped and `'end'` never arrived. What already came
+  in is readable until the consumer reaches the end, and only then does the socket close.
 - Node layer: a stream emitted `'close'` when its READABLE side ended rather than
   when it was destroyed. On a duplex whose writable half is still open that announces a hangup
   mid-exchange, and a handler holding an unfinished response abandons it — node emits `'close'`
