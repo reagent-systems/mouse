@@ -9,7 +9,10 @@ carry breaking changes.
 
 ### Added
 - Node layer: **`node app.ts` runs TypeScript**, compiled with the project's own `typescript`
-  package (`.ts`, `.tsx`, `.mts`, `.cts`, and as an import target). Verified line-for-line
+  package (`.ts`, `.tsx`, `.mts`, `.cts`, and as an import target), honouring the nearest
+  **`tsconfig.json`** — parsed by that same typescript, so comments and `extends` behave — and
+  resolving its **`paths` aliases** (`@app/*`), which are a project convention no package
+  lookup would find. Verified against `tsx` on real node reading the same tsconfig. Verified line-for-line
   against real node's `--experimental-transform-types` across generics, enums, `satisfies`,
   abstract classes, type-only imports and parameter properties. A project without typescript
   installed is told that, rather than shown a SyntaxError on a type annotation. This is a
@@ -212,6 +215,9 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- msh: `./tool.mjs`, `./app.ts` and the other JavaScript extensions typed at the prompt run on
+  the node engine. Only `.js` was routed there, so the rest were handed to the shell, which
+  tried to run JavaScript as `sh`.
 - Node layer: a syntax error in the entry script is reported. It printed nothing and exited 0
   — a program that neither runs nor says so — and now prints the file and the SyntaxError and
   exits 1, as node does.

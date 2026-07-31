@@ -530,7 +530,10 @@ final class MouseShell {
             if let resolved = resolve(name, context: state.context),
                FileManager.default.fileExists(atPath: resolved.url.path),
                let source = try? String(contentsOf: resolved.url, encoding: .utf8) {
-                if name.hasSuffix(".js") || source.hasPrefix("#!") && source.prefix(while: { $0 != "\n" }).contains("node") {
+                // Every extension the engine runs, not just ".js": a `./tool.mjs` or `./app.ts`
+                // was being handed to the SHELL, which then tried to run JavaScript as sh.
+                let runsOnNode = [".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"].contains { name.hasSuffix($0) }
+                if runsOnNode || source.hasPrefix("#!") && source.prefix(while: { $0 != "\n" }).contains("node") {
                     return await runNode(source: source, path: "/" + resolved.rel, args: args, stdin: stdin,
                                          context: state.context, title: name, interactive: interactive)
                 }

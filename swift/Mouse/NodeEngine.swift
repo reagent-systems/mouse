@@ -2293,6 +2293,26 @@ final class NodeEngine: @unchecked Sendable {
             return .notFound("Cannot find module '\(rawRequest)'")
         }
 
+        // A tsconfig `paths` alias, which looks like a bare specifier and is neither a package
+        // nor a path. Tried before node_modules, as every TS runner does — an alias that shadows
+        // a package name is the project saying which one it means.
+        for alias in typeScriptAliases(fromDir: fromDir) {
+            let parts = alias.pattern.components(separatedBy: "*")
+            var candidate: String?
+            if parts.count == 2 {
+                if request.hasPrefix(parts[0]), request.hasSuffix(parts[1]),
+                   request.count >= parts[0].count + parts[1].count {
+                    let star = String(request.dropFirst(parts[0].count).dropLast(parts[1].count))
+                    candidate = alias.target.replacingOccurrences(of: "*", with: star)
+                }
+            } else if request == alias.pattern {
+                candidate = alias.target
+            }
+            if let candidate, let found = loadAsFileOrDirectory(normalize(candidate), esm: esm) {
+                return found
+            }
+        }
+
         // Bare specifier: walk node_modules upward from the requiring directory. A bare
         // specifier with a slash is NOT a path — `rollup/parseAst` is an "exports" KEY, and a
         // package that declares "exports" publishes only what that map names. Trying the map
@@ -2652,6 +2672,29 @@ final class NodeEngine: @unchecked Sendable {
     /// TypeScript, if this file is TypeScript. Returns nil when it is not, and throws the
     /// compiler's absence as a MESSAGE rather than a crash — "install typescript" is something
     /// the reader can act on, where a SyntaxError on a type annotation is not.
+    private var tsAliasCache: [String: [(pattern: String, target: String)]] = [:]
+    /// Resolving an alias needs typescript, and requiring typescript is itself a resolution —
+    /// without this the first bare specifier in a TS project recurses until the stack gives out.
+    private var resolvingAliases = false
+
+    /// The `paths` map from the nearest tsconfig.json. `@/lib` is neither a package nor a path;
+    /// it is an alias the project declared, and TS projects are full of them.
+    private func typeScriptAliases(fromDir: String) -> [(pattern: String, target: String)] {
+        if let cached = tsAliasCache[fromDir] { return cached }
+        guard !resolvingAliases else { return [] }
+        resolvingAliases = true
+        defer { resolvingAliases = false }
+        var pairs: [(pattern: String, target: String)] = []
+        if let helper = context.objectForKeyedSubscript("__tsPathAliases"),
+           let result = helper.call(withArguments: [(fromDir.isEmpty ? "/" : fromDir) + "/index.ts"]),
+           !result.isNull, !result.isUndefined,
+           let rows = result.toArray() as? [[String]] {
+            pairs = rows.compactMap { $0.count == 2 ? (pattern: $0[0], target: $0[1]) : nil }
+        }
+        tsAliasCache[fromDir] = pairs
+        return pairs
+    }
+
     private enum TypeScript {
         case notTypeScript
         case compiled(String)
@@ -4603,31 +4646,92 @@ final class NodeEngine: @unchecked Sendable {
       // parameter properties, `satisfies`) and a partial stripper would be wrong on real code.
       // Modules are left as ESM so the ordinary ESM→CJS path handles them, which keeps live
       // bindings and every other semantic identical to a .js file's.
-      globalThis.__transpileTypeScript = function(source, fileName) {
-        let compiler = globalThis.__tsCompiler;
-        if (compiler === undefined) {
-          try { compiler = bridge.createRequire(fileName)('typescript'); }
-          catch (error) { compiler = null; }
-          globalThis.__tsCompiler = compiler;
+      function loadTypeScriptCompiler(fileName) {
+        if (globalThis.__tsCompiler === undefined) {
+          try { globalThis.__tsCompiler = bridge.createRequire(fileName)('typescript'); }
+          catch (error) { globalThis.__tsCompiler = null; }
         }
+        return globalThis.__tsCompiler;
+      }
+      // The project's OWN tsconfig.json, parsed by the project's own typescript — which is the
+      // only thing that reads JSON-with-comments and resolves `extends` correctly. A hardcoded
+      // set of options is wrong the moment a project sets `jsx`, `target`, or decorators.
+      // `module` is forced to ESNext regardless: the ordinary ESM→CJS path takes it from there,
+      // so a .ts file gets exactly the semantics a .js file gets.
+      function typeScriptConfig(fileName) {
+        const compiler = loadTypeScriptCompiler(fileName);
+        if (!compiler) return null;
+        const fs = __coreModule('fs'), path = __coreModule('path');
+        let dir = path.dirname(fileName);
+        let configPath = null;
+        while (true) {
+          const candidate = path.join(dir, 'tsconfig.json');
+          if (fs.existsSync(candidate)) { configPath = candidate; break; }
+          const parent = path.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+        if (globalThis.__tsConfigCache && globalThis.__tsConfigCache.path === configPath) {
+          return globalThis.__tsConfigCache.value;
+        }
+        let value = { options: {}, base: dir };
+        if (configPath) {
+          try {
+            const read = compiler.readConfigFile(configPath, (p) => fs.readFileSync(p, 'utf8'));
+            const host = compiler.sys || {
+              fileExists: fs.existsSync, readFile: (p) => fs.readFileSync(p, 'utf8'),
+              readDirectory: () => [], useCaseSensitiveFileNames: true,
+            };
+            const parsed = compiler.parseJsonConfigFileContent(read.config || {}, host, path.dirname(configPath));
+            value = { options: parsed.options || {}, base: path.dirname(configPath) };
+          } catch (error) { value = { options: {}, base: path.dirname(configPath) }; }
+        }
+        globalThis.__tsConfigCache = { path: configPath, value: value };
+        return value;
+      }
+      // The `paths` map, for the Swift resolver: `@/lib` is not a package and not a path, it is
+      // an alias the project declared, and TS projects are full of them.
+      globalThis.__tsPathAliases = function(fileName) {
+        const config = typeScriptConfig(fileName);
+        if (!config || !config.options.paths) return null;
+        const path = __coreModule('path');
+        const base = config.options.baseUrl || config.base;
+        const out = [];
+        for (const pattern of Object.keys(config.options.paths)) {
+          for (const target of config.options.paths[pattern]) {
+            out.push([pattern, path.isAbsolute(target) ? target : path.join(base, target)]);
+          }
+        }
+        return out;
+      };
+      globalThis.__transpileTypeScript = function(source, fileName) {
+        const compiler = loadTypeScriptCompiler(fileName);
         if (!compiler) {
           return { error: "Cannot run '" + fileName + "': TypeScript needs the typescript "
                           + "package, and this project has none installed" };
         }
+        const config = typeScriptConfig(fileName) || { options: {} };
+        const options = Object.assign({
+          target: compiler.ScriptTarget.ES2022,
+          jsx: compiler.JsxEmit.ReactJSX,
+          esModuleInterop: true,
+          useDefineForClassFields: true,
+          experimentalDecorators: true,
+        }, config.options, {
+          module: compiler.ModuleKind.ESNext,
+          moduleResolution: compiler.ModuleResolutionKind.Bundler,
+          isolatedModules: true,
+          verbatimModuleSyntax: false,
+          declaration: false,
+          noEmit: false,
+          sourceMap: false,
+          inlineSourceMap: false,
+          outDir: undefined,
+        });
         const output = compiler.transpileModule(source, {
           fileName: fileName,
           reportDiagnostics: false,
-          compilerOptions: {
-            target: compiler.ScriptTarget.ES2022,
-            module: compiler.ModuleKind.ESNext,
-            moduleResolution: compiler.ModuleResolutionKind.Bundler,
-            jsx: compiler.JsxEmit.ReactJSX,
-            esModuleInterop: true,
-            isolatedModules: true,
-            verbatimModuleSyntax: false,
-            useDefineForClassFields: true,
-            experimentalDecorators: true,
-          },
+          compilerOptions: options,
         });
         return { text: output.outputText };
       };
