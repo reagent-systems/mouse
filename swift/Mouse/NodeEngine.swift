@@ -823,6 +823,7 @@ final class NodeEngine: @unchecked Sendable {
             case .file(let id): return ["kind": "file", "id": id]
             case .json(let id): return ["kind": "json", "id": id]
             case .notFound(let message), .notExported(let message): return ["kind": "error", "message": message]
+            case .addon(let id): return ["kind": "addon", "id": id]
             }
         }
         expose("resolve", resolve)
@@ -2204,6 +2205,11 @@ final class NodeEngine: @unchecked Sendable {
         case file(String)
         case json(String)
         case notFound(String)
+        /// A `.node` file: compiled machine code, which node loads through `process.dlopen`.
+        /// It resolves — the file is right there — and fails at LOAD, which is where the
+        /// platform's answer belongs. Reporting it as not-found sent people deleting
+        /// node_modules over something no reinstall can fix.
+        case addon(String)
         /// A package declared "exports" and the request is not in it. Node treats the map as
         /// the package's ONLY public surface, so this is a refusal, not a miss — and it has its
         /// own error code, which tools branch on.
@@ -2306,13 +2312,15 @@ final class NodeEngine: @unchecked Sendable {
         var isDirectory: ObjCBool = false
 
         func fileResolution(_ virtual: String) -> Resolution {
-            virtual.hasSuffix(".json") ? .json(virtual) : .file(virtual)
+            if virtual.hasSuffix(".json") { return .json(virtual) }
+            if virtual.hasSuffix(".node") { return .addon(virtual) }
+            return .file(virtual)
         }
 
         if fm.fileExists(atPath: realURL(path).path, isDirectory: &isDirectory), !isDirectory.boolValue {
             return fileResolution(path)
         }
-        for suffix in [".js", ".cjs", ".json"] {
+        for suffix in [".js", ".cjs", ".json", ".node"] {
             let candidate = path + suffix
             if fm.fileExists(atPath: realURL(candidate).path, isDirectory: &isDirectory), !isDirectory.boolValue {
                 return fileResolution(candidate)
@@ -2432,7 +2440,7 @@ final class NodeEngine: @unchecked Sendable {
             guard let self else { return NSNull() }
             switch self.resolveModule(request, fromDir: fromDir, esm: esm) {
             case .core(let name): return "node:" + name
-            case .file(let id), .json(let id): return id
+            case .file(let id), .json(let id), .addon(let id): return id
             case .notFound(let message): return ["__mouseRequireError": message]
             case .notExported(let message): return ["__mouseRequireError": message,
                                                     "__mouseRequireCode": "ERR_PACKAGE_PATH_NOT_EXPORTED"]
@@ -2608,6 +2616,13 @@ final class NodeEngine: @unchecked Sendable {
 
         case .notExported(let message):
             return ["__mouseRequireError": message, "__mouseRequireCode": "ERR_PACKAGE_PATH_NOT_EXPORTED"]
+
+        case .addon(let id):
+            // The same sentence process.dlopen gives, because it is the same wall: node loads a
+            // .node file BY calling dlopen, and this is that call.
+            return ["__mouseRequireError": "Cannot load '\(id)': a .node addon is compiled machine "
+                                         + "code, and iOS will not map new executable pages",
+                    "__mouseRequireCode": "ERR_DLOPEN_FAILED"]
         }
     }
 

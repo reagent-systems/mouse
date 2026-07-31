@@ -205,6 +205,11 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `require`ing a `.node` file fails with `ERR_DLOPEN_FAILED` and the reason
+  `process.dlopen` already gave — a compiled addon and a platform that will not map new
+  executable pages — naming the file. It used to report `MODULE_NOT_FOUND`, which describes a
+  broken install rather than a wall, and no reinstall can fix a wall. `require.resolve` finds
+  the file, as node's does; all six outcomes now carry the code real node carries.
 - Node layer: `__esModule` is non-enumerable. Node's module namespace has no such key, so it
   was appearing in `Object.keys(ns)` and in anything that spreads or walks a module's exports.
 - Node layer: the ESM→CJS transpiler no longer rewrites JavaScript that lives inside STRINGS. A
