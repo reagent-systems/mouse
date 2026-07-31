@@ -258,6 +258,8 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `fs.mkdir(path, { recursive: true })` returns the created path in the caller's
+  own terms (`deep`, not `/deep`), as node does — the previous fix returned it resolved.
 - Node layer: `util.format`'s `%c` consumes its argument and renders nothing, as node does —
   it was printed literally with the CSS appended.
 - Node layer: `util.inspect` honours `breakLength`, `compact` and `maxArrayLength`. All three

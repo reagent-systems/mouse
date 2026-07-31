@@ -7893,16 +7893,19 @@ final class NodeEngine: @unchecked Sendable {
             const path = resolvePath(dir);
             // node returns the FIRST path it had to create, and undefined when there was
             // nothing to do — which is how a caller learns whether it made the tree.
+            // The answer is in the CALLER's terms: node hands back 'deep' for `mkdir('deep/deeper')`,
+            // not the absolute path it resolved to — the caller is going to print it or join onto it.
             let firstCreated;
             if (recursive) {
-              const pieces = path.split('/').filter(Boolean);
-              let walked = '';
+              const given = String(dir);
+              const pieces = given.split('/').filter(Boolean);
+              let walked = given.startsWith('/') ? '' : '';
               for (const piece of pieces) {
-                walked += '/' + piece;
-                if (!fs.existsSync(walked)) { firstCreated = firstCreated || walked; break; }
+                walked = walked ? walked + '/' + piece : (given.startsWith('/') ? '/' + piece : piece);
+                if (!fs.existsSync(resolvePath(walked))) { firstCreated = walked; break; }
               }
             } else if (!fs.existsSync(path)) {
-              firstCreated = path;
+              firstCreated = String(dir);
             }
             bridge.mkdir(path);
             const mode = options && typeof options === 'object' ? options.mode : undefined;
