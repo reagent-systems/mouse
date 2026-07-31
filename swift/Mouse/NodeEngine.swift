@@ -8767,6 +8767,10 @@ final class NodeEngine: @unchecked Sendable {
           this.sockets = {};          // in use, by name
           this.freeSockets = {};      // idle and reusable, by name
           this.requests = {};
+          // Reported state node exposes and subclasses read.
+          this.defaultPort = options.defaultPort || 80;
+          this.protocol = options.protocol || 'http:';
+          this.maxTotalSockets = options.maxTotalSockets || Infinity;
         }
         Agent.prototype = Object.create(EventEmitter.prototype);
         Agent.prototype.constructor = Agent;
@@ -8841,6 +8845,38 @@ final class NodeEngine: @unchecked Sendable {
         Agent.prototype.createConnection = function(options) {
           return net.connect(options);
         };
+        // The lifecycle hooks node calls and subclasses override. Each is called from the
+        // client rather than merely present — a hook nothing invokes is decoration.
+        Agent.prototype.keepSocketAlive = function(socket) {
+          if (socket && socket.setKeepAlive) socket.setKeepAlive(true, this.keepAliveMsecs);
+          return true;
+        };
+        Agent.prototype.reuseSocket = function() {};
+        Agent.prototype.removeSocket = function(socket, options) {
+          const name = this.getName(options || {});
+          for (const bucket of [this.sockets, this.freeSockets]) {
+            const list = bucket[name];
+            if (!list) continue;
+            const index = list.indexOf(socket);
+            if (index >= 0) list.splice(index, 1);
+            if (!list.length) delete bucket[name];
+          }
+        };
+        Agent.prototype.createSocket = function(request, options, callback) {
+          const socket = this.createConnection(options);
+          if (typeof callback === 'function') callback(null, socket);
+          return socket;
+        };
+        Object.defineProperty(Agent.prototype, 'totalSocketCount', {
+          get: function() {
+            let total = 0;
+            for (const bucket of [this.sockets, this.freeSockets]) {
+              for (const name of Object.keys(bucket)) total += (bucket[name] || []).length;
+            }
+            return total;
+          },
+          configurable: true,
+        });
         // -- the HTTP/1.1 SERVER, on top of real net ------------------------------------
         // Wire behavior is matched to real node's, measured with a raw-socket client rather
         // than assumed: user headers keep insertion order, then Date, then
@@ -9324,12 +9360,36 @@ final class NodeEngine: @unchecked Sendable {
 
           // Reuse a pooled connection when the agent has one for this destination; `agent:
           // false` opts out, which is how node spells "no pooling".
-          this._agent = options.agent === false ? null
-            : (options.agent && options.agent._release ? options.agent : globalAgent);
-          this._poolName = this._agent ? this._agent.getName({ host: this._host, port: this.port }) : '';
-          const reused = this._agent ? this._agent._take(this._poolName) : null;
+          // A CUSTOM agent was being discarded here: the test was `agent._release`, an internal
+          // of this engine's own Agent, so any subclass — which is what every proxy agent is —
+          // silently fell back to the global one. Any object offering an agent's interface is
+          // an agent.
+          this._agent = options.agent === false ? null : (options.agent || globalAgent);
+          this._poolName = this._agent && this._agent.getName
+            ? this._agent.getName({ host: this._host, port: this.port }) : '';
+          const reused = this._agent && this._agent._take ? this._agent._take(this._poolName) : null;
           this.reusedSocket = !!reused;
-          this.socket = reused || new net.Socket();
+          if (reused) {
+            // node tells the agent a socket is being reused, so a subclass can re-arm whatever
+            // state it keeps per request.
+            if (this._agent.reuseSocket) this._agent.reuseSocket(reused, this);
+            this.socket = reused;
+          } else if (this._agent && typeof this._agent.createConnection === 'function'
+                     && this._agent.createConnection !== Agent.prototype.createConnection) {
+            // Only when the agent OVERRIDES it. The base implementation is equivalent to the
+            // path below, and routing every ordinary request through it would change the
+            // default connect sequence for no gain — a bigger behavioural change than the fix
+            // this is meant to be. Overriding it is how a proxy agent works: the socket it
+            // returns goes somewhere else entirely, and nothing here called it, so every such
+            // agent was inert.
+            const supplied = this._agent.createConnection(Object.assign({}, options, {
+              host: this._host, port: this.port, servername: this._host,
+            }));
+            this._socketFromAgent = !!supplied;
+            this.socket = supplied || new net.Socket();
+          } else {
+            this.socket = new net.Socket();
+          }
           this.connection = this.socket;
           this.socket.on('error', function(error) { self.emit('error', error); });
           this.socket.on('close', function() {
@@ -9350,12 +9410,26 @@ final class NodeEngine: @unchecked Sendable {
             // Already connected: nothing will fire 'connect', so the queued bytes go now.
             process.nextTick(function(){ self.emit('socket', self.socket); self._flushPending(); });
           } else {
-            if (this._agent) this._agent._claim(this._poolName, this.socket);
-            this.socket.on('connect', function() {
-              self.emit('socket', self.socket);
-              self._flushPending();
-            });
-            this.socket.connect(this.port, this._host);
+            if (this._agent && this._agent._claim) this._agent._claim(this._poolName, this.socket);
+            // A socket the AGENT supplied is already connecting — or already connected, in
+            // which case its 'connect' event has fired and a listener attached now would wait
+            // forever. Only a socket this client made itself needs connecting.
+            if (this._socketFromAgent) {
+              if (this.socket.connecting || this.socket.pending) {
+                this.socket.on('connect', function() {
+                  self.emit('socket', self.socket);
+                  self._flushPending();
+                });
+              } else {
+                process.nextTick(function(){ self.emit('socket', self.socket); self._flushPending(); });
+              }
+            } else {
+              this.socket.on('connect', function() {
+                self.emit('socket', self.socket);
+                self._flushPending();
+              });
+              this.socket.connect(this.port, this._host);
+            }
           }
           if (options.timeout) this.setTimeout(options.timeout);
           // An AbortSignal was accepted and dropped, which is the worst possible shape for this
@@ -9644,7 +9718,16 @@ final class NodeEngine: @unchecked Sendable {
             const reusable = framed && connection.indexOf('close') < 0 &&
                              message.httpVersionMajor === 1 && message.httpVersionMinor >= 1 &&
                              !request._sentClose;
-            if (request._agent) request._agent._release(request._poolName, request.socket, reusable);
+            if (request._agent && request._agent._release) {
+              // node asks the agent whether a socket may stay alive; a subclass returning false
+              // means "close it", which is how an agent opts a connection out of pooling.
+              const keep = reusable && (!request._agent.keepSocketAlive
+                || request._agent.keepSocketAlive(request.socket) !== false);
+              request._agent._release(request._poolName, request.socket, keep);
+            } else if (request._agent && request._agent.removeSocket) {
+              // A custom agent without this engine's pool still gets told the socket is done.
+              request._agent.removeSocket(request.socket, { host: request._host, port: request.port });
+            }
             else request.socket.end();
             // node closes the REQUEST after its response has ENDED — not when the socket does
             // (with keep-alive the socket outlives the exchange, so 'close' never fired at all),

@@ -38,6 +38,13 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: a custom `http.Agent` is honoured. The client tested for an internal field before
+  accepting one, so every subclass — including every proxy agent — was silently replaced by the
+  global agent and the request went direct. An agent that overrides `createConnection` now
+  decides where the request connects, and the lifecycle hooks (`keepSocketAlive`, `reuseSocket`,
+  `removeSocket`) are called rather than merely defined. Adds `defaultPort`, `protocol`,
+  `maxTotalSockets` and a live `totalSocketCount`.
+
 - Node layer: `process.stdout` and `stderr` are `Writable`s and `process.stdin` is a `Readable`
   — they were plain objects, so every `instanceof` check against them was false and code
   branched the wrong way. Behaviour is unchanged; only the prototype was missing. Also,
