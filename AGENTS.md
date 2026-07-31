@@ -470,6 +470,15 @@ trigger; don't fix it in passing.
   stale binary passes, and the suite reports ALL PASS while your new fixture never
   ran. Check the build's own output, or that the fixture's name appears in the
   results. This bit once already, the same shape as the `cd x && python` trap.
+- **Before adding a property node REPORTS, grep for whether this engine READS
+  that name.** `net.Server.keepAlive` is a reported option in node, defaulting to
+  false. Here the same name was an internal tri-state where `undefined` meant
+  "keep-alive enabled" — so adding node's property, with node's default, silently
+  turned keep-alive OFF for every server and hung the HTTP fixtures. Reported
+  state and control flags must not share a name; when they collide, rename the
+  internal one. `allowHalfOpen` is the same shape and got the opposite verdict —
+  it is a control flag on Socket and inert on Transform, so setting it there is
+  correct. The grep is what tells them apart.
 - **The RUNNER needs the same proof as the gates.** `verify.sh` grades on a
   verdict line, and two flaws in that grading made real failures invisible: a
   case-sensitive match behind a case-insensitive grep (so "3 lines differ" read

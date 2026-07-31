@@ -6980,6 +6980,13 @@ final class NodeEngine: @unchecked Sendable {
 
       coreFactories.string_decoder = function() {
         // node validates the encoding name and throws ERR_UNKNOWN_ENCODING otherwise.
+        // A UTF-8 lead byte announces how many bytes the character occupies.
+        function utf8SequenceLength(lead) {
+          if (lead >= 0xF0) return 4;
+          if (lead >= 0xE0) return 3;
+          if (lead >= 0xC0) return 2;
+          return 1;
+        }
         function StringDecoder(encoding) {
           const name = encoding === undefined || encoding === null ? 'utf8' : String(encoding).toLowerCase();
           const known = ['utf8', 'utf-8', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le', 'latin1',
@@ -6990,6 +6997,18 @@ final class NodeEngine: @unchecked Sendable {
             throw error;
           }
           this.encoding = name === 'utf-8' ? 'utf8' : name;
+          // node exposes the HELD state directly, and libraries read it to decide whether a
+          // chunk boundary is safe to cut on. Views onto the same carry, not a second copy.
+          Object.defineProperties(this, {
+            lastChar: { get: function(){
+              const held = this._carry || Buffer.alloc(0);
+              const room = Buffer.alloc(4);
+              held.copy(room);
+              return room;
+            }, configurable: true },
+            lastNeed: { get: function(){ return this._carryNeed || 0; }, configurable: true },
+            lastTotal: { get: function(){ return this._carryTotal || 0; }, configurable: true },
+          });
         }
         // Holding an incomplete character across writes is the ONE thing a StringDecoder is for,
         // and this had none of it: `write` was a bare toString, so a multi-byte character split
@@ -7001,6 +7020,8 @@ final class NodeEngine: @unchecked Sendable {
           if (this._carry && this._carry.length) {
             bytes = Buffer.concat([this._carry, bytes]);
             this._carry = null;
+            this._carryNeed = 0;
+            this._carryTotal = 0;
           }
           let hold = 0;
           if (this.encoding === 'utf8') {
@@ -7019,6 +7040,10 @@ final class NodeEngine: @unchecked Sendable {
           }
           if (hold > 0) {
             this._carry = bytes.slice(bytes.length - hold);
+            // How many more bytes this character wants, and how wide it is in total — node
+            // reports both, and they are exactly what the hold computation already knows.
+            this._carryTotal = this.encoding === 'utf8' ? utf8SequenceLength(this._carry[0]) : hold;
+            this._carryNeed = Math.max(0, this._carryTotal - this._carry.length);
             bytes = bytes.slice(0, bytes.length - hold);
           }
           return bytes.length ? bytes.toString(this.encoding) : '';
@@ -9198,7 +9223,10 @@ final class NodeEngine: @unchecked Sendable {
             const value = String(msg.headers.connection || '').toLowerCase();
             if (value.indexOf('close') >= 0) return false;
             if (msg.httpVersionMajor === 1 && msg.httpVersionMinor === 0) return value.indexOf('keep-alive') >= 0;
-            return server.keepAlive !== false;
+            // NOT `server.keepAlive`: node uses that name for a reported OPTION whose default
+            // is false, while this is the protocol behaviour whose default is ON. Sharing the
+            // name meant adding node's property silently disabled keep-alive on every server.
+            return server._keepAliveDisabled !== true;
           }
         }
 
@@ -9211,6 +9239,17 @@ final class NodeEngine: @unchecked Sendable {
           this.headersTimeout = 60000;
           this.requestTimeout = 300000;
           this.maxHeadersCount = null;
+          // Protocol options node keeps on the server. `undefined` where node leaves it
+          // undefined rather than inventing a value — an honest default is still a default.
+          this.httpAllowHalfOpen = !!options.httpAllowHalfOpen;
+          this.maxRequestsPerSocket = options.maxRequestsPerSocket || 0;
+          this.requireHostHeader = options.requireHostHeader === undefined ? true : !!options.requireHostHeader;
+          this.rejectNonStandardBodyWrites = !!options.rejectNonStandardBodyWrites;
+          this.connectionsCheckingInterval = options.connectionsCheckingInterval === undefined
+            ? 30000 : options.connectionsCheckingInterval;
+          this.maxHeaderSize = options.maxHeaderSize;
+          this.insecureHTTPParser = options.insecureHTTPParser;
+          this.joinDuplicateHeaders = options.joinDuplicateHeaders;
           if (handler) this.on('request', handler);
           const self = this;
           this.on('connection', function(socket) { serveConnection(self, socket); });
@@ -10006,6 +10045,8 @@ final class NodeEngine: @unchecked Sendable {
           EventEmitter.call(this);
           this._peer = null;
           this._started = false;
+          this._refed = false;   // node reports hasRef() false until the port is started
+          this.onmessageerror = null;
         }
         MessagePort.prototype = Object.create(EventEmitter.prototype);
         MessagePort.prototype.constructor = MessagePort;
@@ -10091,7 +10132,10 @@ final class NodeEngine: @unchecked Sendable {
         MessagePort.prototype.start = function(){ this._started = true; this._schedule(); };
         MessagePort.prototype.close = function(){ this.emit('close'); if (this._peer) this._peer.emit('close'); };
         MessagePort.prototype.ref = function(){ return this; };
-        MessagePort.prototype.unref = function(){ return this; };
+        MessagePort.prototype.unref = function(){ this._refed = false; return this; };
+        // node reports whether the port is currently holding the loop open, and exposes the
+        // error-event handler slot alongside onmessage.
+        MessagePort.prototype.hasRef = function(){ return !!this._refed; };
         function MessageChannel() {
           this.port1 = new MessagePort();
           this.port2 = new MessagePort();
@@ -12038,6 +12082,12 @@ final class NodeEngine: @unchecked Sendable {
             // isn't decodable alone, which is why streaming gunzip used to fail.)
             let handle = bridge.zlibOpen(mode);
             function code(chunk, finish) {
+              // Counted where the coder PROCESSES, not where write() accepts — node reports 0
+              // for a chunk that is still buffered.
+              if (chunk && chunk.length) {
+                stream.bytesWritten += chunk.length;
+                stream.bytesRead = stream.bytesWritten;
+              }
               if (!handle) throw new Error('zlib: cannot open ' + mode);
               const input = chunk && chunk.length
                 ? (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))).toString('base64') : '';
@@ -12078,6 +12128,12 @@ final class NodeEngine: @unchecked Sendable {
             // minizlib calls it directly and expects the coded bytes back. Ours is one-shot,
             // so data accumulates and codes at Z_FINISH (4); intermediate flushes return
             // empty, which minizlib concatenates harmlessly.
+            // node reports how much has gone THROUGH the coder; zeros would repeat the
+            // process.cpuUsage mistake. `allowHalfOpen` is reported state on a Transform — it
+            // is only a control flag on a SOCKET, which is a different class.
+            stream.allowHalfOpen = true;
+            stream.bytesWritten = 0;
+            stream.bytesRead = 0;   // node's deprecated alias, still read by packages
             stream._processChunk = function(chunk, flushFlag) {
               return code(chunk, flushFlag === 4);   // Z_FINISH
             };
@@ -12321,6 +12377,15 @@ final class NodeEngine: @unchecked Sendable {
           this.listening = false;
           this.maxConnections = Infinity;
           this.allowHalfOpen = !!options.allowHalfOpen;
+          // Connection options node RECORDS on the server, with node's defaults, so a caller
+          // reading them back sees what it configured. These are reported state, not control
+          // flags — the protocol behaviour they resemble lives under separate names.
+          this.noDelay = !!options.noDelay;
+          this.keepAlive = !!options.keepAlive;
+          // node keeps this in whole SECONDS internally, so 250 ms reads back as 0.
+          this.keepAliveInitialDelay = Math.floor((options.keepAliveInitialDelay || 0) / 1000) * 1000;
+          this.pauseOnConnect = !!options.pauseOnConnect;
+          this.highWaterMark = options.highWaterMark === undefined ? 65536 : options.highWaterMark;
           this._address = null;
           this._closing = false;
           if (handler) this.on('connection', handler);

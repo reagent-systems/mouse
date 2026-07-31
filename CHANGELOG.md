@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: the connection and protocol options `http.Server` and `net.Server` record
+  (`noDelay`, `keepAlive`, `keepAliveInitialDelay`, `pauseOnConnect`, `highWaterMark`,
+  `httpAllowHalfOpen`, `maxRequestsPerSocket`, `requireHostHeader` and the rest); real
+  `bytesWritten`/`bytesRead` counters on the zlib coders; `StringDecoder`'s `lastNeed`,
+  `lastTotal` and `lastChar`; and `MessagePort.hasRef()`/`onmessageerror`.
+
 - Node layer: `readableAborted`, `readableDidRead` and `writableAborted` on streams — the
   getters that distinguish a stream destroyed mid-flight from one that ran to completion.
 
