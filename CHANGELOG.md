@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **web streams match node** — 26 behaviours swept against it, and the node
+  bridges exist at last: `Readable.toWeb`/`fromWeb`, `Writable.toWeb`/`fromWeb`,
+  `Duplex.toWeb`/`fromWeb`. Streams lock to one reader or writer, `desiredSize` reports real
+  backpressure, enqueue-after-close and double-close throw, `tee()` feeds both branches every
+  chunk in order, and `pipeTo` aborts its destination when the source fails.
 - Node layer: **`AbortSignal` matches node** — 28 behaviours swept against it. It is an
   EventTarget now, not an emitter: the same listener added twice counts once, `this` inside a
   listener is the signal, and `onabort` keeps the position it was assigned in. A signal's
