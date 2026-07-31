@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- msh: **`npm run <script>`** (and `npm test`/`start`/`stop`/`restart`, plus bare `npm run` to
+  list). Scripts run as ordinary msh programs, so `&&`, pipes and env prefixes behave and a
+  long-running script takes the terminal the way it does when typed by hand; `pre`/`post` hooks
+  run around the main script, arguments after `--` are appended, the exit status propagates, and
+  a missing script says so. The package.json used is the one governing the current directory,
+  found by walking up. Verified against real npm on the same package.json.
 - Node layer: `SharedArrayBuffer` exists. JavaScriptCore has no such constructor and no option
   turns one on, but its `Atomics` work on an ordinary buffer — so it is one, and the sharing it
   names is where the refusal lives: a buffer crossing to another engine throws `DataCloneError`
@@ -223,6 +229,9 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `node -e "…" value` puts no script path in `process.argv` — argv[1] is the first
+  real argument, as node's is. A phantom path made every `node -e` script read the wrong one,
+  which is most of what npm scripts are made of.
 - Terminal: a node program's transcript no longer fills with blank rows when the program clears
   the screen. A line that was entirely escape sequences is not a blank line, and `ESC[0J`
   (erase below — how `readline.clearScreenDown`, and therefore vite and every watcher, clears)

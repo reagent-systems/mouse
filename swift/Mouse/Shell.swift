@@ -1233,7 +1233,8 @@ final class MouseShell {
         // Honesty for what iOS forbids: state the fact, never fake the feature.
         case "apt", "apt-get", "dpkg", "brew":
             return IO(err: "\(name): no system packages on iOS; npm installs JavaScript packages", status: 1)
-        case "npm", "pnpm", "yarn": return await npmCmd(tool: name, args, context: context)
+        case "npm", "pnpm", "yarn":
+            return await npmCmd(tool: name, args, context: context, interactive: interactive)
         case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "kill", "killall":
@@ -1266,7 +1267,8 @@ final class MouseShell {
         if args.first == "-e" || args.first == "--eval" {
             guard args.count >= 2 else { return IO(err: "node: -e needs code\n", status: 2) }
             return await runNode(source: args[1], path: "/[eval].js", args: Array(args.dropFirst(2)),
-                                 stdin: stdin, context: context, title: "node -e", interactive: interactive)
+                                 stdin: stdin, context: context, title: "node -e",
+                                 interactive: interactive, isEval: true)
         }
         guard let file = args.first else { return IO(err: "node: usage: node <file> | -e <code>\n", status: 2) }
         guard let resolved = resolve(file, context: context),
@@ -1291,8 +1293,11 @@ final class MouseShell {
     /// overflow.
     private var nodeDepth = 0
 
+    /// `isEval`: `node -e` has no script path, so its argv is `["node", …extra]` — argv[1] is
+    /// the first extra argument, not the program. npm scripts are full of `node -e "…" value`,
+    /// and with a phantom path in the way every one of them read the wrong argument.
     private func runNode(source: String, path: String, args: [String], stdin: String, context: Context,
-                         title: String = "node", interactive: Bool = false) async -> IO {
+                         title: String = "node", interactive: Bool = false, isEval: Bool = false) async -> IO {
         guard nodeDepth < 8 else { return IO(err: "node: recursion too deep\n", status: 1) }
         let bridge = NodeEngine.ShellBridge { @MainActor [weak self] command in
             guard let self else { return ("", "msh: shell gone\n", 1) }
@@ -1308,7 +1313,7 @@ final class MouseShell {
         if interactive, stdin.isEmpty, let launch = context.launchProgram {
             let engine = NodeEngine(root: context.root, env: env, shell: bridge)
             let program = NodeProgram(
-                title: title, source: source, path: path, argv: ["node", path] + args,
+                title: title, source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
                 cwd: "/" + cwd, engine: engine,
                 transcript: { line, isError in context.emit(Output(text: line, isError: isError)) },
                 clearTranscript: { context.clear() },
@@ -1319,7 +1324,7 @@ final class MouseShell {
         nodeDepth += 1
         defer { nodeDepth -= 1 }
         let engine = NodeEngine(root: context.root, env: env, shell: bridge)
-        let result = await engine.run(source: source, path: path, argv: ["node", path] + args,
+        let result = await engine.run(source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
                                       cwd: "/" + cwd, stdin: stdin)
         context.reloadTree()   // scripts write files
         return IO(out: result.out, err: result.err, status: result.status)
@@ -1335,7 +1340,7 @@ final class MouseShell {
         return (spec, "latest")
     }
 
-    private func npmCmd(tool: String, _ args: [String], context: Context) async -> IO {
+    private func npmCmd(tool: String, _ args: [String], context: Context, interactive: Bool) async -> IO {
         let sub = args.first ?? "install"
         let specs = args.dropFirst().filter { !$0.hasPrefix("-") }
         switch sub {
@@ -1379,6 +1384,10 @@ final class MouseShell {
             } catch {
                 return IO(err: "\(tool): \(error.localizedDescription)", status: 1)
             }
+        // `npm run dev` is how a project is actually started — every README's first line.
+        case "run", "run-script", "start", "test", "stop", "restart":
+            return await npmRun(tool: tool, sub: sub, args: Array(args.dropFirst()),
+                                context: context, interactive: interactive)
         case "ls", "list":
             guard let manifest = PackageManager.readManifest(root: context.root), !manifest.packages.isEmpty else {
                 return IO(out: "no packages installed\n")
@@ -1388,8 +1397,94 @@ final class MouseShell {
             }
             return IO(out: joinLines(lines))
         default:
-            return IO(err: "\(tool): supported: install ls", status: 1)
+            return IO(err: "\(tool): supported: install run ls", status: 1)
         }
+    }
+
+    /// `npm run <script>` — the package.json script, run as an ordinary msh program so that a
+    /// script's `&&`, pipes and env prefixes behave, and so a long-running one (`vite`) takes
+    /// the terminal the same way it does when typed by hand. Installed bins already resolve by
+    /// name here, which is what `node_modules/.bin` on PATH buys elsewhere.
+    /// The package.json that governs the CURRENT directory — the one you are in, then upward.
+    /// A project in `app/` has its own scripts and the workspace root's are not them, which is
+    /// exactly the layout `npm run dev` is typed in.
+    private func nearestPackage(context: Context) -> [String: Any]? {
+        var directory = cwd.isEmpty ? context.root : context.root.appendingPathComponent(cwd)
+        while true {
+            if let data = try? Data(contentsOf: directory.appendingPathComponent("package.json")),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return json
+            }
+            if directory.path == context.root.path { return nil }
+            directory.deleteLastPathComponent()
+        }
+    }
+
+    private func npmRun(tool: String, sub: String, args: [String], context: Context,
+                        interactive: Bool) async -> IO {
+        guard let json = nearestPackage(context: context) else {
+            return IO(err: "\(tool): no package.json here", status: 1)
+        }
+        let scripts = json["scripts"] as? [String: String] ?? [:]
+        var name = sub
+        var extra = args
+        if sub == "run" || sub == "run-script" {
+            guard let first = extra.first else {
+                // Bare `npm run` lists what there is to run, as npm does.
+                guard !scripts.isEmpty else { return IO(out: "no scripts in package.json\n") }
+                let lines = scripts.sorted { $0.key < $1.key }.flatMap { ["  \($0.key)", "    \($0.value)"] }
+                return IO(out: joinLines(["Scripts available:"] + lines))
+            }
+            name = first
+            extra = Array(extra.dropFirst())
+        }
+        if extra.first == "--" { extra.removeFirst() }
+
+        guard let main = scripts[name] else {
+            // npm's one legacy default: `npm start` with no start script runs server.js.
+            if name == "start", resolve("server.js", context: context).map({ FileManager.default.fileExists(atPath: $0.url.path) }) == true {
+                return await runNamedScript("node server.js", as: name, extra: extra, json: json,
+                                            context: context, interactive: interactive)
+            }
+            return IO(err: "\(tool): Missing script: \"\(name)\"", status: 1)
+        }
+
+        // pre and post hooks, which real projects use for builds and migrations.
+        var out = "", err = ""
+        for (phase, command) in [("pre" + name, scripts["pre" + name]), (name, main), ("post" + name, scripts["post" + name])] {
+            guard let command else { continue }
+            let isMain = phase == name
+            let result = await runNamedScript(command, as: phase, extra: isMain ? extra : [],
+                                              json: json, context: context, interactive: interactive)
+            out += result.out
+            err += result.err
+            if result.status != 0 { return IO(out: out, err: err, status: result.status) }
+        }
+        return IO(out: out, err: err, status: 0)
+    }
+
+    private func runNamedScript(_ command: String, as name: String, extra: [String],
+                                json: [String: Any], context: Context, interactive: Bool) async -> IO {
+        let line = extra.isEmpty ? command : command + " " + extra.map(Self.quoteForShell).joined(separator: " ")
+        // The environment npm gives a script. Set on the shell rather than as a command prefix,
+        // because a prefix reaches only the FIRST command and scripts are routinely `a && b`.
+        let saved = env
+        env["npm_lifecycle_event"] = name
+        env["npm_lifecycle_script"] = command
+        if let packageName = json["name"] as? String { env["npm_package_name"] = packageName }
+        if let version = json["version"] as? String { env["npm_package_version"] = version }
+        defer { env = saved }
+        let outputs = await runProgram(line, context: context, interactive: interactive)
+        let text = outputs.filter { !$0.isError }.map(\.text).joined(separator: "\n")
+        let problems = outputs.filter(\.isError).map(\.text).joined(separator: "\n")
+        return IO(out: text.isEmpty ? "" : text + "\n",
+                  err: problems.isEmpty ? "" : problems + "\n",
+                  status: lastStatus)
+    }
+
+    /// Single-quote for a shell word, closing and reopening around any quote inside.
+    static func quoteForShell(_ word: String) -> String {
+        "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private func npxCmd(_ args: [String], stdin: String, context: Context, interactive: Bool = false) async -> IO {
