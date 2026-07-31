@@ -223,6 +223,15 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: a forked child's `env` accepts the values node accepts. Booleans and numbers are
+  coerced to strings as node coerces them (`PROD: false` arrives as `"false"`); one non-string
+  value used to make the whole environment fail to convert, and the child received none of it.
+- Node layer: a forked child's script path is normalised, so a path that walks back through a
+  file — `…/dist/index.js/../entry/process.js`, how a worker pool names its entry — resolves.
+  A script that cannot be read now fails with `Cannot find module` and exit 1 instead of being
+  run AS the program, which produced a child that did nothing and never exited.
+- Node layer: a forked child exits when nothing is listening. The IPC channel held its event
+  loop open by existing; in node that hold belongs to a `'message'` listener.
 - Node layer: a cyclic ESM import no longer throws. Real ESM reads a binding where it is used,
   by which time the cycle has closed; destructuring it at import time read it mid-evaluation, in
   TDZ — which is what execa's `send.js` ↔ `strict.js` pair hit. Imported names are read through

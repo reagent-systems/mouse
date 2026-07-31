@@ -282,7 +282,10 @@ final class NodeEngine: @unchecked Sendable {
         }
 
         installNativeBridge(argv: argv, cwd: cwd, stdin: stdin)
-        if ipcSink != nil { channelHoldsLoop = true; outstanding += 1 }
+        // The channel does NOT hold the loop by itself. A forked child that sends its result
+        // and has nothing else to do EXITS in node — the hold belongs to a message LISTENER,
+        // which is what says "more work may arrive". Holding unconditionally left every
+        // short-lived worker alive forever, waiting on a channel nobody was going to use.
         context.evaluateScript(Self.bootstrap)
         installRejectionHook()
 
@@ -886,14 +889,28 @@ final class NodeEngine: @unchecked Sendable {
         let ipcSend: @convention(block) (String) -> Void = { [weak self] json in
             self?.ipcSink?(json)
         }
-        // `process.disconnect()` gives the handle back; without it a child that finished its
-        // work would hang on a channel nobody is using.
+        // The hold follows the message LISTENER: taken when the first one is added, given back
+        // when the last one goes or the channel is disconnected. `process.disconnect()` uses the
+        // same door, since without it a child that finished its work would hang on a channel
+        // nobody is using.
+        let ipcHold: @convention(block) (Bool) -> Void = { [weak self] hold in
+            guard let self else { return }
+            if hold, !channelHoldsLoop {
+                channelHoldsLoop = true
+                outstanding += 1
+            } else if !hold, channelHoldsLoop {
+                channelHoldsLoop = false
+                outstanding -= 1
+                wakeup.signal()
+            }
+        }
         let ipcDisconnect: @convention(block) () -> Void = { [weak self] in
             guard let self, channelHoldsLoop else { return }
             channelHoldsLoop = false
             outstanding -= 1
             wakeup.signal()
         }
+        expose("ipcHold", ipcHold)
         expose("ipcSend", ipcSend)
         expose("ipcDisconnect", ipcDisconnect)
         expose("shellExec", shellExec)
@@ -924,9 +941,25 @@ final class NodeEngine: @unchecked Sendable {
             // decides whether to inherit — same as node, where `{...process.env}` is the caller's
             // job. An empty string means "say nothing", which inherits.
             var childEnv = env
+            // node COERCES env values to strings, and callers rely on it: vitest passes
+            // `PROD: false` and `DEV: true` as booleans. Casting the whole dictionary to
+            // [String: String] failed on those and dropped the ENTIRE environment on the floor —
+            // silently, so the child simply never saw the variables it was given.
             if !envJSON.isEmpty, let data = envJSON.data(using: .utf8),
-               let overrides = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                childEnv = overrides
+               let overrides = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                childEnv = overrides.reduce(into: [String: String]()) { result, pair in
+                    if pair.value is NSNull { return }
+                    if let text = pair.value as? String { result[pair.key] = text; return }
+                    // JSON true/false parse to NSNumber, which stringifies as 1/0 — but node
+                    // gives the child "true"/"false", and a program reading PROD sees the
+                    // difference. A boolean has to be told apart from the number it is stored as.
+                    if CFGetTypeID(pair.value as CFTypeRef) == CFBooleanGetTypeID() {
+                        result[pair.key] = (pair.value as? Bool) == true ? "true" : "false"
+                        return
+                    }
+                    if let number = pair.value as? NSNumber { result[pair.key] = number.stringValue; return }
+                    result[pair.key] = String(describing: pair.value)
+                }
             }
             let child = NodeEngine(root: root, env: childEnv, shell: shell)
             // Output crosses back as event-loop jobs on OUR thread, like every other event.
@@ -949,9 +982,29 @@ final class NodeEngine: @unchecked Sendable {
             }
             children[id] = child
             refedChildren.insert(id)
-            let source = isEval ? script : ((try? String(contentsOf: realURL(script), encoding: .utf8)) ?? script)
+            // The path is a VIRTUAL one and may carry dot segments — tinypool builds its worker
+            // path as `.../dist/index.js/../entry/process.js`, which the OS refuses outright
+            // because index.js is a file, not a directory. Normalising is what every other reader
+            // here does; this one did not, and its `?? script` fallback then ran the PATH as the
+            // program: a child that starts, does nothing, says nothing, and never exits — the
+            // failure that hid vitest's worker for an entire boundary.
+            var source = script
+            if !isEval {
+                guard let text = try? String(contentsOf: realURL(normalize(script)), encoding: .utf8) else {
+                    let message = "Error: Cannot find module '\(script)'\n"
+                    enqueueJob {
+                        carried.value.call(withArguments: ["stderr", message])
+                        carried.value.call(withArguments: ["exit", 1])
+                        self.children[id] = nil
+                        if self.refedChildren.remove(id) != nil { self.outstanding -= 1 }
+                    }
+                    return Int32(id)
+                }
+                source = text
+            }
+            let childPath = isEval ? "/[eval]" : normalize(script)
             Task.detached { [weak self] in
-                let result = await child.run(source: source, path: isEval ? "/[eval]" : script,
+                let result = await child.run(source: source, path: childPath,
                                              argv: ["node"] + (isEval ? [] : [script]) + argv,
                                              cwd: cwd, stdin: "")
                 self?.enqueueJob {
@@ -5901,6 +5954,28 @@ final class NodeEngine: @unchecked Sendable {
       // `if (process.send)` is how a program asks whether it was forked — defining a stub would
       // make every worker library take its IPC path and then talk into nothing.
       if (__hasIPC) {
+        // A 'message' listener is what says more work may arrive, so it — and not the channel's
+        // existence — is what holds the loop open. node behaves this way: a forked child that
+        // sends a result and listens for nothing exits on its own.
+        (function(){
+          const counted = function(){ bridge.ipcHold(process.listenerCount('message') > 0); };
+          for (const method of ['on', 'addListener', 'once', 'prependListener', 'prependOnceListener']) {
+            const original = process[method].bind(process);
+            process[method] = function(event, handler) {
+              const result = original(event, handler);
+              if (event === 'message') counted();
+              return result;
+            };
+          }
+          for (const method of ['off', 'removeListener', 'removeAllListeners']) {
+            const original = process[method].bind(process);
+            process[method] = function(event, handler) {
+              const result = original(event, handler);
+              if (event === 'message' || event === undefined) counted();
+              return result;
+            };
+          }
+        })();
         process.send = function(message, sendHandle, options, callback) {
           const done = typeof callback === 'function' ? callback
                      : (typeof options === 'function' ? options
