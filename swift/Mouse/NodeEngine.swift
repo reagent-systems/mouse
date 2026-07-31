@@ -8452,6 +8452,21 @@ final class NodeEngine: @unchecked Sendable {
           this.headers = new Headers(options.headers || (input instanceof Request ? input.headers : undefined));
           this.signal = options.signal || (input instanceof Request ? input.signal : undefined);
           this.redirect = options.redirect || 'follow';
+          // The rest of the fetch Request surface. Browser concepts that node still reports
+          // with fixed defaults, and libraries read them — an absent field reads as undefined
+          // and fails a comparison that node would pass.
+          this.mode = options.mode || 'cors';
+          this.credentials = options.credentials || 'same-origin';
+          this.cache = options.cache || 'default';
+          this.referrer = options.referrer === undefined ? 'about:client' : options.referrer;
+          this.referrerPolicy = options.referrerPolicy || '';
+          this.integrity = options.integrity || '';
+          this.keepalive = !!options.keepalive;
+          this.destination = '';
+          // node reports 'half' — a request body streams one way only.
+          this.duplex = options.duplex || 'half';
+          this.isHistoryNavigation = false;
+          this.isReloadNavigation = false;
           const body = options.body !== undefined ? options.body : (input instanceof Request ? input._bytes : undefined);
           defineBody(this, body === undefined || body === null ? Buffer.alloc(0)
                      : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))));
@@ -12197,9 +12212,26 @@ final class NodeEngine: @unchecked Sendable {
           this.remoteFamily = undefined;
           this.localAddress = undefined;
           this.localPort = undefined;
+          // node reports the address FAMILY alongside the address, and `server` is the listener
+          // that accepted this socket (null on a client socket). `bufferSize` is how much is
+          // waiting to go out — real state, read from the writable side rather than a constant.
+          this.localFamily = undefined;
+          this.server = null;
         }
         Socket.prototype = Object.create(Duplex.prototype);
         Socket.prototype.constructor = Socket;
+        Object.defineProperties(Socket.prototype, {
+          // Bytes queued on the writable side and not yet handed to the host.
+          bufferSize: {
+            get: function(){ return this.writableLength || 0; },
+            configurable: true,
+          },
+        });
+        // node's abrupt close: RST rather than FIN, so the peer sees ECONNRESET.
+        Socket.prototype.resetAndDestroy = function() {
+          this._resetOnDestroy = true;
+          return this.destroy();
+        };
         Object.defineProperty(Socket.prototype, 'readyState', {
           get: function() {
             if (this.connecting) return 'opening';
@@ -12274,6 +12306,7 @@ final class NodeEngine: @unchecked Sendable {
           }
           if (payload.local) {
             this.localAddress = payload.local.address;
+            this.localFamily = String(payload.local.address).indexOf(':') >= 0 ? 'IPv6' : 'IPv4';
             this.localPort = payload.local.port;
             this._localFamily = payload.local.family;
           }
@@ -12474,6 +12507,7 @@ final class NodeEngine: @unchecked Sendable {
               socket.pending = false;
               socket._adopt(payload);
               socket._server = this;
+              socket.server = this;   // node's public name for the listener that accepted it
               this._sockets[payload.id] = socket;
               this._connections.push(socket);
               const self = this;

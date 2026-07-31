@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: the rest of the fetch `Request` surface (`mode`, `credentials`, `cache`,
+  `referrer`, `referrerPolicy`, `integrity`, `keepalive`, `destination`, `duplex` and the
+  navigation flags), and `net.Socket`'s `bufferSize`, `localFamily`, `resetAndDestroy` and
+  `server` — the listener that accepted the socket.
+
 - Node layer: the connection and protocol options `http.Server` and `net.Server` record
   (`noDelay`, `keepAlive`, `keepAliveInitialDelay`, `pauseOnConnect`, `highWaterMark`,
   `httpAllowHalfOpen`, `maxRequestsPerSocket`, `requireHostHeader` and the rest); real
