@@ -205,6 +205,12 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `util.debuglog`, `util.debug` and `crypto.generateKey` work when destructured.
+  They reached through `this` for a sibling function, which is undefined the moment the
+  function travels alone — and `const { debuglog } = require('node:util')` is avvio's first
+  line, so **fastify could not boot**. The same shape as `process.hrtime`, which eslint
+  destructures; a gate now calls 29 core functions unbound and statically flags any core module
+  function that reaches through `this` before nesting a function of its own.
 - Node layer: `require`ing a `.node` file fails with `ERR_DLOPEN_FAILED` and the reason
   `process.dlopen` already gave — a compiled addon and a platform that will not map new
   executable pages — naming the file. It used to report `MODULE_NOT_FOUND`, which describes a

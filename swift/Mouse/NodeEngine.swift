@@ -5996,14 +5996,21 @@ final class NodeEngine: @unchecked Sendable {
             const stamp = new Date().toISOString();
             console.log.apply(console, [stamp].concat(Array.prototype.slice.call(arguments)));
           },
+          // NOT `this.debug(section)`, which is what this was. A core module's functions get
+          // destructured constantly — `const { debuglog } = require('node:util')` is the first
+          // line of avvio, which is what fastify boots through — and a function that reaches
+          // through `this` is undefined the moment it travels alone. The same shape as
+          // process.hrtime, which eslint destructures.
           debug: function(section) {
             const enabled = String(process.env.NODE_DEBUG || '').split(/[ ,]/).indexOf(section) >= 0;
-            return enabled ? function() {
+            const logger = enabled ? function() {
               console.error.apply(console, [section.toUpperCase() + ' ' + process.pid + ':']
                 .concat(Array.prototype.slice.call(arguments)));
             } : function(){};
+            logger.enabled = enabled;
+            return logger;
           },
-          debuglog: function(section) { return this.debug(section); },
+          get debuglog() { return this.debug; },
           getSystemErrorMap: function() { return new Map(); },
           getSystemErrorMessage: function(code) { return 'system error ' + code; },
           aborted: function(signal) {
@@ -12572,6 +12579,10 @@ final class NodeEngine: @unchecked Sendable {
           return verifyWith(this._algorithm, Buffer.concat(this._chunks), key, bytes);
         };
 
+        function generateSecretKeySync(type, options) {
+          const length = ((options && options.length) || 256) / 8;
+          return new SecretKeyObject(Buffer.from(bridge.randomBytes(length), 'base64'));
+        }
         function generateKeyPairSync(type, options) {
           options = options || {};
           // node raises ERR_INVALID_ARG_TYPE for a missing type, and refusal language here made a
@@ -12730,13 +12741,10 @@ final class NodeEngine: @unchecked Sendable {
               process.nextTick(function(){ callback(null, pair.publicKey, pair.privateKey); });
             } catch (error) { process.nextTick(function(){ callback(error); }); }
           },
-          generateKeySync: function(type, options) {
-            const length = ((options && options.length) || 256) / 8;
-            return new SecretKeyObject(Buffer.from(bridge.randomBytes(length), 'base64'));
-          },
+          generateKeySync: generateSecretKeySync,
           generateKey: function(type, options, callback) {
             try {
-              const key = this.generateKeySync(type, options);
+              const key = generateSecretKeySync(type, options);
               process.nextTick(function(){ callback(null, key); });
             } catch (error) { process.nextTick(function(){ callback(error); }); }
           },
