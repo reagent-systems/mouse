@@ -38,6 +38,10 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: spawning a command that does not exist emits `'error'` with `ENOENT` and closes,
+  as node does, instead of reporting exit 127 — which made "not installed" look like "ran and
+  failed" to anything checking for a missing binary.
+
 - Node layer: `http.Server` emits `'clientError'` for a malformed request, carrying node's
   `HPE_INVALID_METHOD` code and the socket; with no listener it answers `400 Bad Request` and
   closes, as node does. A bad request line was previously accepted as a message with a nonsense

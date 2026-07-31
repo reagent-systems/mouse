@@ -8395,11 +8395,30 @@ final class NodeEngine: @unchecked Sendable {
           child.pid = 1;
           child.kill = function(){};
           setImmediate(function() {
+            const parts = [command].concat((argv || []).map(shellQuote));
+            const probe = runShell(parts.join(' '));
+            // A command that does not exist is not a command that FAILED. node reports it as an
+            // ENOENT 'error' with no 'spawn' and no exit code, because the exec never happened —
+            // and code that checks for a missing binary listens for exactly that. Reporting
+            // exit 127 instead made "not installed" indistinguishable from "ran and failed".
+            // Only a genuine "command not found" is ENOENT. "No shell attached" is a fact
+            // about the HOST, not about the command, and folding the two together would let a
+            // missing shell masquerade as a missing binary — the same conflation that made an
+            // earlier version of this check appear verified when it was measuring the wrong
+            // condition entirely.
+            if (probe.status === 127 && /(not found|No such file)/i.test(String(probe.stderr || ''))) {
+              const error = new Error('spawn ' + command + ' ENOENT');
+              Object.assign(error, { code: 'ENOENT', errno: -2, syscall: 'spawn ' + command, path: command,
+                                     spawnargs: (argv || []).slice() });
+              child.emit('error', error);
+              // node still closes, with a null code and the negative errno.
+              process.nextTick(function(){ child.emit('close', -2, null); });
+              return;
+            }
             // node emits 'spawn' once the child is running, before any output. A consumer that
             // waits for it — and several do — otherwise waits forever.
             child.emit('spawn');
-            const parts = [command].concat((argv || []).map(shellQuote));
-            const r = runShell(parts.join(' '));
+            const r = probe;
             if (r.stdout) child.stdout.emit('data', Buffer.from(r.stdout));
             if (r.stderr) child.stderr.emit('data', Buffer.from(r.stderr));
             child.stdout.emit('end');
