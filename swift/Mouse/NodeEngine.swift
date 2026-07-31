@@ -5035,6 +5035,26 @@ final class NodeEngine: @unchecked Sendable {
         return error;
       }
       globalThis.process = process;
+      // An uncaught throw inside a worker reached the parent as nothing but exit code 1 — the
+      // message and stack were lost, so the parent knew a worker had died and not why. Reported
+      // over the channel and then exited at once: deferring the exit so the send can "flush" is
+      // what hangs, because the open channel is itself what holds the loop open.
+      //
+      // Installed HERE rather than in the worker_threads factory, which only runs if the worker
+      // happens to import that module — and a worker that throws on its first line never does.
+      if (__isWorker) {
+        process.on('uncaughtException', function(error) {
+          try {
+            process.send({ __mouseWorkerError: {
+              message: error && error.message !== undefined ? String(error.message) : String(error),
+              name: error && error.name ? String(error.name) : 'Error',
+              stack: error && error.stack ? String(error.stack) : undefined,
+              code: error && error.code,
+            } });
+          } catch (ignored) { /* the channel is already gone */ }
+          process.exit(1);
+        });
+      }
       // A forked child's channel. `process.send` is left UNDEFINED without one, because
       // `if (process.send)` is how a program asks whether it was forked — defining a stub would
       // make every worker library take its IPC path and then talk into nothing.
@@ -10388,6 +10408,15 @@ final class NodeEngine: @unchecked Sendable {
           this._child.on('message', function(message) {
             if (message && typeof message === 'object' && message[WIRE]) {
               broadcastIn(message[WIRE], self);
+              return;
+            }
+            if (message && typeof message === 'object' && message.__mouseWorkerError) {
+              const detail = message.__mouseWorkerError;
+              const error = new Error(detail.message);
+              error.name = detail.name || 'Error';
+              if (detail.stack) error.stack = detail.stack;
+              if (detail.code !== undefined) error.code = detail.code;
+              self.emit('error', error);
               return;
             }
             self.emit('message', message);

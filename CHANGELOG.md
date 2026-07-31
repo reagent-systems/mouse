@@ -38,6 +38,10 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: a worker that throws emits `'error'` on the `Worker` with the real exception —
+  name, message and stack — before `'exit'`. The parent previously received only exit code 1,
+  so it knew a worker had died but not why.
+
 - Node layer: spawning a command that does not exist emits `'error'` with `ENOENT` and closes,
   as node does, instead of reporting exit 127 — which made "not installed" look like "ran and
   failed" to anything checking for a missing binary.
