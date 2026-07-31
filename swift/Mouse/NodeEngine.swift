@@ -12449,6 +12449,184 @@ final class NodeEngine: @unchecked Sendable {
         };
         ServerStream.prototype.close = function() { this.closed = true; };
 
+        /// The client half. The frame layer is the same; what differs is who opens streams
+        /// (odd ids, from the client, counting up) and who waits for whom.
+        function ClientSession(authority, options) {
+          EventEmitter.call(this);
+          const url = new URL(String(authority));
+          this.decoder = new hpack.Decoder(4096);
+          this.encoder = new hpack.Encoder(4096);
+          this.streams = new Map();
+          this.buffer = Buffer.alloc(0);
+          this.nextId = 1;
+          this.pings = [];
+          this.authority = url.host;
+          this.scheme = url.protocol === 'https:' ? 'https' : 'http';
+          this.closed = false;
+          const self = this;
+          // The session owns its outbox rather than trusting write ordering: the preface must be
+          // the FIRST bytes on the connection and SETTINGS the first frame, and a caller that
+          // requests before the socket is up would otherwise put a HEADERS frame in front of
+          // both — which a real peer answers with GOAWAY, as node's did.
+          this._ready = false;
+          this._outbox = [];
+          this.socket = net.connect({ port: Number(url.port || 80), host: url.hostname }, function() {
+            self.socket.write(PREFACE);
+            self.socket.write(frame(TYPE.SETTINGS, 0, 0, Buffer.alloc(0)));
+            self._ready = true;
+            for (const pending of self._outbox) self.socket.write(pending);
+            self._outbox = [];
+            self.emit('connect', self);
+          });
+          this.socket.on('data', function(chunk) { self._receive(chunk); });
+          this.socket.on('error', function(error) { self.emit('error', error); });
+          this.socket.on('close', function() { self.closed = true; self.emit('close'); });
+        }
+        ClientSession.prototype = Object.create(EventEmitter.prototype);
+        ClientSession.prototype.constructor = ClientSession;
+
+        ClientSession.prototype._send = function(bytes) {
+          if (this._ready) this.socket.write(bytes); else this._outbox.push(bytes);
+        };
+        ClientSession.prototype._receive = function(chunk) {
+          this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
+          while (this.buffer.length >= 9) {
+            const length = this.buffer.readUIntBE(0, 3);
+            if (this.buffer.length < 9 + length) return;
+            const type = this.buffer[3], flags = this.buffer[4];
+            const streamId = this.buffer.readUInt32BE(5) & 0x7fffffff;
+            const payload = this.buffer.slice(9, 9 + length);
+            this.buffer = this.buffer.slice(9 + length);
+            try { this._frame(type, flags, streamId, payload); }
+            catch (error) { this.emit('error', error); this.socket.destroy(); return; }
+          }
+        };
+
+        ClientSession.prototype._frame = function(type, flags, streamId, payload) {
+          if (type === TYPE.SETTINGS) {
+            if (!(flags & FLAG.ACK)) this._send(frame(TYPE.SETTINGS, FLAG.ACK, 0));
+            return;
+          }
+          if (type === TYPE.PING) {
+            if (flags & FLAG.ACK) { const waiting = this.pings.shift(); if (waiting) waiting(null); }
+            else this._send(frame(TYPE.PING, FLAG.ACK, 0, payload));
+            return;
+          }
+          if (type === TYPE.WINDOW_UPDATE || type === TYPE.PRIORITY) return;
+          if (type === TYPE.GOAWAY) { this.socket.end(); return; }
+          if (type === TYPE.RST_STREAM) {
+            const stream = this.streams.get(streamId);
+            if (stream) { stream.emit('aborted'); this.streams.delete(streamId); }
+            return;
+          }
+          if (type === TYPE.HEADERS || type === TYPE.CONTINUATION) {
+            let block = payload;
+            if (type === TYPE.HEADERS) {
+              let offset = 0, end = payload.length;
+              if (flags & FLAG.PADDED) { end -= payload[0]; offset = 1; }
+              if (flags & FLAG.PRIORITY) offset += 5;
+              block = payload.slice(offset, end);
+              this.pendingHeaders = { streamId: streamId, pieces: [block],
+                                      endStream: !!(flags & FLAG.END_STREAM) };
+            } else if (this.pendingHeaders) {
+              this.pendingHeaders.pieces.push(block);
+            }
+            if (!(flags & FLAG.END_HEADERS)) return;
+            const pending = this.pendingHeaders;
+            this.pendingHeaders = null;
+            const list = this.decoder.decode(Buffer.concat(pending.pieces));
+            const headers = {};
+            for (const pair of list) {
+              if (headers[pair[0]] === undefined) headers[pair[0]] = pair[1];
+              else if (Array.isArray(headers[pair[0]])) headers[pair[0]].push(pair[1]);
+              else headers[pair[0]] = [headers[pair[0]], pair[1]];
+            }
+            const stream = this.streams.get(pending.streamId);
+            if (stream) {
+              // A trailer block arrives AFTER the body: the first one is the response.
+              if (stream._sawResponse) stream.emit('trailers', headers);
+              else { stream._sawResponse = true; stream.emit('response', headers); }
+              if (pending.endStream) { stream.push(null); this.streams.delete(pending.streamId); }
+            }
+            return;
+          }
+          if (type === TYPE.DATA) {
+            const stream = this.streams.get(streamId);
+            let body = payload;
+            if (flags & FLAG.PADDED) body = payload.slice(1, payload.length - payload[0]);
+            if (stream && body.length) stream.push(body);
+            if (body.length) {
+              const credit = Buffer.alloc(4);
+              credit.writeUInt32BE(body.length);
+              this._send(frame(TYPE.WINDOW_UPDATE, 0, 0, credit));
+              if (stream) this._send(frame(TYPE.WINDOW_UPDATE, 0, streamId, credit));
+            }
+            if (stream && (flags & FLAG.END_STREAM)) { stream.push(null); this.streams.delete(streamId); }
+            return;
+          }
+        };
+
+        ClientSession.prototype.request = function(headers, options) {
+          const { Readable } = coreRequire('stream');
+          const id = this.nextId;
+          this.nextId += 2;                                   // client streams are ODD
+          const session = this;
+          // A real Readable, so `setEncoding`, `for await` and `pipe` all work the way a caller
+          // expects of node's ClientHttp2Stream.
+          const stream = new Readable({ read: function(){} });
+          stream.id = id;
+          stream.session = session;
+          stream._sawResponse = false;
+          this.streams.set(id, stream);
+
+          const list = [];
+          const given = headers || {};
+          list.push([':method', String(given[':method'] || 'GET')]);
+          list.push([':path', String(given[':path'] || '/')]);
+          list.push([':scheme', String(given[':scheme'] || session.scheme)]);
+          list.push([':authority', String(given[':authority'] || session.authority)]);
+          for (const name of Object.keys(given)) {
+            if (name.charAt(0) === ':') continue;
+            const value = given[name];
+            if (Array.isArray(value)) { for (const item of value) list.push([name.toLowerCase(), String(item)]); }
+            else list.push([name.toLowerCase(), String(value)]);
+          }
+          const block = session.encoder.encode(list);
+          const endStream = !!(options && options.endStream);
+          session._send(frame(TYPE.HEADERS, FLAG.END_HEADERS | (endStream ? FLAG.END_STREAM : 0), id, block));
+
+          stream.write = function(chunk, encoding) {
+            const body = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8');
+            for (let offset = 0; offset < body.length; offset += 16384) {
+              session._send(frame(TYPE.DATA, 0, id, body.slice(offset, offset + 16384)));
+            }
+            return true;
+          };
+          stream.end = function(chunk, encoding) {
+            if (chunk !== undefined && chunk !== null && typeof chunk !== 'function') stream.write(chunk, encoding);
+            session._send(frame(TYPE.DATA, FLAG.END_STREAM, id, Buffer.alloc(0)));
+            return stream;
+          };
+          stream.close = function() { session.streams.delete(id); };
+          return stream;
+        };
+
+        ClientSession.prototype.ping = function(payload, callback) {
+          if (typeof payload === 'function') { callback = payload; payload = undefined; }
+          const body = payload && payload.length === 8 ? payload : Buffer.alloc(8);
+          this.pings.push(callback || function(){});
+          this._send(frame(TYPE.PING, 0, 0, body));
+          return true;
+        };
+        ClientSession.prototype.close = function(callback) {
+          const payload = Buffer.alloc(8);
+          this._send(frame(TYPE.GOAWAY, 0, 0, payload));
+          this.socket.end();
+          this.closed = true;
+          if (callback) callback();
+        };
+        ClientSession.prototype.destroy = function() { this.socket.destroy(); this.closed = true; };
+
         function Http2Server(options, handler) {
           EventEmitter.call(this);
           const self = this;
@@ -12492,9 +12670,11 @@ final class NodeEngine: @unchecked Sendable {
             throw Object.assign(new Error('http2.createSecureServer is not available: h2 over TLS needs ALPN negotiation on a raw socket, which this platform does not expose. http2.createServer (cleartext h2c) is real'),
                                 { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
           },
-          connect: function() {
-            throw Object.assign(new Error('http2.connect is not available: the client half of HTTP/2 is not written here. The SERVER half is — http2.createServer speaks cleartext h2c, framing and HPACK and all, and real node\'s client talks to it'),
-                                { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
+          connect: function(authority, options, listener) {
+            if (typeof options === 'function') { listener = options; options = {}; }
+            const session = new ClientSession(authority, options || {});
+            if (typeof listener === 'function') session.on('connect', listener);
+            return session;
           },
         };
       };
@@ -15184,6 +15364,24 @@ final class NodeEngine: @unchecked Sendable {
         };
         Socket.prototype._write = function(chunk, encoding, callback) {
           if (!this._sid || this.destroyed) { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); return; }
+          // Written BEFORE the connection completes: node queues those and flushes them on
+          // 'connect', so a client that sends the moment it asks for a socket works. Handing
+          // them to the host early loses them — silently, which is how an HTTP/2 client sat
+          // waiting for a response to a request that was never sent.
+          if (this.connecting) {
+            (this._preConnectWrites = this._preConnectWrites || []).push([chunk, encoding, callback]);
+            if (!this._preConnectHooked) {
+              this._preConnectHooked = true;
+              const self = this;
+              this.once('connect', function() {
+                const queued = self._preConnectWrites || [];
+                self._preConnectWrites = null;
+                self._preConnectHooked = false;
+                for (const entry of queued) self._write(entry[0], entry[1], entry[2]);
+              });
+            }
+            return;
+          }
           const buffer = __toBytes(chunk, encoding);
           this.bytesWritten += buffer.length;
           this._touchTimeout();

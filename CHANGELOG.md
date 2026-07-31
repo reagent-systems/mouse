@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`http2.connect` is real** — the client half, with its own stream ids, a Readable
+  per stream (so `setEncoding`, `for await` and `pipe` work), trailers, and `session.ping`.
+  Verified in BOTH directions against real node: its client against this engine's server, and
+  this engine's client against its server.
 - Node layer: **`http2.createServer` is real** — cleartext h2c on the engine's own TCP sockets,
   with frame reading and writing, the connection preface, SETTINGS, HEADERS with CONTINUATION,
   DATA with flow-control credit, PING, GOAWAY and RST_STREAM, over the HPACK from the previous
@@ -269,6 +273,9 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `socket.write()` before the connection completes is queued and flushed on
+  `'connect'`, as node does, instead of being dropped. A client that writes the moment it opens
+  a socket lost those bytes silently.
 - Node layer: `fs.mkdir(path, { recursive: true })` returns the created path in the caller's
   own terms (`deep`, not `/deep`), as node does — the previous fix returned it resolved.
 - Node layer: `util.format`'s `%c` consumes its argument and renders nothing, as node does —
