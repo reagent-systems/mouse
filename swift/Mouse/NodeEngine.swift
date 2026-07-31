@@ -9473,8 +9473,13 @@ final class NodeEngine: @unchecked Sendable {
                 const duplex = typeof this._write === 'function' && this._wbuf !== undefined;
                 if (this._autoDestroy !== false && (!duplex || this._finishEmitted)) {
                   this.destroy();
+                  // 'close' belongs to the DESTROY, not to the end of reading. A duplex whose
+                  // writable half is still open has not closed — announcing it there tells a
+                  // caller mid-exchange that the peer hung up, and a request handler that has
+                  // only just received its request body abandons the response it was about to
+                  // write.
+                  process.nextTick(() => emitCloseOnce(this));
                 }
-                process.nextTick(() => emitCloseOnce(this));
               });
             }
           },
@@ -12280,6 +12285,7 @@ final class NodeEngine: @unchecked Sendable {
           this.decoder = new hpack.Decoder(4096);
           this.encoder = new hpack.Encoder(4096);
           this.streams = new Map();
+          this.pings = [];
           this.buffer = Buffer.alloc(0);
           this.sawPreface = false;
           // A header block can be split across CONTINUATION frames, and nothing else may come
@@ -12318,21 +12324,60 @@ final class NodeEngine: @unchecked Sendable {
           }
         };
 
+        // A peer's SETTINGS payload is six bytes per entry: a 16-bit identifier and a 32-bit
+        // value. Both sessions announce what they parsed — a library may refuse to send anything
+        // until it has seen the other side's settings, and grpc-js does exactly that.
+        const SETTING_NAMES = { 1: 'headerTableSize', 2: 'enablePush', 3: 'maxConcurrentStreams',
+                                4: 'initialWindowSize', 5: 'maxFrameSize', 6: 'maxHeaderListSize' };
+        const SETTING_IDS = { headerTableSize: 1, enablePush: 2, maxConcurrentStreams: 3,
+                              initialWindowSize: 4, maxFrameSize: 5, maxHeaderListSize: 6 };
+        function settingsPayload(settings) {
+          const entries = [];
+          for (const name of Object.keys(settings || {})) {
+            const id = SETTING_IDS[name];
+            if (id === undefined) continue;
+            const entry = Buffer.alloc(6);
+            entry.writeUInt16BE(id, 0);
+            entry.writeUInt32BE(name === 'enablePush' ? (settings[name] ? 1 : 0) : Number(settings[name]), 2);
+            entries.push(entry);
+          }
+          return Buffer.concat(entries);
+        }
+        function announceSettings(session, payload) {
+          const settings = {};
+          for (let offset = 0; offset + 6 <= payload.length; offset += 6) {
+            const key = SETTING_NAMES[payload.readUInt16BE(offset)];
+            if (key) settings[key] = payload.readUInt32BE(offset + 2);
+          }
+          session.remoteSettings = settings;
+          session.emit('remoteSettings', settings);
+        }
+
         ServerSession.prototype._frame = function(type, flags, streamId, payload) {
           const self = this;
           if (type === TYPE.SETTINGS) {
-            if (!(flags & FLAG.ACK)) this.socket.write(frame(TYPE.SETTINGS, FLAG.ACK, 0));
+            if (!(flags & FLAG.ACK)) {
+              this.socket.write(frame(TYPE.SETTINGS, FLAG.ACK, 0));
+              announceSettings(this, payload);
+            }
             return;
           }
           if (type === TYPE.PING) {
-            if (!(flags & FLAG.ACK)) this.socket.write(frame(TYPE.PING, FLAG.ACK, 0, payload));
+            if (flags & FLAG.ACK) {
+              const waiting = this.pings.shift();
+              if (waiting && waiting.callback) waiting.callback(null, Date.now() - waiting.sent, waiting.body);
+            } else this.socket.write(frame(TYPE.PING, FLAG.ACK, 0, payload));
             return;
           }
           if (type === TYPE.WINDOW_UPDATE || type === TYPE.PRIORITY) return;
           if (type === TYPE.GOAWAY) { this.socket.end(); return; }
           if (type === TYPE.RST_STREAM) {
             const stream = this.streams.get(streamId);
-            if (stream) { stream.emit('aborted'); this.streams.delete(streamId); }
+            if (stream) {
+              stream.rstCode = payload.length >= 4 ? payload.readUInt32BE(0) : 0;
+              stream.emit('aborted');
+              this.streams.delete(streamId);
+            }
             return;
           }
           if (type === TYPE.HEADERS || type === TYPE.CONTINUATION) {
@@ -12371,7 +12416,7 @@ final class NodeEngine: @unchecked Sendable {
             const stream = this.streams.get(streamId);
             let body = payload;
             if (flags & FLAG.PADDED) body = payload.slice(1, payload.length - payload[0]);
-            if (stream && body.length) stream.emit('data', body);
+            if (stream && body.length) stream.push(body);
             // The window is credited back immediately: this end does not buffer, so holding
             // the sender back would only stall a transfer nobody is waiting on.
             if (body.length) {
@@ -12385,6 +12430,26 @@ final class NodeEngine: @unchecked Sendable {
           }
         };
 
+        ServerSession.prototype.setTimeout = function(ms, callback) {
+          if (callback) this.once('timeout', callback);
+          return this;
+        };
+        ServerSession.prototype.settings = function(settings, callback) {
+          this.socket.write(frame(TYPE.SETTINGS, 0, 0, settingsPayload(settings)));
+          if (callback) process.nextTick(callback);
+          return this;
+        };
+        ServerSession.prototype.destroy = function() { this.socket.destroy(); };
+        // node answers a ping callback when the ACK COMES BACK, with how long it took and the
+        // payload that made the round trip. Calling it straight away reports a healthy peer
+        // without having heard from one, which is the opposite of what a ping is for.
+        ServerSession.prototype.ping = function(payload, callback) {
+          if (typeof payload === 'function') { callback = payload; payload = undefined; }
+          const body = payload && payload.length === 8 ? payload : Buffer.alloc(8);
+          this.pings.push({ callback: callback, sent: Date.now(), body: body });
+          this.socket.write(frame(TYPE.PING, 0, 0, body));
+          return true;
+        };
         ServerSession.prototype.close = function(callback) {
           const payload = Buffer.alloc(8);
           payload.writeUInt32BE(0, 0);
@@ -12394,20 +12459,28 @@ final class NodeEngine: @unchecked Sendable {
           if (callback) callback();
         };
 
+        // A real Duplex, as node's ServerHttp2Stream is, and both halves earn their keep.
+        // Readable: a handler may pause() on line one, finish wiring itself up, and resume() to
+        // receive what arrived meanwhile — emitting 'data' straight from the frame handler
+        // delivered the first message DURING the caller's own constructor. Duplex rather than
+        // Readable: a request body that ends must not destroy the stream, because the response
+        // has not been written yet, and `destroyed` is what callers test for "cancelled".
         function ServerStream(session, id) {
-          EventEmitter.call(this);
+          const { Duplex } = coreRequire('stream');
+          Duplex.call(this, { read: function() {}, write: function() {} });
           this.session = session;
           this.id = id;
           this.headersSent = false;
-          this.closed = false;
+          this.rstCode = 0;
+          this._closed = false;
         }
-        ServerStream.prototype = Object.create(EventEmitter.prototype);
+        ServerStream.prototype = Object.create(coreRequire('stream').Duplex.prototype);
         ServerStream.prototype.constructor = ServerStream;
         ServerStream.prototype._endReceived = function() {
-          const self = this;
-          process.nextTick(function() { self.emit('end'); });
+          this.push(null);
         };
         ServerStream.prototype.respond = function(headers, options) {
+          if (options && options.waitForTrailers) this._waitForTrailers = true;
           const list = [];
           const status = (headers && headers[':status']) || 200;
           list.push([':status', String(status)]);
@@ -12422,7 +12495,7 @@ final class NodeEngine: @unchecked Sendable {
           this.session.socket.write(frame(TYPE.HEADERS, FLAG.END_HEADERS | (endStream ? FLAG.END_STREAM : 0),
                                           this.id, block));
           this.headersSent = true;
-          if (endStream) this.closed = true;
+          if (endStream) this._closed = true;
         };
         ServerStream.prototype.write = function(chunk, encoding, callback) {
           if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
@@ -12441,13 +12514,69 @@ final class NodeEngine: @unchecked Sendable {
           if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
           if (!this.headersSent) this.respond({ ':status': 200 });
           if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+          // With `waitForTrailers` the caller wants the last word: the stream is NOT closed by
+          // this DATA frame, and 'wantTrailers' asks for the block that will close it.
+          if (this._waitForTrailers) {
+            this.session.socket.write(frame(TYPE.DATA, 0, this.id, Buffer.alloc(0)));
+            const self = this;
+            process.nextTick(function() { self.emit('wantTrailers'); });
+            if (callback) process.nextTick(callback);
+            return this;
+          }
           this.session.socket.write(frame(TYPE.DATA, FLAG.END_STREAM, this.id, Buffer.alloc(0)));
-          this.closed = true;
+          this._closed = true;
+          this._finishWritable();
           const self = this;
           process.nextTick(function() { self.emit('close'); if (callback) callback(); });
           return this;
         };
-        ServerStream.prototype.close = function() { this.closed = true; };
+        // Ending a server stream ends its WRITABLE half, and node says so before it says
+        // 'close': `writableEnded` flips, 'finish' fires, and only then does the stream close.
+        // Our end() and sendTrailers() write their own frames rather than going through the
+        // Writable machinery, so they have to report the same state it would have.
+        ServerStream.prototype._finishWritable = function() {
+          if (this._finishEmitted) return;
+          this._writableEnded = true;
+          this._finishEmitted = true;
+          this.writable = false;
+          this.emit('finish');
+        };
+        ServerStream.prototype.close = function(code, callback) {
+          this._closed = true;
+          const payload = Buffer.alloc(4);
+          payload.writeUInt32BE(Number(code) || 0);
+          this.session.socket.write(frame(TYPE.RST_STREAM, 0, this.id, payload));
+          if (callback) process.nextTick(callback);
+        };
+        /// TRAILERS: a second header block after the body, ending the stream. gRPC carries its
+        /// status this way — the response headers say 200 and the OUTCOME arrives at the end,
+        /// which is the whole reason the protocol has them.
+        ServerStream.prototype.sendTrailers = function(headers) {
+          const list = [];
+          for (const name of Object.keys(headers || {})) {
+            const value = headers[name];
+            if (Array.isArray(value)) { for (const item of value) list.push([name.toLowerCase(), String(item)]); }
+            else list.push([name.toLowerCase(), String(value)]);
+          }
+          const block = this.session.encoder.encode(list);
+          this.session.socket.write(frame(TYPE.HEADERS, FLAG.END_HEADERS | FLAG.END_STREAM, this.id, block));
+          this._closed = true;
+          this._finishWritable();
+          const self = this;
+          process.nextTick(function() { self.emit('close'); });
+        };
+        ServerStream.prototype.setTimeout = function(ms, callback) {
+          if (callback) this.once('timeout', callback);
+          return this;
+        };
+        // `closed` is a readonly getter on Readable — the stream's own lifecycle flag has to
+        // live beside it, not overwrite it.
+        Object.defineProperty(ServerStream.prototype, 'closed', {
+          get: function() { return !!this._closed; }, configurable: true,
+        });
+        Object.defineProperty(ServerStream.prototype, 'sentHeaders', {
+          get: function() { return this.headersSent; }, configurable: true,
+        });
 
         /// The client half. The frame layer is the same; what differs is who opens streams
         /// (odd ids, from the client, counting up) and who waits for whom.
@@ -12470,14 +12599,27 @@ final class NodeEngine: @unchecked Sendable {
           // both — which a real peer answers with GOAWAY, as node's did.
           this._ready = false;
           this._outbox = [];
-          this.socket = net.connect({ port: Number(url.port || 80), host: url.hostname }, function() {
+          function begin() {
             self.socket.write(PREFACE);
             self.socket.write(frame(TYPE.SETTINGS, 0, 0, Buffer.alloc(0)));
             self._ready = true;
             for (const pending of self._outbox) self.socket.write(pending);
             self._outbox = [];
-            self.emit('connect', self);
-          });
+            self.emit('connect', self, self.socket);
+          }
+          // `createConnection` hands the session a socket the CALLER made — which is how a
+          // library that does its own dialling (grpc-js resolves and connects itself, then asks
+          // for HTTP/2 over the result) attaches. Ignoring it meant opening a second connection
+          // to the same address and speaking into it while the caller watched the first.
+          const provided = options && typeof options.createConnection === 'function'
+            ? options.createConnection(url, options) : null;
+          if (provided) {
+            this.socket = provided;
+            if (provided.connecting) provided.once('connect', begin);
+            else process.nextTick(begin);
+          } else {
+            this.socket = net.connect({ port: Number(url.port || 80), host: url.hostname }, begin);
+          }
           this.socket.on('data', function(chunk) { self._receive(chunk); });
           this.socket.on('error', function(error) { self.emit('error', error); });
           this.socket.on('close', function() { self.closed = true; self.emit('close'); });
@@ -12504,11 +12646,17 @@ final class NodeEngine: @unchecked Sendable {
 
         ClientSession.prototype._frame = function(type, flags, streamId, payload) {
           if (type === TYPE.SETTINGS) {
-            if (!(flags & FLAG.ACK)) this._send(frame(TYPE.SETTINGS, FLAG.ACK, 0));
+            if (!(flags & FLAG.ACK)) {
+              this._send(frame(TYPE.SETTINGS, FLAG.ACK, 0));
+              announceSettings(this, payload);
+            }
             return;
           }
           if (type === TYPE.PING) {
-            if (flags & FLAG.ACK) { const waiting = this.pings.shift(); if (waiting) waiting(null); }
+            if (flags & FLAG.ACK) {
+              const waiting = this.pings.shift();
+              if (waiting && waiting.callback) waiting.callback(null, Date.now() - waiting.sent, waiting.body);
+            }
             else this._send(frame(TYPE.PING, FLAG.ACK, 0, payload));
             return;
           }
@@ -12516,7 +12664,11 @@ final class NodeEngine: @unchecked Sendable {
           if (type === TYPE.GOAWAY) { this.socket.end(); return; }
           if (type === TYPE.RST_STREAM) {
             const stream = this.streams.get(streamId);
-            if (stream) { stream.emit('aborted'); this.streams.delete(streamId); }
+            if (stream) {
+              stream.rstCode = payload.length >= 4 ? payload.readUInt32BE(0) : 0;
+              stream.emit('aborted');
+              this.streams.delete(streamId);
+            }
             return;
           }
           if (type === TYPE.HEADERS || type === TYPE.CONTINUATION) {
@@ -12543,9 +12695,13 @@ final class NodeEngine: @unchecked Sendable {
             }
             const stream = this.streams.get(pending.streamId);
             if (stream) {
-              // A trailer block arrives AFTER the body: the first one is the response.
-              if (stream._sawResponse) stream.emit('trailers', headers);
-              else { stream._sawResponse = true; stream.emit('response', headers); }
+              // A trailer block arrives AFTER the body: the first one is the response. The FLAGS
+              // go with it, because a response that also ends the stream is the whole message —
+              // gRPC answers a rejected call that way, with the status in the only block it
+              // sends, and a caller that never sees END_STREAM reads it as a bodyless success.
+              const frameFlags = pending.endStream ? FLAG.END_STREAM : 0;
+              if (stream._sawResponse) stream.emit('trailers', headers, frameFlags);
+              else { stream._sawResponse = true; stream.emit('response', headers, frameFlags); }
               if (pending.endStream) { stream.push(null); this.streams.delete(pending.streamId); }
             }
             return;
@@ -12576,6 +12732,7 @@ final class NodeEngine: @unchecked Sendable {
           const stream = new Readable({ read: function(){} });
           stream.id = id;
           stream.session = session;
+          stream.rstCode = 0;
           stream._sawResponse = false;
           this.streams.set(id, stream);
 
@@ -12614,7 +12771,7 @@ final class NodeEngine: @unchecked Sendable {
         ClientSession.prototype.ping = function(payload, callback) {
           if (typeof payload === 'function') { callback = payload; payload = undefined; }
           const body = payload && payload.length === 8 ? payload : Buffer.alloc(8);
-          this.pings.push(callback || function(){});
+          this.pings.push({ callback: callback, sent: Date.now(), body: body });
           this._send(frame(TYPE.PING, 0, 0, body));
           return true;
         };
@@ -12626,6 +12783,29 @@ final class NodeEngine: @unchecked Sendable {
           if (callback) callback();
         };
         ClientSession.prototype.destroy = function() { this.socket.destroy(); this.closed = true; };
+        // A session is a handle on a socket, and a library decides whether it should hold the
+        // program open: grpc-js unrefs its channels so an idle connection does not keep a CLI
+        // alive. These pass straight through to the socket, which is where the loop looks.
+        ClientSession.prototype.ref = function() { if (this.socket.ref) this.socket.ref(); return this; };
+        ClientSession.prototype.unref = function() { if (this.socket.unref) this.socket.unref(); return this; };
+        ClientSession.prototype.setLocalWindowSize = function() { return this; };
+        ClientSession.prototype.settings = function(settings, callback) {
+          this._send(frame(TYPE.SETTINGS, 0, 0, settingsPayload(settings)));
+          if (callback) process.nextTick(callback);
+          return this;
+        };
+        ClientSession.prototype.setTimeout = function(ms, callback) {
+          if (callback) this.once('timeout', callback);
+          return this;
+        };
+        ClientSession.prototype.goaway = function() { this.close(); };
+        Object.defineProperty(ClientSession.prototype, 'destroyed', {
+          get: function() { return !!this.socket.destroyed; }, configurable: true,
+        });
+        Object.defineProperty(ClientSession.prototype, 'state', {
+          get: function() { return { effectiveLocalWindowSize: 65535, nextStreamID: this.nextId }; },
+          configurable: true,
+        });
 
         function Http2Server(options, handler) {
           EventEmitter.call(this);
@@ -12646,6 +12826,15 @@ final class NodeEngine: @unchecked Sendable {
           return this;
         };
         Http2Server.prototype.address = function() { return this._server.address(); };
+        // Accepted and remembered rather than enforced: nothing here closes an idle connection
+        // on its own, and a server asking for a timeout of zero — which grpc-js does, meaning
+        // "never" — must not be told the method does not exist.
+        Http2Server.prototype.setTimeout = function(ms, callback) {
+          this.timeout = Number(ms) || 0;
+          if (callback) this.on('timeout', callback);
+          return this;
+        };
+        Http2Server.prototype.updateSettings = function() { return this; };
         Http2Server.prototype.close = function(callback) {
           for (const session of this.sessions) session.socket.destroy();
           this._server.close(callback);
@@ -12653,12 +12842,37 @@ final class NodeEngine: @unchecked Sendable {
         };
 
         return {
+          // Callers destructure these by name and use the result as a header KEY, so a missing
+          // entry does not fail loudly — it writes a header literally named "undefined".
           constants: {
             HTTP2_HEADER_METHOD: ':method', HTTP2_HEADER_PATH: ':path',
             HTTP2_HEADER_STATUS: ':status', HTTP2_HEADER_AUTHORITY: ':authority',
             HTTP2_HEADER_SCHEME: ':scheme', HTTP2_HEADER_CONTENT_TYPE: 'content-type',
             HTTP2_HEADER_CONTENT_LENGTH: 'content-length',
-            NGHTTP2_CANCEL: 8, NGHTTP2_NO_ERROR: 0,
+            HTTP2_HEADER_TE: 'te', HTTP2_HEADER_USER_AGENT: 'user-agent',
+            HTTP2_HEADER_ACCEPT: 'accept', HTTP2_HEADER_ACCEPT_ENCODING: 'accept-encoding',
+            HTTP2_HEADER_ACCEPT_LANGUAGE: 'accept-language', HTTP2_HEADER_AUTHORIZATION: 'authorization',
+            HTTP2_HEADER_CACHE_CONTROL: 'cache-control', HTTP2_HEADER_CONNECTION: 'connection',
+            HTTP2_HEADER_CONTENT_ENCODING: 'content-encoding', HTTP2_HEADER_COOKIE: 'cookie',
+            HTTP2_HEADER_DATE: 'date', HTTP2_HEADER_ETAG: 'etag', HTTP2_HEADER_HOST: 'host',
+            HTTP2_HEADER_IF_MODIFIED_SINCE: 'if-modified-since', HTTP2_HEADER_IF_NONE_MATCH: 'if-none-match',
+            HTTP2_HEADER_LAST_MODIFIED: 'last-modified', HTTP2_HEADER_LOCATION: 'location',
+            HTTP2_HEADER_RANGE: 'range', HTTP2_HEADER_REFERER: 'referer',
+            HTTP2_HEADER_SET_COOKIE: 'set-cookie', HTTP2_HEADER_TRAILER: 'trailer',
+            HTTP2_HEADER_TRANSFER_ENCODING: 'transfer-encoding', HTTP2_HEADER_UPGRADE: 'upgrade',
+            HTTP2_HEADER_VARY: 'vary', HTTP2_HEADER_WWW_AUTHENTICATE: 'www-authenticate',
+            HTTP2_METHOD_GET: 'GET', HTTP2_METHOD_POST: 'POST', HTTP2_METHOD_PUT: 'PUT',
+            HTTP2_METHOD_DELETE: 'DELETE', HTTP2_METHOD_HEAD: 'HEAD', HTTP2_METHOD_OPTIONS: 'OPTIONS',
+            HTTP2_METHOD_PATCH: 'PATCH',
+            NGHTTP2_FLAG_NONE: 0x0, NGHTTP2_FLAG_END_STREAM: 0x1, NGHTTP2_FLAG_END_HEADERS: 0x4,
+            NGHTTP2_FLAG_ACK: 0x1, NGHTTP2_FLAG_PADDED: 0x8, NGHTTP2_FLAG_PRIORITY: 0x20,
+            NGHTTP2_NO_ERROR: 0, NGHTTP2_PROTOCOL_ERROR: 1, NGHTTP2_INTERNAL_ERROR: 2,
+            NGHTTP2_FLOW_CONTROL_ERROR: 3, NGHTTP2_SETTINGS_TIMEOUT: 4, NGHTTP2_STREAM_CLOSED: 5,
+            NGHTTP2_FRAME_SIZE_ERROR: 6, NGHTTP2_REFUSED_STREAM: 7, NGHTTP2_CANCEL: 8,
+            NGHTTP2_COMPRESSION_ERROR: 9, NGHTTP2_CONNECT_ERROR: 10, NGHTTP2_ENHANCE_YOUR_CALM: 11,
+            NGHTTP2_INADEQUATE_SECURITY: 12, NGHTTP2_HTTP_1_1_REQUIRED: 13,
+            NGHTTP2_SESSION_SERVER: 0, NGHTTP2_SESSION_CLIENT: 1,
+            HTTP_STATUS_OK: 200, HTTP_STATUS_NOT_FOUND: 404, HTTP_STATUS_INTERNAL_SERVER_ERROR: 500,
           },
           createServer: function(options, handler) {
             if (typeof options === 'function') { handler = options; options = {}; }
@@ -12896,12 +13110,32 @@ final class NodeEngine: @unchecked Sendable {
                             'resolveAny', 'resolveCaa', 'resolveTlsa', 'lookupService']) {
           dns.promises[name] = promisify(dns[name], 1);
         }
-        // node's Resolver class, for libraries that construct their own.
-        dns.Resolver = function Resolver() {};
+        // node's Resolver class, for libraries that construct their own — including the
+        // PROMISE flavour, `new dns.promises.Resolver()`, which grpc-js builds to look up a
+        // service's address and which was missing entirely: the callback class existed and its
+        // promise twin did not, so the module loaded and then failed at construction.
+        dns.Resolver = function Resolver(options) { this.options = options || {}; };
         dns.Resolver.prototype = Object.create(Object.prototype);
         for (const name of Object.keys(dns)) {
           if (typeof dns[name] === 'function') dns.Resolver.prototype[name] = dns[name];
         }
+        // Servers are the SYSTEM's here — the resolver is libresolv, and its configuration is
+        // the device's, so these accept and report rather than pretending to steer.
+        dns.Resolver.prototype.getServers = function() { return []; };
+        dns.Resolver.prototype.setServers = function() {};
+        dns.Resolver.prototype.setLocalAddress = function() {};
+        dns.Resolver.prototype.cancel = function() {};
+        dns.promises.Resolver = function Resolver(options) { this.options = options || {}; };
+        dns.promises.Resolver.prototype = Object.create(Object.prototype);
+        for (const name of Object.keys(dns.promises)) {
+          if (typeof dns.promises[name] === 'function') {
+            dns.promises.Resolver.prototype[name] = dns.promises[name];
+          }
+        }
+        dns.promises.Resolver.prototype.getServers = function() { return []; };
+        dns.promises.Resolver.prototype.setServers = function() {};
+        dns.promises.Resolver.prototype.setLocalAddress = function() {};
+        dns.promises.Resolver.prototype.cancel = function() {};
         return dns;
       };
       // worker_threads, on the same machinery as a forked child: a second engine on its own

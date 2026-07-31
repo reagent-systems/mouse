@@ -8,6 +8,16 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **gRPC runs** — `@grpc/grpc-js` works on this engine as both client and server,
+  verified with real node's nghttp2 as the peer in each direction: unary calls, initial
+  metadata, a server-streaming call over one stream, and a failure whose status arrives in the
+  trailers.
+  `http2.connect` honours `options.createConnection`, both sessions announce the peer's SETTINGS,
+  `'response'` carries the frame flags (END_STREAM on a response block is a trailers-only reply),
+  streams carry `rstCode`, and `http2.constants` covers what callers destructure.
+- Node layer: a server HTTP/2 stream is a real **Duplex** — `pause()`/`resume()` hold and
+  release the request body as node's does, and a request body that ends no longer destroys the
+  stream that has not written its response yet.
 - Node layer: **`http2.connect` is real** — the client half, with its own stream ids, a Readable
   per stream (so `setEncoding`, `for await` and `pipe` work), trailers, and `session.ping`.
   Verified in BOTH directions against real node: its client against this engine's server, and
@@ -146,6 +156,10 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: a stream emitted `'close'` when its READABLE side ended rather than
+  when it was destroyed. On a duplex whose writable half is still open that announces a hangup
+  mid-exchange, and a handler holding an unfinished response abandons it — node emits `'close'`
+  on destroy, and a duplex is not destroyed while it can still be written to.
 - Node layer: a worker that throws emits `'error'` on the `Worker` with the real exception —
   name, message and stack — before `'exit'`. The parent previously received only exit code 1,
   so it knew a worker had died but not why.
