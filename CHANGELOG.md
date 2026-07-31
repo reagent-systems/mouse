@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `NAPI_RS_FORCE_WASI` is set by default. napi-rs generates a loader that tries the
+  platform's `.node` and falls back to the package's WebAssembly build only when told; on iOS
+  the native branch can never load, so the fallback is the only reachable one. Without it a
+  package like oxc-parser never attempted its portable build at all. Both oxc-parser and
+  rolldown now install and reach theirs, and both stop at wasm threads — their builds declare
+  shared memory, which JavaScriptCore will not parse. Gated on both packages.
 - Node layer: **`node:wasi`** — WASI preview1 over the engine's own fs. Args, environ, both
   clocks, `random_get`, the fd family (read/write/seek/tell/fdstat/filestat/readdir/close), the
   path family (open/filestat/mkdir/rmdir/unlink/rename), preopened directories, and rights

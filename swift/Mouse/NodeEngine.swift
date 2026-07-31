@@ -2050,7 +2050,13 @@ final class NodeEngine: @unchecked Sendable {
 
         context.setObject(bridge, forKeyedSubscript: "__mouse" as NSString)
         context.setObject(argv, forKeyedSubscript: "__argv" as NSString)
-        context.setObject(env, forKeyedSubscript: "__env" as NSString)
+        // napi-rs generates a loader that tries this platform's `.node` and only falls back to
+        // the package's WebAssembly build when told to. On iOS the native one can never load —
+        // no downloaded machine code runs — so the fallback is not a preference here, it is the
+        // only reachable branch, and this is the flag its own authors provide for saying so.
+        var childEnvironment = env
+        if childEnvironment["NAPI_RS_FORCE_WASI"] == nil { childEnvironment["NAPI_RS_FORCE_WASI"] = "true" }
+        context.setObject(childEnvironment, forKeyedSubscript: "__env" as NSString)
         context.setObject(cwd, forKeyedSubscript: "__cwd" as NSString)
         context.setObject(stdin, forKeyedSubscript: "__stdin" as NSString)
         // Is the seeded text ALL the input there will ever be? Only the host knows. A terminal
