@@ -3578,8 +3578,15 @@ final class NodeEngine: @unchecked Sendable {
               return new Buffer(bytes);
             }
             if (named === 'hex') {
+              // node stops at the first thing that is not a full byte: 'abc' is one byte, not
+              // one and a half, and a stray character ends the decode rather than becoming NaN.
               const bytes = [];
-              for (let i = 0; i < value.length; i += 2) bytes.push(parseInt(value.substr(i, 2), 16));
+              for (let i = 0; i + 1 < value.length + 1; i += 2) {
+                if (i + 1 >= value.length) break;
+                const pair = value.substr(i, 2);
+                if (!/^[0-9a-fA-F]{2}$/.test(pair)) break;
+                bytes.push(parseInt(pair, 16));
+              }
               return new Buffer(bytes);
             }
             if (named === 'latin1' || named === 'binary') {
@@ -3628,8 +3635,28 @@ final class NodeEngine: @unchecked Sendable {
           return buffer;
         }
         static allocUnsafe(size) { return new Buffer(size); }
+        /// node's fill: a RANGE, and a string or buffer value repeats across it.
+        fill(value, start, end, encoding) {
+          if (typeof start === 'string') { encoding = start; start = 0; end = this.length; }
+          else if (typeof end === 'string') { encoding = end; end = this.length; }
+          start = start === undefined ? 0 : start | 0;
+          end = end === undefined ? this.length : Math.min(this.length, end | 0);
+          let pattern;
+          if (typeof value === 'string') pattern = Buffer.from(value, encoding || 'utf8');
+          else if (Buffer.isBuffer(value)) pattern = value;
+          else if (ArrayBuffer.isView(value)) pattern = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+          else { for (let index = start; index < end; index += 1) this[index] = Number(value) & 0xff; return this; }
+          if (!pattern.length) return this;
+          for (let index = start; index < end; index += 1) this[index] = pattern[(index - start) % pattern.length];
+          return this;
+        }
         static isBuffer(value) { return value instanceof Buffer; }
-        static byteLength(value) { return typeof value === 'string' ? utf8Encode(value).length : value.length; }
+        static byteLength(value, encoding) {
+          // The COST of encoding this string that way — not its utf8 length. A caller sizing a
+          // buffer for base64 or utf16le with the utf8 answer allocates the wrong thing.
+          if (typeof value !== 'string') return value.length;
+          return Buffer.from(value, encoding || 'utf8').length;
+        }
         static concat(list, total) {
           const length = total !== undefined ? total : list.reduce((n, b) => n + b.length, 0);
           const result = new Buffer(length);
@@ -3811,10 +3838,16 @@ final class NodeEngine: @unchecked Sendable {
           }
           return this;
         }
-        compare(other) {
-          const length = Math.min(this.length, other.length);
-          for (let i = 0; i < length; i++) { if (this[i] !== other[i]) return this[i] < other[i] ? -1 : 1; }
-          return this.length === other.length ? 0 : (this.length < other.length ? -1 : 1);
+        compare(other, targetStart, targetEnd, sourceStart, sourceEnd) {
+          // The ranged form compares SLICES of each side; without it a caller checking one
+          // field of two records was told the whole records differ.
+          const target = targetStart === undefined && targetEnd === undefined
+            ? other : other.subarray(targetStart | 0, targetEnd === undefined ? other.length : targetEnd | 0);
+          const source = sourceStart === undefined && sourceEnd === undefined
+            ? this : this.subarray(sourceStart | 0, sourceEnd === undefined ? this.length : sourceEnd | 0);
+          const length = Math.min(source.length, target.length);
+          for (let i = 0; i < length; i++) { if (source[i] !== target[i]) return source[i] < target[i] ? -1 : 1; }
+          return source.length === target.length ? 0 : (source.length < target.length ? -1 : 1);
         }
         indexOf(value, byteOffset, encoding) {
           const needle = typeof value === 'number' ? Buffer.from([value & 0xff])
@@ -3828,7 +3861,27 @@ final class NodeEngine: @unchecked Sendable {
           return -1;
         }
         includes(value, byteOffset, encoding) { return this.indexOf(value, byteOffset, encoding) !== -1; }
-        slice(start, end) { return new Buffer(super.slice(start, end)); }
+        /// The LAST occurrence, searched backwards from `byteOffset` (the end by default).
+        lastIndexOf(value, byteOffset, encoding) {
+          const needle = typeof value === 'number' ? Buffer.from([value & 0xff])
+            : (Buffer.isBuffer(value) ? value : Buffer.from(String(value), encoding || 'utf8'));
+          if (needle.length === 0) return this.length;
+          let start = byteOffset === undefined ? this.length - needle.length : byteOffset | 0;
+          if (start < 0) start = this.length + start;
+          start = Math.min(start, this.length - needle.length);
+          outer: for (let index = start; index >= 0; index -= 1) {
+            for (let offset = 0; offset < needle.length; offset += 1) {
+              if (this[index + offset] !== needle[offset]) continue outer;
+            }
+            return index;
+          }
+          return -1;
+        }
+        // node's slice is a VIEW over the same memory, not a copy — `buffer.slice(1,3)[0] = x`
+        // changes the buffer. Uint8Array's own slice copies, so inheriting it lost every write
+        // made through a slice, silently, which is how a parser that patches a header in place
+        // ends up doing nothing at all.
+        slice(start, end) { return this.subarray(start, end); }
         equals(other) { return this.length === other.length && this.every((b, i) => b === other[i]); }
         toJSON() { return { type: 'Buffer', data: Array.from(this) }; }
       }

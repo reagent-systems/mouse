@@ -258,6 +258,10 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: **`buffer.slice()` returns a view, not a copy**, as node's does — writes through a
+  slice reach the buffer. Also `compare`'s ranged form, a missing `lastIndexOf`, `fill`'s
+  start/end and repeating patterns, `byteLength(text, encoding)` honouring the encoding, and
+  `Buffer.from(oddHex, 'hex')` stopping at the last complete byte. 31 results verified.
 - Node layer: **`path` handles trailing separators as node does** — `normalize` and `join` keep
   one, `resolve` strips it, and `dirname`/`basename` look past it (`basename('/a/b/')` is `b`).
   Also `extname('..')` is `''`, `basename('/a/.txt', '.txt')` leaves `.txt` whole,
