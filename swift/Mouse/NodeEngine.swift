@@ -2646,7 +2646,7 @@ final class NodeEngine: @unchecked Sendable {
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
     /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
     /// without this a stale rewrite would be reused after an engine update.
-    private static let transpilerVersion = 2
+    private static let transpilerVersion = 4
 
     /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
     /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
@@ -2887,6 +2887,10 @@ final class NodeEngine: @unchecked Sendable {
 
     static func transpileESM(_ source: String) -> String {
         var text = source
+        // Emitted BEFORE the body: function declarations are hoisted, so a cycle reaching back
+        // into this module finds them, and every export reads through a getter rather than
+        // being frozen at end-of-module.
+        var prologue: [String] = []
         var epilogue: [String] = []
         var counter = 0
         var maskCache: String?
@@ -3027,7 +3031,7 @@ final class NodeEngine: @unchecked Sendable {
             let temp = "__esm\(counter)"
             var lines = [requireSettled(temp, group(match, 2, ns)!)]
             for binding in bindings(group(match, 1, ns)!) {
-                lines.append("module.exports.\(binding.alias) = \(temp).\(binding.source);")
+                lines.append("__mouseLive(module.exports, '\(binding.alias)', function(){ return \(temp).\(binding.source); });")
             }
             return lines.joined(separator: " ")
         }
@@ -3040,13 +3044,13 @@ final class NodeEngine: @unchecked Sendable {
         }
         replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\{\s*([\w$]+)\s+as\s+['"]([^'"]+)['"]\s*\}\s*;?"#) { match, ns in
             let name = group(match, 2, ns)!.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-            return "module.exports['\(name)'] = \(group(match, 1, ns)!);"
+            return "__mouseLive(module.exports, '\(name)', function(){ return \(group(match, 1, ns)!); });"
         }
         // export { a, b as c };   — a trailing line comment must not defeat the match
         // (commander@15 ends one with "; // Deprecated").
         replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
             bindings(group(match, 1, ns)!)
-                .map { "module.exports.\($0.alias) = \($0.source);" }
+                .map { "__mouseLive(module.exports, '\($0.alias)', function(){ return \($0.source); });" }
                 .joined(separator: " ")
         }
         // export default function name() / class Name — keep the declaration, alias at EOF.
@@ -3054,7 +3058,7 @@ final class NodeEngine: @unchecked Sendable {
         // unterminated import (no semicolon, cliui) had its trailing newline consumed.
         replace(#"(?:^|(?<=[;}]))[ \t]*export\s+default\s+(function\s*\*?\s+([\w$]+)|class\s+([\w$]+))"#) { match, ns in
             let name = group(match, 2, ns) ?? group(match, 3, ns)!
-            epilogue.append("module.exports.default = \(name);")
+            prologue.append("__mouseLive(module.exports, 'default', function(){ return \(name); });")
             return group(match, 1, ns)!
         }
         // export default <expression>
@@ -3065,7 +3069,7 @@ final class NodeEngine: @unchecked Sendable {
         // it the declaration kept its `export` keyword and the file would not parse.
         replace(#"(?:^|(?<=[;}]))[ \t]*export\s+(const|let|var|class|function|async\s+function)(\s*\*)?\s+([\w$]+)"#) { match, ns in
             let name = group(match, 3, ns)!
-            epilogue.append("module.exports.\(name) = \(name);")
+            prologue.append("__mouseLive(module.exports, '\(name)', function(){ return \(name); });")
             return "\(group(match, 1, ns)!)\(group(match, 2, ns) ?? "") \(name)"
         }
         // dynamic import() and import.meta, both code-only — see rewriteImportForms.
@@ -3087,7 +3091,12 @@ final class NodeEngine: @unchecked Sendable {
         // whole body ran without suspending (the common case — requirers get exports
         // synchronously, as before); __esmError preserves throw-in-requiring-frame
         // semantics; neither means genuine top-level await in flight.
-        return "module.exports.__esModule = true;\ntry {\n" + text + "\n;" + epilogue.joined(separator: "\n")
+        // Non-enumerable: node's module namespace has no __esModule at all, so a plain
+        // assignment put a phantom key into `Object.keys(ns)`, into a spread of it, and into
+        // anything that walks a module's exports. Defined this way the interop check still
+        // sees it and nothing that ENUMERATES does.
+        return "Object.defineProperty(module.exports, '__esModule', { value: true });\ntry {\n"
+            + prologue.joined(separator: "\n") + "\n" + text + "\n;" + epilogue.joined(separator: "\n")
             + "\n;module.__esmDone = true;\n} catch (__esmThrown) { module.__esmError = __esmThrown; throw __esmThrown; }"
     }
 
@@ -4533,10 +4542,26 @@ final class NodeEngine: @unchecked Sendable {
         return Buffer.from(String(value), encoding && encoding !== 'buffer' ? encoding : 'utf8');
       };
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
+      // An ES module exports BINDINGS, not values: `export let count` seen by an importer
+      // changes when the exporter changes it. Assigning at end-of-module made a snapshot, so a
+      // mutable export read zero forever and a cycle saw `undefined` where node sees a hoisted
+      // function. A getter defined BEFORE the body gives all three: liveness, the hoisted
+      // function immediately, and a TDZ throw for a const read too early — which is node's
+      // behaviour too. The setter is there because a later plain assignment to the same name
+      // (our own passes do it, and so does the odd package) must still win.
+      globalThis.__mouseLive = function(exports, name, get) {
+        Object.defineProperty(exports, name, {
+          get: get,
+          set: function(value) {
+            Object.defineProperty(exports, name, { value: value, writable: true, enumerable: true, configurable: true });
+          },
+          enumerable: true, configurable: true
+        });
+      };
       globalThis.__reexportStar = function(target, source) {
         for (const key of Object.keys(source)) {
           if (key === 'default' || key === '__esModule') continue;
-          target[key] = source[key];
+          __mouseLive(target, key, function(){ return source[key]; });
         }
       };
       globalThis.__dynamicImport = function(require, specifier) {

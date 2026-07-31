@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **ES module exports are live bindings**, as node's are. Every export is a getter
+  defined before the module body, so a later mutation shows through `import * as ns`, a cycle
+  reaching back into a module finds its hoisted function declarations, and a `const` read too
+  early throws TDZ exactly where node throws it. A destructured named import remains a
+  snapshot — making it live means rewriting every reference, which needs scope analysis — and
+  the ESM grammar gate pins that divergence on both sides rather than leaving it unsaid.
 - Node layer: **vite's dev server runs on the engine**, serving transformed modules
   byte-identical to real node's vite. Rollup's parser is a native `.node` addon that iOS can
   never load; rollup's own `@rollup/wasm-node` is the drop-in for that case, and the proof uses
@@ -191,6 +197,8 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `__esModule` is non-enumerable. Node's module namespace has no such key, so it
+  was appearing in `Object.keys(ns)` and in anything that spreads or walks a module's exports.
 - Node layer: the ESM→CJS transpiler no longer rewrites JavaScript that lives inside STRINGS. A
   bundle ships code as data — vite serves the browser's `import.meta.hot` and a worker shim
   beginning `export default function WorkerWrapper` as template literals — and the textual
