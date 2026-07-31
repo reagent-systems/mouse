@@ -369,9 +369,23 @@ enum PackageManager {
         /// Directory relative to the project root, e.g. "node_modules/chalk" or
         /// "node_modules/chalk/node_modules/supports-color".
         let path: String
+        /// The name this package was REQUESTED as, when it stands in for one — `rollup` for
+        /// `@rollup/wasm-node`. nil when the package is itself.
+        var installedAs: String? = nil
         /// Whether this placement sits at the root of node_modules (its bins join .bin).
         var atRoot: Bool { !path.dropFirst("node_modules/".count).contains("/") }
     }
+
+    /// Packages whose npm release is a per-platform NATIVE binary, mapped to the WebAssembly
+    /// build their own authors publish for platforms they ship no binary for. iOS is such a
+    /// platform and always will be: it can neither dlopen a `.node` addon nor exec a downloaded
+    /// executable. The substitute is installed under the ORIGINAL name, so the package that
+    /// depends on it is unmodified and never learns the difference — which is what makes vite
+    /// build here at all, since it reaches for both of these.
+    static let wasmSubstitutes: [String: String] = [
+        "rollup": "@rollup/wasm-node",
+        "esbuild": "esbuild-wasm",
+    ]
 
     static func resolveTree(requirements: [String: String], session: Session) async throws -> [Placement] {
         var placements: [Placement] = []
@@ -385,7 +399,10 @@ enum PackageManager {
 
         while !queue.isEmpty {
             let (name, requirement, dependentPath) = queue.removeFirst()
-            let package = try await session.resolve(name: name, requirement: requirement)
+            // Resolved under the substitute's name, placed under the original's. Both projects
+            // version their wasm build in lockstep with the native one, so the requirement
+            // carries over unchanged.
+            let package = try await session.resolve(name: wasmSubstitutes[name] ?? name, requirement: requirement)
 
             let path: String
             if let existing = rootVersions[name] {
@@ -398,7 +415,7 @@ enum PackageManager {
                 path = "node_modules/\(name)"
             }
             seen.insert(path)
-            placements.append(Placement(package: package, path: path))
+            placements.append(Placement(package: package, path: path, installedAs: wasmSubstitutes[name] == nil ? nil : name))
             for (depName, depRequirement) in package.dependencies.sorted(by: { $0.key < $1.key }) {
                 queue.append((depName, depRequirement, path))
             }
@@ -435,7 +452,11 @@ enum PackageManager {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             try TarGz.extract(data, into: destination, stripComponents: 1)
-            progress("\(package.name)@\(package.version)")
+            if let requested = placement.installedAs {
+                progress("\(requested)@\(package.version) as \(package.name)")
+            } else {
+                progress("\(package.name)@\(package.version)")
+            }
             if placement.atRoot {
                 for (bin, file) in package.bin {
                     report.bins[bin] = "\(placement.path)/\(file.hasPrefix("./") ? String(file.dropFirst(2)) : file)"
