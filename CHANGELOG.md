@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`AbortSignal` matches node** — 28 behaviours swept against it. It is an
+  EventTarget now, not an emitter: the same listener added twice counts once, `this` inside a
+  listener is the signal, and `onabort` keeps the position it was assigned in. A signal's
+  `reason` is a `DOMException` with the legacy numeric code (20 abort, 23 timeout), and
+  `AbortSignal.timeout` is unref'd so a deadline does not keep the process alive.
 - Node layer: **timers match node** — 33 behaviours swept against it. `unref()`/`hasRef()` are
   real (an unref'd timer no longer holds the process open), `refresh()` restarts the countdown,
   `clearImmediate` can actually cancel one, a non-function callback throws

@@ -4353,46 +4353,104 @@ final class NodeEngine: @unchecked Sendable {
           get: function(){ return coreRequire('worker_threads')[name]; },
         });
       }
+      // A signal is an EventTarget, not an emitter, and the difference is visible: the same
+      // listener added twice counts once, `this` inside a listener is the signal, and `onabort`
+      // takes its place in the listener ORDER at the point it was first assigned rather than
+      // jumping to the front.
       globalThis.AbortSignal = class AbortSignal {
-        constructor() { this.aborted = false; this.reason = undefined; this._listeners = []; this.onabort = null; }
-        addEventListener(type, listener) { if (type === 'abort') this._listeners.push(listener); }
+        constructor() {
+          this.aborted = false;
+          this.reason = undefined;
+          this._listeners = [];       // { listener, once, isHandler }
+          this._onabort = null;
+        }
+        get onabort() { return this._onabort; }
+        set onabort(handler) {
+          const slot = this._listeners.find(function(entry){ return entry.isHandler; });
+          this._onabort = typeof handler === 'function' ? handler : null;
+          if (slot) { slot.listener = this._onabort; return; }
+          if (this._onabort) this._listeners.push({ listener: this._onabort, once: false, isHandler: true });
+        }
+        addEventListener(type, listener, options) {
+          if (type !== 'abort' || typeof listener !== 'function' && !(listener && listener.handleEvent)) return;
+          // EventTarget deduplicates on (type, listener): the same function added twice is one
+          // listener, where an EventEmitter would call it twice.
+          if (this._listeners.some(function(entry){ return !entry.isHandler && entry.listener === listener; })) return;
+          const once = !!(options && typeof options === 'object' && options.once);
+          this._listeners.push({ listener: listener, once: once, isHandler: false });
+        }
         removeEventListener(type, listener) {
           if (type !== 'abort') return;
-          const index = this._listeners.indexOf(listener);
+          const index = this._listeners.findIndex(function(entry){ return !entry.isHandler && entry.listener === listener; });
           if (index >= 0) this._listeners.splice(index, 1);
         }
-        dispatchEvent() {}
         throwIfAborted() { if (this.aborted) throw this.reason; }
         _abort(reason) {
           if (this.aborted) return;
           this.aborted = true;
-          this.reason = reason !== undefined ? reason : Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
-          const event = { type: 'abort', target: this };
-          if (this.onabort) this.onabort(event);
-          for (const listener of this._listeners.slice()) (listener.handleEvent || listener).call(listener, event);
+          this.reason = reason !== undefined ? reason
+            : new DOMException('This operation was aborted', 'AbortError');
+          const event = { type: 'abort', target: this, currentTarget: this };
+          for (const entry of this._listeners.slice()) {
+            if (entry.once) this.removeEventListener('abort', entry.listener);
+            const listener = entry.listener;
+            if (!listener) continue;
+            // `this` is the SIGNAL inside a listener, which is how a shared handler tells which
+            // signal fired when it is attached to several.
+            if (listener.handleEvent) listener.handleEvent(event);
+            else listener.call(this, event);
+          }
         }
         static abort(reason) { const signal = new AbortSignal(); signal._abort(reason); return signal; }
         static timeout(ms) {
           const signal = new AbortSignal();
-          setTimeout(function(){ signal._abort(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })); }, ms);
+          // UNREF'd: a deadline is not a reason for the process to stay alive. A CLI that gives
+          // every request a two-minute timeout would otherwise refuse to exit for two minutes.
+          const handle = setTimeout(function(){
+            signal._abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+          }, ms);
+          if (handle && typeof handle.unref === 'function') handle.unref();
           return signal;
         }
         static any(signals) {
           const combined = new AbortSignal();
-          for (const signal of signals) {
-            if (signal.aborted) { combined._abort(signal.reason); break; }
+          const sources = Array.from(signals || []);
+          for (const signal of sources) {
+            if (signal.aborted) { combined._abort(signal.reason); return combined; }
+          }
+          for (const signal of sources) {
             signal.addEventListener('abort', function(){ combined._abort(signal.reason); });
           }
           return combined;
         }
       };
+      Object.defineProperty(globalThis.AbortSignal.prototype, Symbol.toStringTag,
+                            { value: 'AbortSignal', configurable: true });
       globalThis.AbortController = class AbortController {
         constructor() { this.signal = new AbortSignal(); }
         abort(reason) { this.signal._abort(reason); }
       };
-      globalThis.DOMException = class DOMException extends Error {
-        constructor(message, name) { super(message); this.name = name || 'Error'; }
+      Object.defineProperty(globalThis.AbortController.prototype, Symbol.toStringTag,
+                            { value: 'AbortController', configurable: true });
+      // The legacy NUMERIC code, which is what `reason.code` reports — 20 for an abort, 23 for a
+      // timeout. Code that tells one cancellation from another reads it.
+      const DOM_EXCEPTION_CODES = {
+        IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+        NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+        InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14,
+        InvalidAccessError: 15, TypeMismatchError: 17, SecurityError: 18, NetworkError: 19,
+        AbortError: 20, URLMismatchError: 21, QuotaExceededError: 22, TimeoutError: 23,
+        InvalidNodeTypeError: 24, DataCloneError: 25,
       };
+      globalThis.DOMException = class DOMException extends Error {
+        constructor(message, name) {
+          super(message);
+          this.name = name || 'Error';
+          this.code = DOM_EXCEPTION_CODES[this.name] || 0;
+        }
+      };
+      Object.defineProperty(globalThis.DOMException.prototype, Symbol.toStringTag,
+                            { value: 'DOMException', configurable: true });
       globalThis.structuredClone = function(value) { return globalThis.__clone(value); };
       globalThis.queueMicrotask = globalThis.queueMicrotask || function(fn) { Promise.resolve().then(fn); };
       globalThis.URLSearchParams = class URLSearchParams {
