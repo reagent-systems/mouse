@@ -8,6 +8,18 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **vite's dev server runs on the engine**, serving transformed modules
+  byte-identical to real node's vite. Rollup's parser is a native `.node` addon that iOS can
+  never load; rollup's own `@rollup/wasm-node` is the drop-in for that case, and the proof uses
+  it on both sides so the comparison is between engines, not parsers.
+- Node layer: **conditional `exports` are resolved by the syntax of the request**, as node does
+  — `import` on "import", `require` on "require", and `import()` on "import" even from a
+  CommonJS file. **Subpath exports** (`rollup/parseAst`), `*` patterns and array fallbacks now
+  resolve, and a package that declares `exports` publishes only what the map names: `main` and
+  `index.js` are ignored, and a path outside it fails with node's
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+- Node layer: `import.meta` is a whole object — `url`, `filename`, `dirname`, `resolve` — rather
+  than two string substitutions, so the forms real packages use no longer reach the parser.
 - Node layer: **X448 is real** — `generateKeyPairSync('x448')` and `crypto.diffieHellman()`.
   RFC 7748's Montgomery ladder over p = 2^448 − 2^224 − 1 on JavaScriptCore's `BigInt`, with
   node's DER encodings both ways. Verified cross-engine: real node generates one half of an
@@ -177,6 +189,25 @@ carry breaking changes.
   including safe primes, the `add`/`rem`/`bigint` options, and Miller-Rabin that rejects
   Carmichael numbers. All four were refused as "needs a bignum implementation"; the bignum was
   in the engine the whole time.
+
+### Fixed
+- Node layer: the ESM→CJS transpiler no longer rewrites JavaScript that lives inside STRINGS. A
+  bundle ships code as data — vite serves the browser's `import.meta.hot` and a worker shim
+  beginning `export default function WorkerWrapper` as template literals — and the textual
+  rewrites edited those too. Every rewrite now runs through a scanner that tracks strings,
+  template literals with `${}` nesting, both comment forms and regex literals; statement
+  patterns match a mask of that scan and apply to the original at the same offsets.
+- Node layer: `export async function*` and `export function*` kept their `export` keyword (the
+  pattern had no place for the `*`), and a statement pattern's leading `\s*` reached back across
+  the newline, gluing `module.exports.default =` onto the previous line's `}`. Both were
+  invisible while every dual package resolved to its CommonJS half.
+- Node layer: resolving a relative reference against a `file:` base dropped the empty authority
+  — `new URL('../p.json', 'file:///a/b/c.js')` gave `file:/a/p.json`. The `//` marks an
+  authority, not a host; `href` had been fixed for this at one site and the resolution path
+  still keyed off `hostname`.
+- Node layer: `Cannot parse '<file>'` now carries JSC's own syntax error and line number. The
+  message was the only thing that could say where in a 2 MB bundle the transpiler went wrong,
+  and it was being swallowed by the context's fatal-error handler.
 
 ### Changed
 - The remaining refusals were audited by MEASURING the platform claim each rests on, rather

@@ -295,7 +295,7 @@ final class NodeEngine: @unchecked Sendable {
         }
         if let function = wrapModule(source, async: entryIsESM, sourceURL: path) {
             let module = context.evaluateScript("({exports: {}})")!
-            let require = makeRequire(fromDir: dir)
+            let require = makeRequire(fromDir: dir, esm: entryIsESM)
             if entryIsESM {
                 // The entry may hold a real top-level await (directly or through an import).
                 // The event loop drives it; settle/reject arrives as a microtask.
@@ -404,15 +404,33 @@ final class NodeEngine: @unchecked Sendable {
         // above that line in TDZ; `__mouseRequire` is untouched by that shadow.
         let keyword = async ? "async function" : "function"
         let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){\n" + body + "\n})"
+        // Evaluating a function EXPRESSION can only fail by failing to parse, so the context's
+        // own handler — which treats an exception as fatal for the program — must not see it.
+        let outerHandler = context.exceptionHandler
+        var syntaxProblem: JSValue?
+        context.exceptionHandler = { _, exception in syntaxProblem = exception }
         let function: JSValue?
         if let sourceURL, let url = URL(string: "mouse://" + sourceURL.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!) {
             function = context.evaluateScript(wrapped, withSourceURL: url)
         } else {
             function = context.evaluateScript(wrapped)
         }
-        guard let function, function.isObject else { return nil }
+        context.exceptionHandler = outerHandler
+        guard let function, function.isObject else {
+            // A syntax error here is the transpiler's output failing to parse, and the message
+            // is the only thing that says WHERE. Swallowing it left "Cannot parse '<2 MB file>'".
+            if let problem = syntaxProblem {
+                let line = problem.forProperty("line")
+                lastParseProblem = problem.toString() + (line?.isNumber == true ? " (line \(line!.toInt32()))" : "")
+            }
+            return nil
+        }
+        lastParseProblem = nil
         return function
     }
+
+    /// The JSC syntax error from the most recent `wrapModule` failure.
+    private var lastParseProblem: String?
 
 
     // MARK: - Event loop
@@ -804,7 +822,7 @@ final class NodeEngine: @unchecked Sendable {
             case .core(let name): return ["kind": "core", "id": name]
             case .file(let id): return ["kind": "file", "id": id]
             case .json(let id): return ["kind": "json", "id": id]
-            case .notFound(let message): return ["kind": "error", "message": message]
+            case .notFound(let message), .notExported(let message): return ["kind": "error", "message": message]
             }
         }
         expose("resolve", resolve)
@@ -2186,6 +2204,10 @@ final class NodeEngine: @unchecked Sendable {
         case file(String)
         case json(String)
         case notFound(String)
+        /// A package declared "exports" and the request is not in it. Node treats the map as
+        /// the package's ONLY public surface, so this is a refusal, not a miss — and it has its
+        /// own error code, which tools branch on.
+        case notExported(String)
     }
 
     static let coreModules: Set<String> = [
@@ -2198,7 +2220,10 @@ final class NodeEngine: @unchecked Sendable {
         "console", "util/types", "domain",
     ]
 
-    private func resolveModule(_ rawRequest: String, fromDir: String) -> Resolution {
+    /// `esm` is the syntax the REQUEST was written in, which is what picks the export
+    /// condition: node resolves `import 'x'` on "import" and `require('x')` on "require",
+    /// and a dual package ships genuinely different files behind the two.
+    private func resolveModule(_ rawRequest: String, fromDir: String, esm: Bool = false) -> Resolution {
         var request = rawRequest
         if request.hasPrefix("node:") { request = String(request.dropFirst(5)) }
         if Self.coreModules.contains(request) { return .core(request) }
@@ -2215,7 +2240,7 @@ final class NodeEngine: @unchecked Sendable {
                 rest = rest.firstIndex(of: "/").map { String(rest[$0...]) } ?? "/"
             }
             request = rest.removingPercentEncoding ?? rest
-            if let found = loadAsFileOrDirectory(normalize(request)) { return found }
+            if let found = loadAsFileOrDirectory(normalize(request), esm: esm) { return found }
             return .notFound("Cannot find module '\(rawRequest)'")
         }
 
@@ -2227,8 +2252,8 @@ final class NodeEngine: @unchecked Sendable {
                 if let data = try? Data(contentsOf: packageJSON),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let imports = json["imports"] as? [String: Any] {
-                    if let target = exportsTarget(imports[request]) ?? (imports[request] as? String) {
-                        if let found = loadAsFileOrDirectory(normalize(dir + "/" + target)) { return found }
+                    if let target = exportsTarget(imports[request], esm: esm) ?? (imports[request] as? String) {
+                        if let found = loadAsFileOrDirectory(normalize(dir + "/" + target), esm: esm) { return found }
                     }
                     break
                 }
@@ -2244,22 +2269,39 @@ final class NodeEngine: @unchecked Sendable {
         if request == "." || request == ".." ||
            request.hasPrefix("./") || request.hasPrefix("../") || request.hasPrefix("/") {
             let base = request.hasPrefix("/") ? request : fromDir + "/" + request
-            if let found = loadAsFileOrDirectory(normalize(base)) { return found }
+            if let found = loadAsFileOrDirectory(normalize(base), esm: esm) { return found }
             return .notFound("Cannot find module '\(rawRequest)'")
         }
 
-        // Bare specifier: walk node_modules upward from the requiring directory.
+        // Bare specifier: walk node_modules upward from the requiring directory. A bare
+        // specifier with a slash is NOT a path — `rollup/parseAst` is an "exports" KEY, and a
+        // package that declares "exports" publishes only what that map names. Trying the map
+        // before the literal path is node's order; falling back to the path afterwards keeps
+        // packages whose map is incomplete working, where node would refuse.
+        let (packageName, subpath) = Self.splitBareSpecifier(request)
         var dir = fromDir
         while true {
+            let packageDir = normalize(dir + "/node_modules/" + packageName)
+            if subpath != ".", isDirectoryPath(packageDir),
+               let data = try? Data(contentsOf: realURL(packageDir + "/package.json")),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let exports = json["exports"] {
+                guard let target = exportsTarget(exports, subpath: subpath, esm: esm),
+                      let found = loadAsFileOrDirectory(normalize(packageDir + "/" + target), esm: esm) else {
+                    return .notExported("Package subpath '\(subpath)' is not defined by \"exports\" in "
+                                        + packageDir + "/package.json")
+                }
+                return found
+            }
             let candidate = normalize(dir + "/node_modules/" + request)
-            if let found = loadAsFileOrDirectory(candidate) { return found }
+            if let found = loadAsFileOrDirectory(candidate, esm: esm) { return found }
             if dir == "/" || dir.isEmpty { break }
             dir = virtualDirname(dir)
         }
         return .notFound("Cannot find module '\(rawRequest)'")
     }
 
-    private func loadAsFileOrDirectory(_ path: String) -> Resolution? {
+    private func loadAsFileOrDirectory(_ path: String, esm: Bool = false) -> Resolution? {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
 
@@ -2282,12 +2324,14 @@ final class NodeEngine: @unchecked Sendable {
         let packageJSON = realURL(path + "/package.json")
         if let data = try? Data(contentsOf: packageJSON),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let target = exportsTarget(json["exports"]) {
-                let candidate = normalize(path + "/" + target)
-                if let found = loadAsFileOrDirectory(candidate) { return found }
+            // With "exports" present, node ignores "main" and "index.js" entirely: the map is
+            // the whole of what the package publishes.
+            if let exports = json["exports"] {
+                guard let target = exportsTarget(exports, esm: esm) else { return nil }
+                return loadAsFileOrDirectory(normalize(path + "/" + target), esm: esm)
             }
             if let main = json["main"] as? String, !main.isEmpty {
-                if let found = loadAsFileOrDirectory(normalize(path + "/" + main)) { return found }
+                if let found = loadAsFileOrDirectory(normalize(path + "/" + main), esm: esm) { return found }
             }
         }
         for index in ["/index.js", "/index.json"] {
@@ -2304,38 +2348,94 @@ final class NodeEngine: @unchecked Sendable {
         return FileManager.default.fileExists(atPath: realURL(path).path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
-    /// The subset of "exports" real packages use for their root: a string, or a "." entry
-    /// that is a string or a conditions object (require/node/import/default).
-    private func exportsTarget(_ exports: Any?) -> String? {
-        func fromConditions(_ value: Any?) -> String? {
-            if let text = value as? String { return text }
-            guard let object = value as? [String: Any] else { return nil }
-            for key in ["require", "node", "import", "default"] {
-                if let found = fromConditions(object[key]) { return found }
+    /// Split a bare specifier into its package and the subpath below it: `rollup/parseAst`
+    /// is the package `rollup` and the exports key `./parseAst`, and a scope keeps two
+    /// segments (`@babel/core/lib/x` → `@babel/core`, `./lib/x`).
+    static func splitBareSpecifier(_ request: String) -> (String, String) {
+        var pieces = request.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        var nameCount = 1
+        if pieces.first?.hasPrefix("@") == true && pieces.count >= 2 { nameCount = 2 }
+        guard pieces.count > nameCount else { return (request, ".") }
+        let name = pieces.prefix(nameCount).joined(separator: "/")
+        pieces.removeFirst(nameCount)
+        return (name, "./" + pieces.joined(separator: "/"))
+    }
+
+    /// node's PACKAGE_EXPORTS_RESOLVE: a string, an array of fallbacks, a conditions object,
+    /// or a subpath map with exact keys and `*` patterns. `subpath` is "." or "./something".
+    ///
+    /// The condition SET comes from how the request was written, not from a fixed preference:
+    /// an `import` sees {node, import, default} and a `require` sees {node, require, default},
+    /// which is what makes a dual package hand each syntax its own build. The old fixed order
+    /// tried "require" first for everyone, so an ESM importer got the CommonJS half — vite,
+    /// whose CJS entry is a deprecated shim, is where that showed.
+    private func exportsTarget(_ exports: Any?, subpath: String = ".", esm: Bool) -> String? {
+        let syntax = esm ? "import" : "require"
+        // Ordered most specific first. Node honours the object's own key order; JSON parsing
+        // here does not preserve it, and this order matches what that rule yields in practice
+        // (a platform condition wraps a syntax condition, and "default" is written last).
+        let order = ["node", syntax, "default"]
+        func target(_ value: Any?, _ star: String?) -> String? {
+            if let text = value as? String {
+                guard !text.isEmpty else { return nil }
+                return star.map { text.replacingOccurrences(of: "*", with: $0) } ?? text
             }
+            if let list = value as? [Any] {
+                for item in list { if let found = target(item, star) { return found } }
+                return nil
+            }
+            guard let object = value as? [String: Any] else { return nil }   // null = blocked
+            for key in order { if let found = target(object[key], star) { return found } }
             return nil
         }
-        if let text = exports as? String { return text }
-        guard let object = exports as? [String: Any] else { return nil }
-        if let dot = object["."] { return fromConditions(dot) }
-        // A conditions object with no "." ({"require": …}).
-        if object.keys.contains(where: { $0.hasPrefix("./") }) == false { return fromConditions(object) }
-        return nil
+
+        guard let exports else { return nil }
+        let map = exports as? [String: Any]
+        let isSubpathMap = map?.keys.contains { $0 == "." || $0.hasPrefix("./") } ?? false
+
+        if subpath == "." {
+            if !isSubpathMap { return target(exports, nil) }     // string, array, or conditions
+            return target(map?["."], nil)
+        }
+        guard isSubpathMap, let map else { return nil }
+        if let exact = map[subpath] { return target(exact, nil) }
+        // Pattern keys: the longest literal prefix before `*` wins, as node specifies.
+        var best: (prefix: String, suffix: String, key: String)?
+        for key in map.keys where key.contains("*") {
+            let parts = key.components(separatedBy: "*")
+            guard parts.count == 2 else { continue }
+            let (prefix, suffix) = (parts[0], parts[1])
+            guard subpath.hasPrefix(prefix), subpath.hasSuffix(suffix),
+                  subpath.count >= prefix.count + suffix.count else { continue }
+            if best == nil || prefix.count > best!.prefix.count { best = (prefix, suffix, key) }
+        }
+        guard let best else { return nil }
+        let star = String(subpath.dropFirst(best.prefix.count).dropLast(best.suffix.count))
+        return target(map[best.key], star)
     }
 
     // MARK: - require()
 
-    private func makeRequire(fromDir: String) -> JSValue {
+    private func makeRequire(fromDir: String, esm: Bool = false) -> JSValue {
+        // `import()` resolves on the "import" condition WHATEVER the importing file is — node
+        // keys the condition to the syntax, not to the file's format, and a CommonJS file
+        // reaching an ESM-only package through import() is exactly how eslint loads @humanfs/node.
+        let importBlock: @convention(block) (String) -> Any = { [weak self] request in
+            guard let self else { return NSNull() }
+            return self.requireModule(request, fromDir: fromDir, esm: true)
+        }
         let requireBlock: @convention(block) (String) -> Any = { [weak self] request in
             guard let self else { return NSNull() }
-            return self.requireModule(request, fromDir: fromDir)
+            return self.requireModule(request, fromDir: fromDir, esm: esm)
         }
         let resolveBlock: @convention(block) (String) -> Any = { [weak self] request in
             guard let self else { return NSNull() }
-            switch self.resolveModule(request, fromDir: fromDir) {
+            switch self.resolveModule(request, fromDir: fromDir, esm: esm) {
             case .core(let name): return "node:" + name
             case .file(let id), .json(let id): return id
             case .notFound(let message): return ["__mouseRequireError": message]
+            case .notExported(let message): return ["__mouseRequireError": message,
+                                                    "__mouseRequireCode": "ERR_PACKAGE_PATH_NOT_EXPORTED"]
             }
         }
         // `require.resolve.paths(request)`: the directories that WOULD be searched. jest asks
@@ -2362,12 +2462,12 @@ final class NodeEngine: @unchecked Sendable {
         // Errors must throw IN the requiring frame — a native block can't, so a JS wrapper
         // inspects the marker and throws there.
         let factory = context.evaluateScript("""
-            (function(native, nativeResolve, nativeResolvePaths){
+            (function(native, nativeResolve, nativeResolvePaths, nativeImport){
                 function require(specifier){
                     const result = native(String(specifier));
                     if (result && result.__mouseRequireError) {
                         const error = new Error(result.__mouseRequireError);
-                        error.code = 'MODULE_NOT_FOUND';
+                        error.code = result.__mouseRequireCode || 'MODULE_NOT_FOUND';
                         throw error;
                     }
                     if (result && result.__mouseRequireThrow) throw result.__mouseRequireThrow;
@@ -2377,7 +2477,7 @@ final class NodeEngine: @unchecked Sendable {
                     const result = nativeResolve(String(specifier));
                     if (result && result.__mouseRequireError) {
                         const error = new Error(result.__mouseRequireError);
-                        error.code = 'MODULE_NOT_FOUND';
+                        error.code = result.__mouseRequireCode || 'MODULE_NOT_FOUND';
                         throw error;
                     }
                     return result;
@@ -2385,22 +2485,33 @@ final class NodeEngine: @unchecked Sendable {
                 require.resolve.paths = function(specifier){
                     return nativeResolvePaths(String(specifier));
                 };
+                require.__importCondition = function(specifier){
+                    const result = nativeImport(String(specifier));
+                    if (result && result.__mouseRequireError) {
+                        const error = new Error(result.__mouseRequireError);
+                        error.code = result.__mouseRequireCode || 'ERR_MODULE_NOT_FOUND';
+                        throw error;
+                    }
+                    if (result && result.__mouseRequireThrow) throw result.__mouseRequireThrow;
+                    return result;
+                };
                 return require;
             })
             """)!
         return factory.call(withArguments: [JSValue(object: requireBlock, in: context)!,
                                             JSValue(object: resolveBlock, in: context)!,
-                                            JSValue(object: resolvePathsBlock, in: context)!])!
+                                            JSValue(object: resolvePathsBlock, in: context)!,
+                                            JSValue(object: importBlock, in: context)!])!
     }
 
-    private func requireModule(_ request: String, fromDir: String) -> Any {
+    private func requireModule(_ request: String, fromDir: String, esm: Bool = false) -> Any {
         // A query on a file: specifier is a cache-bust, not part of the filename — its whole
         // purpose is to force a fresh evaluation, so the cached copy has to go first.
         if request.lowercased().hasPrefix("file://"), request.contains("?"),
-           case .file(let id) = resolveModule(request, fromDir: fromDir) {
+           case .file(let id) = resolveModule(request, fromDir: fromDir, esm: esm) {
             moduleCache.removeValue(forKey: id)
         }
-        switch resolveModule(request, fromDir: fromDir) {
+        switch resolveModule(request, fromDir: fromDir, esm: esm) {
         case .core(let name):
             if let cached = moduleCache["core:" + name] { return cached }
             let value = context.evaluateScript("globalThis.__coreModule(\(jsString(name)))")!
@@ -2440,12 +2551,12 @@ final class NodeEngine: @unchecked Sendable {
             // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
             // dependency); CJS stays a plain sync function.
             guard let function = wrapModule(source, async: esm, sourceURL: id) else {
-                return throwInJS("Cannot parse '\(id)'")
+                return throwInJS("Cannot parse '\(id)'" + (lastParseProblem.map { ": " + $0 } ?? ""))
             }
             let module = context.evaluateScript("({exports: {}})")!
             modulesInProgress[id] = module
             defer { modulesInProgress.removeValue(forKey: id) }
-            let require = makeRequire(fromDir: virtualDirname(id))
+            let require = makeRequire(fromDir: virtualDirname(id), esm: esm)
             if esm {
                 // Three sync-inspectable outcomes: done (body never suspended — exports are
                 // ready now, the common case), thrown (evict, rethrow in the requiring
@@ -2494,6 +2605,9 @@ final class NodeEngine: @unchecked Sendable {
 
         case .notFound(let message):
             return throwInJS(message)
+
+        case .notExported(let message):
+            return ["__mouseRequireError": message, "__mouseRequireCode": "ERR_PACKAGE_PATH_NOT_EXPORTED"]
         }
     }
 
@@ -2532,7 +2646,7 @@ final class NodeEngine: @unchecked Sendable {
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
     /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
     /// without this a stale rewrite would be reused after an engine update.
-    private static let transpilerVersion = 1
+    private static let transpilerVersion = 2
 
     /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
     /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
@@ -2566,27 +2680,257 @@ final class NodeEngine: @unchecked Sendable {
     /// `import(spec)` → `__dynamicImport(__mouseRequire, spec)`. Applied to ESM (as part of
     /// the transpile) AND to CJS that contains it — dynamic import is legal in both, and
     /// JSC's native import has no module loader wired to our resolver.
+    /// The two textual rewrites that must not touch STRINGS: `import.meta` and dynamic
+    /// `import(`. A real bundle carries JavaScript inside string literals — vite ships the
+    /// browser's own `import.meta.hot` and `import(…)` as template strings it serves to the
+    /// client — so a blind replace edits code that was never ours, and it also leaves the
+    /// genuine `import.meta` occurrences untouched in the forms nobody enumerated
+    /// (`.filename`, `.dirname`, `.require`, or bare), where JSC refuses to parse the script
+    /// at all: "import.meta is only valid inside modules".
+    ///
+    /// This is a scanner, not a parser. It tracks single- and double-quoted strings, template
+    /// literals with `${}` nesting, both comment forms, and regex literals — the last of which
+    /// is why a scanner is needed rather than a smarter regex: `/["']/` is a legal regex whose
+    /// quote would otherwise open a string that never closes.
+    /// In `mask` mode the same scan emits a copy in which every string, template chunk,
+    /// comment and regex body has been blanked to spaces (newlines and non-ASCII bytes kept, so
+    /// offsets and line structure survive exactly). Matching a statement pattern against THAT
+    /// and slicing the original at the same offsets is what keeps `export default function …`
+    /// inside one of vite's generated worker strings from being rewritten as if it were code.
+    static func rewriteImportForms(_ source: String, meta: Bool, mask: Bool = false) -> (text: String, usedMeta: Bool) {
+        if !mask, !source.contains("import") { return (source, false) }
+        let bytes = Array(source.utf8)
+        let count = bytes.count
+        var out = [UInt8]()
+        out.reserveCapacity(count + 64)
+        var usedMeta = false
+        var index = 0
+
+        // Template state: a frame per `…` we are inside ('t') and per `${` inside one ('s').
+        var frames: [(kind: UInt8, depth: Int)] = []
+        var depth = 0
+        var inTemplate = false
+        // The last significant byte of code, and the last identifier, decide whether a '/'
+        // opens a regex or divides — the one genuinely ambiguous character in the language.
+        var lastCode: UInt8 = 0
+        var lastWord = ""
+        let regexKeywords: Set<String> = ["return", "typeof", "instanceof", "in", "of", "new",
+                                          "delete", "void", "throw", "do", "else", "case",
+                                          "yield", "await"]
+
+        func isIdent(_ byte: UInt8) -> Bool {
+            (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a)
+                || (byte >= 0x30 && byte <= 0x39) || byte == 0x5f || byte == 0x24 || byte >= 0x80
+        }
+        func regexCanStart() -> Bool {
+            if lastCode == 0 { return true }
+            if isIdent(lastCode) { return regexKeywords.contains(lastWord) }
+            return !(lastCode == 0x29 || lastCode == 0x5d)      // not after ')' or ']'
+        }
+        func emit(_ byte: UInt8) {
+            out.append(byte)
+            if byte > 0x20 { lastCode = byte }
+        }
+        /// A byte inside a string, comment or regex: kept as itself, or blanked in mask mode.
+        func copy(_ byte: UInt8) {
+            out.append(mask && byte != 0x0a && byte < 0x80 ? 0x20 : byte)
+        }
+
+        while index < count {
+            let byte = bytes[index]
+
+            if inTemplate {
+                if byte == 0x5c {                                   // \ escape
+                    copy(byte); index += 1
+                    if index < count { copy(bytes[index]); index += 1 }
+                    continue
+                }
+                if byte == 0x60 {                                   // ` closes the template
+                    copy(byte); index += 1
+                    if let frame = frames.popLast() { depth = frame.depth }
+                    inTemplate = false
+                    lastCode = 0x60; lastWord = ""
+                    continue
+                }
+                if byte == 0x24, index + 1 < count, bytes[index + 1] == 0x7b {   // ${
+                    out.append(byte); out.append(bytes[index + 1]); index += 2
+                    frames.append((0x73, depth))
+                    depth = 0
+                    inTemplate = false
+                    lastCode = 0x7b; lastWord = ""
+                    continue
+                }
+                copy(byte); index += 1
+                continue
+            }
+
+            if byte == 0x2f, index + 1 < count, bytes[index + 1] == 0x2f {       // //
+                while index < count, bytes[index] != 0x0a { copy(bytes[index]); index += 1 }
+                continue
+            }
+            if byte == 0x2f, index + 1 < count, bytes[index + 1] == 0x2a {       // /* */
+                copy(byte); copy(bytes[index + 1]); index += 2
+                while index < count {
+                    if bytes[index] == 0x2a, index + 1 < count, bytes[index + 1] == 0x2f {
+                        copy(bytes[index]); copy(bytes[index + 1]); index += 2
+                        break
+                    }
+                    copy(bytes[index]); index += 1
+                }
+                continue
+            }
+            if byte == 0x22 || byte == 0x27 {                                   // " '
+                // Kept verbatim even in mask mode: a quoted string cannot contain a real
+                // newline, so a line-anchored pattern can never match inside one — and the
+                // module specifier the import patterns have to READ is exactly here.
+                out.append(byte); index += 1
+                while index < count {
+                    let inner = bytes[index]
+                    out.append(inner); index += 1
+                    if inner == 0x5c {
+                        if index < count { out.append(bytes[index]); index += 1 }
+                        continue
+                    }
+                    if inner == byte || inner == 0x0a { break }     // a newline ends a broken string
+                }
+                lastCode = 0x22; lastWord = ""
+                continue
+            }
+            if byte == 0x60 {                                                   // ` opens
+                copy(byte); index += 1
+                frames.append((0x74, depth))
+                depth = 0
+                inTemplate = true
+                continue
+            }
+            if byte == 0x2f, regexCanStart() {                                  // regex literal
+                copy(byte); index += 1
+                var inClass = false
+                while index < count {
+                    let inner = bytes[index]
+                    copy(inner); index += 1
+                    if inner == 0x5c {
+                        if index < count { copy(bytes[index]); index += 1 }
+                        continue
+                    }
+                    if inner == 0x5b { inClass = true; continue }
+                    if inner == 0x5d { inClass = false; continue }
+                    if inner == 0x0a { break }                      // not a regex after all
+                    if inner == 0x2f && !inClass { break }
+                }
+                while index < count, isIdent(bytes[index]) { copy(bytes[index]); index += 1 }
+                lastCode = 0x2f; lastWord = ""
+                continue
+            }
+            if byte == 0x7b { depth += 1; emit(byte); index += 1; lastWord = ""; continue }
+            if byte == 0x7d {
+                if depth == 0, let frame = frames.last, frame.kind == 0x73 {     // closes ${…}
+                    frames.removeLast()
+                    depth = frame.depth
+                    inTemplate = true
+                    out.append(byte); index += 1
+                    continue
+                }
+                depth -= 1
+                emit(byte); index += 1; lastWord = ""
+                continue
+            }
+
+            // An identifier — the only place `import` can start.
+            if isIdent(byte) {
+                var end = index
+                while end < count, isIdent(bytes[end]) { end += 1 }
+                let word = String(decoding: bytes[index..<end], as: UTF8.self)
+                let precededByDot = lastCode == 0x2e
+                if word == "import", !precededByDot, !mask {
+                    var probe = end
+                    while probe < count, bytes[probe] == 0x20 || bytes[probe] == 0x09
+                            || bytes[probe] == 0x0a || bytes[probe] == 0x0d { probe += 1 }
+                    if meta, probe < count, bytes[probe] == 0x2e {
+                        var afterDot = probe + 1
+                        while afterDot < count, bytes[afterDot] == 0x20 || bytes[afterDot] == 0x09 { afterDot += 1 }
+                        var metaEnd = afterDot
+                        while metaEnd < count, isIdent(bytes[metaEnd]) { metaEnd += 1 }
+                        if String(decoding: bytes[afterDot..<metaEnd], as: UTF8.self) == "meta" {
+                            out.append(contentsOf: Array("__mouseImportMeta".utf8))
+                            usedMeta = true
+                            index = metaEnd
+                            lastCode = 0x61; lastWord = "__mouseImportMeta"
+                            continue
+                        }
+                    }
+                    if probe < count, bytes[probe] == 0x28 {                    // import(
+                        out.append(contentsOf: Array("__dynamicImport(__mouseRequire, ".utf8))
+                        index = probe + 1
+                        depth += 0
+                        lastCode = 0x28; lastWord = ""
+                        continue
+                    }
+                }
+                out.append(contentsOf: bytes[index..<end])
+                lastCode = bytes[end - 1]
+                lastWord = word
+                index = end
+                continue
+            }
+
+            emit(byte)
+            index += 1
+        }
+        return (String(decoding: out, as: UTF8.self), usedMeta)
+    }
+
+    /// Dynamic `import()` in a CommonJS file — legal, and prettier lazy-loads plugins with it.
     static func rewriteDynamicImport(_ source: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"\bimport\s*\("#) else { return source }
-        let ns = source as NSString
-        return regex.stringByReplacingMatches(in: source, range: NSRange(location: 0, length: ns.length),
-                                              withTemplate: "__dynamicImport(__mouseRequire, ")
+        return rewriteImportForms(source, meta: false).text
     }
 
     static func transpileESM(_ source: String) -> String {
         var text = source
         var epilogue: [String] = []
         var counter = 0
+        var maskCache: String?
 
+        // The leading whitespace in every statement pattern is `[ \t]*`, not `\s*`: a `\s*`
+        // reaching back across the newline made the replacement land on the PREVIOUS line, so
+        // `const y = () => {}` followed by `export default y` became `}module.exports.default`,
+        // which is a syntax error rather than the ASI the source relied on.
         // One pass per pattern: collect every match against the current text, then rebuild
         // the string ONCE. The old firstMatch+replacingCharacters loop recopied and
         // rescanned the whole source per match — O(n²), ~40 s on a 9 MB bundle. Matches are
         // statement-anchored and non-overlapping, and replacements never introduce new
         // import/export syntax, so a single pass is equivalent.
+        // Every statement pattern is matched against a MASK of the current text — the same
+        // bytes with strings, comments and regexes blanked — and then applied to the text at
+        // those offsets. A bundle emits JavaScript as data: vite's worker shim is the literal
+        // line `export default function WorkerWrapper(options) {` inside a template string, and
+        // rewriting it both corrupted the code vite serves and left the epilogue assigning a
+        // binding that does not exist. The mask is recomputed per pass because each pass
+        // changes the text; scanning is linear and this is cached by content anyway.
         func replace(_ pattern: String, _ transform: (NSTextCheckingResult, NSString) -> String) {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { return }
             let ns = text as NSString
-            let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            // Match the text itself first — most patterns miss entirely, and the mask is only
+            // worth building when there is something to judge. A match is code when its OPENING
+            // survives masking; testing the opening rather than the whole match keeps an import
+            // with a comment inside its braces, which the mask blanks in the middle.
+            let found = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            guard !found.isEmpty else { return }
+            if maskCache == nil { maskCache = rewriteImportForms(text, meta: false, mask: true).text }
+            guard let maskText = maskCache, (maskText as NSString).length == ns.length else { return }
+            let mask = maskText as NSString
+            let matches = found.filter { match in
+                // From the first non-space character, because a match anchored at `^` starts on
+                // the INDENTATION — which is spaces in the source and spaces in the mask alike,
+                // so comparing from the match start called every masked line code.
+                var start = match.range.location
+                let end = match.range.location + match.range.length
+                while start < end, ns.character(at: start) == 0x20 || ns.character(at: start) == 0x09
+                        || ns.character(at: start) == 0x0a || ns.character(at: start) == 0x0d { start += 1 }
+                guard start < end else { return false }
+                let head = NSRange(location: start, length: min(8, end - start))
+                return mask.substring(with: head) == ns.substring(with: head)
+            }
             guard !matches.isEmpty else { return }
             var result = ""
             result.reserveCapacity(ns.length)
@@ -2603,6 +2947,7 @@ final class NodeEngine: @unchecked Sendable {
                 result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
             }
             text = result
+            maskCache = nil                                          // the text moved under it
         }
         func group(_ match: NSTextCheckingResult, _ index: Int, _ ns: NSString) -> String? {
             guard index < match.numberOfRanges, match.range(at: index).location != NSNotFound else { return nil }
@@ -2642,7 +2987,7 @@ final class NodeEngine: @unchecked Sendable {
         }
         // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns —
         // minified bundles drop every optional space (`import{x as y}from"m"`).
-        replace(#"(?:^|(?<=[;}]))\s*import\s*(?:([\w$]+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+([\w$]+)|([\w$]+))\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*import\s*(?:([\w$]+)\s*,\s*)?(?:\{([^}]*)\}|\*\s*as\s+([\w$]+)|([\w$]+))\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             var lines = [requireSettled(temp, group(match, 5, ns)!)]
@@ -2658,13 +3003,13 @@ final class NodeEngine: @unchecked Sendable {
             return lines.joined(separator: " ")
         }
         // import 'mod'
-        replace(#"(?:^|(?<=[;}]))\s*import\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*import\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             return requireSettled("__esm\(counter)", group(match, 1, ns)!)
         }
         // export * as name from 'mod'   (ansi-escapes@7 re-exports its base this way —
         // must run before the bare `export * from` rule, whose pattern is a prefix of this)
-        replace(#"(?:^|(?<=[;}]))\s*export\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\*\s*as\s+([\w$]+)\s+from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             return requireSettled(temp, group(match, 2, ns)!) + " module.exports.\(group(match, 1, ns)!) = \(temp);"
@@ -2672,12 +3017,12 @@ final class NodeEngine: @unchecked Sendable {
         // export * from 'mod'  /  export { a, b as c } from 'mod'
         // Star re-export excludes `default` and `__esModule` (spec semantics — yoga-layout's
         // `export * from './YGEnums.js'` must not clobber its own default export).
-        replace(#"(?:^|(?<=[;}]))\s*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             return requireSettled(temp, group(match, 1, ns)!) + " __reexportStar(module.exports, \(temp));"
         }
-        replace(#"(?:^|(?<=[;}]))\s*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"](?:\s*(?:with|assert)\s*\{[^}]*\})?\s*;?"#) { match, ns in
             counter += 1
             let temp = "__esm\(counter)"
             var lines = [requireSettled(temp, group(match, 2, ns)!)]
@@ -2690,16 +3035,16 @@ final class NodeEngine: @unchecked Sendable {
         // CJS/ESM packages (yargs, cliui, y18n) use to make `require()` return X directly.
         // Must run BEFORE the general clause rule, whose `[^}]*` would swallow it and then
         // drop the string alias. A general string-named export lands on module.exports[name].
-        replace(#"(?:^|(?<=[;}]))\s*export\s*\{\s*([\w$]+)\s+as\s+['"]module\.exports['"]\s*\}\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\{\s*([\w$]+)\s+as\s+['"]module\.exports['"]\s*\}\s*;?"#) { match, ns in
             "module.exports = \(group(match, 1, ns)!);"
         }
-        replace(#"(?:^|(?<=[;}]))\s*export\s*\{\s*([\w$]+)\s+as\s+['"]([^'"]+)['"]\s*\}\s*;?"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\{\s*([\w$]+)\s+as\s+['"]([^'"]+)['"]\s*\}\s*;?"#) { match, ns in
             let name = group(match, 2, ns)!.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
             return "module.exports['\(name)'] = \(group(match, 1, ns)!);"
         }
         // export { a, b as c };   — a trailing line comment must not defeat the match
         // (commander@15 ends one with "; // Deprecated").
-        replace(#"(?:^|(?<=[;}]))\s*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s*\{([^}]*)\}\s*;?\s*(//[^\n]*)?$"#) { match, ns in
             bindings(group(match, 1, ns)!)
                 .map { "module.exports.\($0.alias) = \($0.source);" }
                 .joined(separator: " ")
@@ -2707,26 +3052,35 @@ final class NodeEngine: @unchecked Sendable {
         // export default function name() / class Name — keep the declaration, alias at EOF.
         // Mid-line anchor: a preceding rule can leave `;export default` on one line when an
         // unterminated import (no semicolon, cliui) had its trailing newline consumed.
-        replace(#"(?:^|(?<=[;}]))\s*export\s+default\s+(function\s+([\w$]+)|class\s+([\w$]+))"#) { match, ns in
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s+default\s+(function\s*\*?\s+([\w$]+)|class\s+([\w$]+))"#) { match, ns in
             let name = group(match, 2, ns) ?? group(match, 3, ns)!
             epilogue.append("module.exports.default = \(name);")
             return group(match, 1, ns)!
         }
         // export default <expression>
-        replace(#"(?:^|(?<=[;}]))\s*export\s+default\s+"#) { _, _ in "module.exports.default = " }
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s+default\s+"#) { _, _ in "module.exports.default = " }
         // export const/let/var/function/class NAME — strip keyword, assign at EOF.
-        replace(#"(?:^|(?<=[;}]))\s*export\s+(const|let|var|function|class|async\s+function)\s+([\w$]+)"#) { match, ns in
-            let name = group(match, 2, ns)!
+        // The `*` is its own group because a generator is declared `function* name` — and
+        // `export async function* _iterSSEMessages` is how the Anthropic SDK streams. Without
+        // it the declaration kept its `export` keyword and the file would not parse.
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s+(const|let|var|class|function|async\s+function)(\s*\*)?\s+([\w$]+)"#) { match, ns in
+            let name = group(match, 3, ns)!
             epilogue.append("module.exports.\(name) = \(name);")
-            return "\(group(match, 1, ns)!) \(name)"
+            return "\(group(match, 1, ns)!)\(group(match, 2, ns) ?? "") \(name)"
         }
-        // dynamic import() and import.meta.*
-        text = text.replacingOccurrences(of: "import.meta.resolve", with: "__mouseRequire.resolve")
+        // dynamic import() and import.meta, both code-only — see rewriteImportForms.
+        let scanned = rewriteImportForms(text, meta: true)
+        text = scanned.text
+        // The whole of node's import.meta as one object, declared only where it is used.
         // __mouseFilename, not __filename: ESM files legitimately declare
         // `const __filename = fileURLToPath(import.meta.url)`, and substituting the param
         // name would make that line a TDZ self-reference (prettier's bundle).
-        text = text.replacingOccurrences(of: "import.meta.url", with: "('file://' + __mouseFilename)")
-        text = rewriteDynamicImport(text)
+        if scanned.usedMeta {
+            text = "const __mouseImportMeta = { url: 'file://' + __mouseFilename, "
+                 + "filename: __mouseFilename, "
+                 + "dirname: __mouseFilename.replace(/[/][^/]*$/, '') || '/', "
+                 + "resolve: __mouseRequire.resolve };\n" + text
+        }
 
         // The body runs under an ASYNC wrapper (imports may await). The try/catch makes the
         // sync outcome inspectable the moment the wrapper call returns: __esmDone means the
@@ -3628,8 +3982,11 @@ final class NodeEngine: @unchecked Sendable {
               }
               const parent = base instanceof URL ? base : new URL(String(base && base.href ? base.href : base));
               // The base for resolution keeps the credentials; `origin` deliberately does not
-              // (node reports origin without them, but carries them in href).
-              const root = parent.protocol + (parent.hostname ? '//' + parent._authority : '');
+              // (node reports origin without them, but carries them in href). The '//' is the
+              // AUTHORITY marker, not a host: 'file:///a/b' has an empty authority and keeps it,
+              // so keying this off `hostname` resolved every relative import inside a package to
+              // 'file:/…' — the same mistake href itself was fixed for, at the other site.
+              const root = parent.protocol + (parent._hierarchical ? '//' + parent._authority : '');
               if (text.startsWith('//')) {
                 text = parent.protocol + text;                       // protocol-relative
               } else if (text.startsWith('/')) {
@@ -3660,6 +4017,7 @@ final class NodeEngine: @unchecked Sendable {
             this.host = this.hostname + (this.port ? ':' + this.port : '');
             // A hierarchical URL always has a path; node reports '/' where the text has none.
             const hierarchical = text.indexOf('//') === this.protocol.length;
+            this._hierarchical = hierarchical;
             // A path is percent-encoded text, not raw text. Existing '%' escapes are left alone
             // (re-encoding them would corrupt any URL that arrived already encoded); everything
             // in the path percent-encode set, plus controls and non-ASCII, gets encoded.
@@ -4183,7 +4541,8 @@ final class NodeEngine: @unchecked Sendable {
       };
       globalThis.__dynamicImport = function(require, specifier) {
         // Promise flattening settles a pending (top-level-await) module before wrapping.
-        return Promise.resolve().then(function() { return require(specifier); }).then(function(m) {
+        const load = require.__importCondition || require;
+        return Promise.resolve().then(function() { return load(specifier); }).then(function(m) {
           return m && m.__esModule ? m : Object.assign({ default: m }, m);
         });
       };
