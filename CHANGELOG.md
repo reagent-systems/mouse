@@ -258,6 +258,11 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `util.format`'s `%c` consumes its argument and renders nothing, as node does —
+  it was printed literally with the CSS appended.
+- Node layer: `util.inspect` honours `breakLength`, `compact` and `maxArrayLength`. All three
+  were accepted and ignored, so asking for one entry per line, or for a shorter array, did
+  nothing at all.
 - Node layer: **`buffer.slice()` returns a view, not a copy**, as node's does — writes through a
   slice reach the buffer. Also `compare`'s ranged form, a missing `lastIndexOf`, `fill`'s
   start/end and repeating patterns, `byteLength(text, encoding)` honouring the encoding, and

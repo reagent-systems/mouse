@@ -5271,9 +5271,21 @@ final class NodeEngine: @unchecked Sendable {
       /// node caps a collection at 100 entries and says how many it left out, which keeps a
       /// 10,000-element array from becoming a wall of text.
       function withLimit(items, total) {
-        if (total <= 100) return items;
-        const left = total - 100;
-        return items.concat(['... ' + left + ' more item' + (left === 1 ? '' : 's')]);
+        const limit = inspect._maxArrayLength === undefined ? 100 : inspect._maxArrayLength;
+        if (total <= limit) return items;
+        const left = total - limit;
+        return items.slice(0, limit).concat(['... ' + left + ' more item' + (left === 1 ? '' : 's')]);
+      }
+      /// One line, or one entry per line — node breaks when the single-line form would pass
+      /// `breakLength`, and `compact: false` always breaks.
+      function joinEntries(open, entries, close, indent) {
+        const single = entries.length ? open + ' ' + entries.join(', ') + ' ' + close : open + close;
+        const breakLength = inspect._breakLength === undefined ? 128 : inspect._breakLength;
+        if (inspect._compact !== false && single.length <= breakLength) return single;
+        if (!entries.length) return open + close;
+        const padding = '  '.repeat((indent || 0) + 1);
+        return open + '\n' + entries.map(function(entry) { return padding + entry; }).join(',\n')
+             + '\n' + '  '.repeat(indent || 0) + close;
       }
       function inspect(value, depth, seen) {
         // The outer call reports a cycle with `<ref *1>` so a reader knows the [Circular *1]
@@ -5336,8 +5348,10 @@ final class NodeEngine: @unchecked Sendable {
             if (/^\d+$/.test(key)) continue;
             items.push(quoteKey(key) + ': ' + inspect(value[key], depth - 1, nested));
           }
-          const all = value.length > 100 ? withLimit(items, value.length) : items;
-          return all.length === 0 ? '[]' : '[ ' + all.join(', ') + ' ]';
+          // The cap is whatever `maxArrayLength` says, not a hardcoded 100 — withLimit knows it,
+          // and gating the CALL on 100 meant a smaller cap was never consulted.
+          const all = withLimit(items, value.length);
+          return joinEntries('[', all, ']', 0);
         }
         if (ArrayBuffer.isView(value)) {
           const name = value.constructor && value.constructor.name || 'TypedArray';
@@ -5395,7 +5409,7 @@ final class NodeEngine: @unchecked Sendable {
             if (!Object.getOwnPropertyDescriptor(value, key).enumerable) continue;
             items.push('[' + String(key) + ']: ' + inspect(value[key], depth - 1, nested));
           }
-          return items.length === 0 ? prefix + '{}' : prefix + '{ ' + items.join(', ') + ' }';
+          return prefix + joinEntries('{', items, '}', 0);
         }
         return String(value);
       }
@@ -5405,9 +5419,9 @@ final class NodeEngine: @unchecked Sendable {
         // No substitution arguments means no processing at all: node returns '100%%' unchanged,
         // and only collapses '%%' when it is actually filling in a placeholder. Ours processed a
         // lone string, so `console.log('100%% off')` lost a percent sign.
-        if (args.length > 1 && typeof args[0] === 'string' && /%[sdifjoO%]/.test(args[0])) {
+        if (args.length > 1 && typeof args[0] === 'string' && /%[sdifjoOc%]/.test(args[0])) {
           let i = 1;
-          let text = args[0].replace(/%([sdifjoO%])/g, (match, spec) => {
+          let text = args[0].replace(/%([sdifjoOc%])/g, (match, spec) => {
             if (spec === '%') return '%';
             if (i >= args.length) return match;
             const value = args[i++];
@@ -5418,6 +5432,9 @@ final class NodeEngine: @unchecked Sendable {
               case 'i': return String(parseInt(value, 10));
               case 'f': return String(parseFloat(value));
               case 'j': return JSON.stringify(value);
+              // %c is a CSS hook for a browser's devtools: node CONSUMES the argument and
+              // renders nothing, which a terminal has no better answer for either.
+              case 'c': return '';
               default: return inspect(value);
             }
           });
@@ -7143,7 +7160,23 @@ final class NodeEngine: @unchecked Sendable {
             if (options !== null && typeof options === 'object') {
               const depth = options.depth === null ? Infinity
                           : options.depth === undefined ? 2 : Number(options.depth);
-              return inspect(value, depth);
+              // `compact: false` and a small `breakLength` are how a caller asks for one entry
+              // per line, and `maxArrayLength` is how it asks for less — all three were
+              // accepted and ignored, which reads as a formatter that does not work.
+              const previous = { break: inspect._breakLength, compact: inspect._compact,
+                                 max: inspect._maxArrayLength };
+              if (options.breakLength !== undefined) inspect._breakLength = Number(options.breakLength);
+              if (options.compact !== undefined) inspect._compact = options.compact;
+              if (options.maxArrayLength !== undefined) {
+                inspect._maxArrayLength = options.maxArrayLength === null
+                  ? Infinity : Number(options.maxArrayLength);
+              }
+              try { return inspect(value, depth); }
+              finally {
+                inspect._breakLength = previous.break;
+                inspect._compact = previous.compact;
+                inspect._maxArrayLength = previous.max;
+              }
             }
             return inspect(value, options);
           },
