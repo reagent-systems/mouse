@@ -322,6 +322,9 @@ final class NodeEngine: @unchecked Sendable {
                     if let error, !error.isUndefined, !error.isNull, self.exitCode == nil {
                         let text = error.toString() ?? "unknown error"
                         let stack = error.forProperty("stack")?.toString() ?? text
+                        // An ESM entry settles through here rather than through the context's
+                        // exception handler, and it needs the same header for the same reason.
+                        self.err += self.sourceContext(of: error)
                         self.err += (stack.contains(text) ? stack : text + "\n" + stack) + "\n"
                         self.exitCode = 1
                     }
@@ -355,6 +358,7 @@ final class NodeEngine: @unchecked Sendable {
             let handled = context.objectForKeyedSubscript("__mouseEmitUncaught")?
                 .call(withArguments: [fatalValue ?? JSValue(nullIn: context)!])?.toBool() ?? false
             if !handled, exitCode == nil {
+                err += sourceContext(of: fatalValue)
                 err += fatal.hasSuffix("\n") ? fatal : fatal + "\n"
                 exitCode = 1
             }
@@ -409,6 +413,26 @@ final class NodeEngine: @unchecked Sendable {
     /// `sourceURL` names the module in stack traces. Without it JSC reports every frame as a
     /// bare `functionName@` — unreadable for anyone debugging a real error in the terminal,
     /// which is the app's one honest error surface.
+    /// The file, the line, the line's own text and a caret — what node prints above an
+    /// uncaught error, and the part an editor can act on. A stack tells you where; this tells
+    /// you what is there, which is the difference between reading a trace and reading the code.
+    private func sourceContext(of error: JSValue?) -> String {
+        guard let error,
+              let sourceURL = error.forProperty("sourceURL")?.toString(),
+              sourceURL.hasPrefix("mouse://"),
+              let lineValue = error.forProperty("line"), lineValue.isNumber else { return "" }
+        let line = Int(lineValue.toInt32())
+        var virtual = String(sourceURL.dropFirst("mouse://".count))
+        virtual = virtual.removingPercentEncoding ?? virtual
+        guard line >= 1,
+              let text = try? String(contentsOf: realURL(virtual), encoding: .utf8) else { return "" }
+        let lines = text.components(separatedBy: "\n")
+        guard line <= lines.count else { return "" }
+        let column = Int(error.forProperty("column")?.toInt32() ?? 1)
+        let caret = String(repeating: " ", count: max(0, column - 1)) + "^"
+        return "\(virtual):\(line)\n\(lines[line - 1])\n\(caret)\n\n"
+    }
+
     private func wrapModule(_ source: String, async: Bool = false, sourceURL: String? = nil) -> JSValue? {
         var body = source
         if body.hasPrefix("#!") {
@@ -420,7 +444,11 @@ final class NodeEngine: @unchecked Sendable {
         // shadows the `require` PARAMETER scope-wide, which would put the transpiled imports
         // above that line in TDZ; `__mouseRequire` is untouched by that shadow.
         let keyword = async ? "async function" : "function"
-        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){\n" + body + "\n})"
+        // No newline after the wrapper: the body's first line must BE the file's first line, or
+        // every line number in every stack trace is off by one — which for an editor means the
+        // click lands on the wrong line, all day. node wraps this way for the same reason.
+        let wrapped = "(\(keyword)(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){"
+                    + body + "\n})"
         // Evaluating a function EXPRESSION can only fail by failing to parse, so the context's
         // own handler — which treats an exception as fatal for the program — must not see it.
         let outerHandler = context.exceptionHandler
@@ -2810,7 +2838,7 @@ final class NodeEngine: @unchecked Sendable {
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
     /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
     /// without this a stale rewrite would be reused after an engine update.
-    private static let transpilerVersion = 6
+    private static let transpilerVersion = 7
 
     /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
     /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
@@ -3108,7 +3136,13 @@ final class NodeEngine: @unchecked Sendable {
                 if range.location > cursor {
                     result += ns.substring(with: NSRange(location: cursor, length: range.location - cursor))
                 }
+                // A multi-line import becomes one line, and everything below it would move up
+                // by the lines it swallowed — so the replacement carries them, at the end where
+                // they change nothing but the count.
+                let consumed = ns.substring(with: range)
+                let newlines = consumed.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
                 result += transform(match, ns)
+                if newlines > 0 { result += String(repeating: "\n", count: newlines) }
                 cursor = range.location + range.length
             }
             if cursor < ns.length {
@@ -3337,9 +3371,13 @@ final class NodeEngine: @unchecked Sendable {
         // assignment put a phantom key into `Object.keys(ns)`, into a spread of it, and into
         // anything that walks a module's exports. Defined this way the interop check still
         // sees it and nothing that ENUMERATES does.
-        return "Object.defineProperty(module.exports, '__esModule', { value: true });\ntry {\n"
-            + prologue.joined(separator: "\n") + "\n" + text + "\n;" + epilogue.joined(separator: "\n")
-            + "\n;module.__esmDone = true;\n} catch (__esmThrown) { module.__esmError = __esmThrown; throw __esmThrown; }"
+        // Everything before the body goes on ONE line and everything after it on the last, for
+        // the same reason the wrapper does: a module's line 5 has to still be line 5. The
+        // prologue was four lines of live-export getters, so an ESM stack pointed four lines
+        // past the throw.
+        return "Object.defineProperty(module.exports, '__esModule', { value: true }); try { "
+            + prologue.joined(separator: " ") + " " + text + "\n;" + epilogue.joined(separator: " ")
+            + " ;module.__esmDone = true; } catch (__esmThrown) { module.__esmError = __esmThrown; throw __esmThrown; }"
     }
 
     private func throwInJS(_ message: String) -> Any {

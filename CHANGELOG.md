@@ -8,6 +8,8 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: an uncaught error prints node's source-context header — the file, the line, that
+  line's own text and a caret — above the stack. A trace says where; this says what is there.
 - Node layer: `NAPI_RS_FORCE_WASI` is set by default. napi-rs generates a loader that tries the
   platform's `.node` and falls back to the package's WebAssembly build only when told; on iOS
   the native branch can never load, so the fallback is the only reachable one. Without it a
@@ -251,6 +253,11 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: **stack traces name the right line**. The CommonJS wrapper cost every trace a
+  line, the ESM transform's prologue cost four more, and a multi-line import collapsed to one
+  line moved everything below it up — so a trace pointed at code that was fine. The wrapper and
+  everything the transform adds now share the body's first and last lines, and a replacement
+  carries the newlines it consumed. Gated on five shapes against real node.
 - msh: `npm install` reads the package.json governing the current directory, not the workspace
   root's, so `cd app && npm install` works after scaffolding — and writes a new dependency back
   to that same file.
