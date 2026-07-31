@@ -253,6 +253,10 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: **a TypeScript stack trace names the line in the .ts file**. Erasing types moves
+  lines in both directions — an `interface` disappears, an `enum` expands — so the compiler's own
+  source map is now requested, decoded, and applied to the source-context header and to every
+  frame of the stack.
 - Node layer: **stack traces name the right line**. The CommonJS wrapper cost every trace a
   line, the ESM transform's prologue cost four more, and a multi-line import collapsed to one
   line moved everything below it up — so a trace pointed at code that was fine. The wrapper and

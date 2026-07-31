@@ -325,7 +325,7 @@ final class NodeEngine: @unchecked Sendable {
                         // An ESM entry settles through here rather than through the context's
                         // exception handler, and it needs the same header for the same reason.
                         self.err += self.sourceContext(of: error)
-                        self.err += (stack.contains(text) ? stack : text + "\n" + stack) + "\n"
+                        self.err += self.remapStack((stack.contains(text) ? stack : text + "\n" + stack)) + "\n"
                         self.exitCode = 1
                     }
                 }
@@ -359,7 +359,7 @@ final class NodeEngine: @unchecked Sendable {
                 .call(withArguments: [fatalValue ?? JSValue(nullIn: context)!])?.toBool() ?? false
             if !handled, exitCode == nil {
                 err += sourceContext(of: fatalValue)
-                err += fatal.hasSuffix("\n") ? fatal : fatal + "\n"
+                err += remapStack(fatal.hasSuffix("\n") ? fatal : fatal + "\n")
                 exitCode = 1
             }
         }
@@ -416,6 +416,39 @@ final class NodeEngine: @unchecked Sendable {
     /// The file, the line, the line's own text and a caret — what node prints above an
     /// uncaught error, and the part an editor can act on. A stack tells you where; this tells
     /// you what is there, which is the difference between reading a trace and reading the code.
+    /// A compiled file's position, in the terms its AUTHOR wrote. Empty when the file was not
+    /// compiled — the ordinary case, and the reason this is a lookup rather than a transform.
+    private func originalPosition(file: String, line: Int, column: Int) -> (line: Int, column: Int)? {
+        guard let mapper = context.objectForKeyedSubscript("__mapPosition"),
+              let mapped = mapper.call(withArguments: [file, line, column])?.toString(),
+              !mapped.isEmpty else { return nil }
+        let parts = mapped.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 2 else { return nil }
+        return (parts[0], parts[1])
+    }
+
+    /// Every frame in a rendered stack, moved back to the source it was written in. A stack is
+    /// a string by the time we see it, so this is a rewrite over the positions in it — the same
+    /// job `source-map-support` does for node, in the one place that renders them.
+    private func remapStack(_ text: String) -> String {
+        guard text.contains("mouse://"),
+              let pattern = try? NSRegularExpression(pattern: #"mouse://([^\s:]+):(\d+):(\d+)"#) else { return text }
+        let ns = text as NSString
+        var result = "", cursor = 0
+        for match in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let file = ns.substring(with: match.range(at: 1))
+            let line = Int(ns.substring(with: match.range(at: 2))) ?? 0
+            let column = Int(ns.substring(with: match.range(at: 3))) ?? 0
+            guard let original = originalPosition(file: file, line: line, column: column) else { continue }
+            result += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            result += "mouse://\(file):\(original.line):\(original.column)"
+            cursor = match.range.location + match.range.length
+        }
+        guard cursor > 0 else { return text }
+        result += ns.substring(from: cursor)
+        return result
+    }
+
     private func sourceContext(of error: JSValue?) -> String {
         guard let error,
               let sourceURL = error.forProperty("sourceURL")?.toString(),
@@ -426,11 +459,18 @@ final class NodeEngine: @unchecked Sendable {
         virtual = virtual.removingPercentEncoding ?? virtual
         guard line >= 1,
               let text = try? String(contentsOf: realURL(virtual), encoding: .utf8) else { return "" }
+        var reportedLine = line
+        var column = Int(error.forProperty("column")?.toInt32() ?? 1)
+        // A compiled file: the header must quote the line the AUTHOR wrote, or it points
+        // confidently at whatever happens to sit there in the output.
+        if let original = originalPosition(file: virtual, line: line, column: column) {
+            reportedLine = original.line
+            column = original.column
+        }
         let lines = text.components(separatedBy: "\n")
-        guard line <= lines.count else { return "" }
-        let column = Int(error.forProperty("column")?.toInt32() ?? 1)
+        guard reportedLine <= lines.count else { return "" }
         let caret = String(repeating: " ", count: max(0, column - 1)) + "^"
-        return "\(virtual):\(line)\n\(lines[line - 1])\n\(caret)\n\n"
+        return "\(virtual):\(reportedLine)\n\(lines[reportedLine - 1])\n\(caret)\n\n"
     }
 
     private func wrapModule(_ source: String, async: Bool = false, sourceURL: String? = nil) -> JSValue? {
@@ -4944,7 +4984,10 @@ final class NodeEngine: @unchecked Sendable {
           verbatimModuleSyntax: false,
           declaration: false,
           noEmit: false,
-          sourceMap: false,
+          // A source map, because erasing types MOVES lines: an interface above a function is
+          // four lines that stop existing, and without the map every stack trace in a TypeScript
+          // project points that far above the throw.
+          sourceMap: true,
           inlineSourceMap: false,
           outDir: undefined,
         });
@@ -4953,7 +4996,63 @@ final class NodeEngine: @unchecked Sendable {
           reportDiagnostics: false,
           compilerOptions: options,
         });
+        if (output.sourceMapText) rememberSourceMap(fileName, output.sourceMapText);
         return { text: output.outputText };
+      };
+      // The map, decoded once per file into [generatedLine][segment]. VLQ is base64 with a
+      // continuation bit, and its numbers are DELTAS that accumulate across the whole file —
+      // which is the part that catches people who decode it segment by segment.
+      const SOURCE_MAP_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      function rememberSourceMap(fileName, text) {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch (error) { return; }
+        if (!parsed || typeof parsed.mappings !== 'string') return;
+        const lines = [];
+        let sourceLine = 0, sourceColumn = 0, sourceIndex = 0;
+        for (const group of parsed.mappings.split(';')) {
+          const segments = [];
+          let generatedColumn = 0;
+          for (const piece of group.split(',')) {
+            if (!piece) continue;
+            const values = [];
+            let shift = 0, value = 0;
+            for (const character of piece) {
+              const digit = SOURCE_MAP_ALPHABET.indexOf(character);
+              if (digit < 0) break;
+              value += (digit & 31) << shift;
+              if (digit & 32) { shift += 5; continue; }
+              const negative = value & 1;
+              value >>= 1;
+              values.push(negative ? -value : value);
+              value = 0; shift = 0;
+            }
+            if (!values.length) continue;
+            generatedColumn += values[0];
+            if (values.length >= 4) {
+              sourceIndex += values[1];
+              sourceLine += values[2];
+              sourceColumn += values[3];
+              segments.push([generatedColumn, sourceLine, sourceColumn]);
+            }
+          }
+          lines.push(segments);
+        }
+        globalThis.__sourceMaps = globalThis.__sourceMaps || {};
+        globalThis.__sourceMaps[fileName] = lines;
+      }
+      /// Where a position in the COMPILED file was written in the source. "line:column", or an
+      /// empty string for a file that was never compiled — which is most of them.
+      globalThis.__mapPosition = function(fileName, line, column) {
+        const maps = globalThis.__sourceMaps;
+        const lines = maps && maps[fileName];
+        if (!lines) return '';
+        const segments = lines[line - 1];
+        if (!segments || !segments.length) return '';
+        let best = segments[0];
+        for (const segment of segments) {
+          if (segment[0] <= column - 1) best = segment; else break;
+        }
+        return (best[1] + 1) + ':' + (best[2] + 1);
       };
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
       // An imported binding, read now if it can be. If the exporting module is mid-cycle its
