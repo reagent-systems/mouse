@@ -38,6 +38,11 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `querystring` handles repeated keys as arrays rather than keeping only the last
+  value, decodes `+` as a space, repeats the key when stringifying an array instead of joining
+  with commas, writes `null` as empty, honours the separator/equals arguments, and survives a
+  malformed percent-escape instead of throwing.
+
 - Node layer: `url.resolve()` handles a base that is only a path — it returned the relative part
   alone, discarding the base. And `url.urlToHttpOptions()` reports `hash`, `search`, `pathname`
   and `auth`, with `port` as a number, so options built from a URL keep its credentials.

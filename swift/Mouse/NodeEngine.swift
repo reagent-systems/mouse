@@ -7832,14 +7832,50 @@ final class NodeEngine: @unchecked Sendable {
               if (!pair) continue;
               if (maxKeys > 0 && Object.keys(result).length >= maxKeys) break;
               const at = pair.indexOf(equals);
-              const key = at < 0 ? pair : pair.slice(0, at);
-              const value = at < 0 ? '' : pair.slice(at + equals.length);
-              result[decodeURIComponent(key)] = decodeURIComponent(value);
+              const rawKey = at < 0 ? pair : pair.slice(0, at);
+              const rawValue = at < 0 ? '' : pair.slice(at + equals.length);
+              // A '+' is a space in a query string, and a malformed escape must not throw —
+              // node leaves an undecodable sequence as-is rather than rejecting the whole
+              // string, which is what a hostile or truncated query would otherwise do.
+              const decode = function(part) {
+                const plussed = String(part).replace(/\+/g, ' ');
+                try { return decodeURIComponent(plussed); } catch (error) { return plussed; }
+              };
+              const key = decode(rawKey), value = decode(rawValue);
+              // A repeated key becomes an ARRAY. Overwriting instead silently discarded every
+              // value but the last, which is data loss in the shape most likely to be a filter
+              // list or a multi-select.
+              if (Object.prototype.hasOwnProperty.call(result, key)) {
+                if (Array.isArray(result[key])) result[key].push(value);
+                else result[key] = [result[key], value];
+              } else {
+                result[key] = value;
+              }
             }
             return result;
           },
-          stringify: function(object) {
-            return Object.keys(object).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(object[k])).join('&');
+          stringify: function(object, sep, eq) {
+            const separator = sep || '&';
+            const equals = eq || '=';
+            // node's escaping is percent-encoding throughout — a space is %20, never '+'.
+            const encode = function(value) {
+              if (value === null || value === undefined) return '';
+              if (typeof value === 'object') return '';
+              return encodeURIComponent(String(value));
+            };
+            const parts = [];
+            for (const key of Object.keys(object || {})) {
+              const encodedKey = encodeURIComponent(key);
+              const value = object[key];
+              // An array REPEATS the key; joining with commas produced one value that no
+              // parser would split back apart.
+              if (Array.isArray(value)) {
+                for (const item of value) parts.push(encodedKey + equals + encode(item));
+              } else {
+                parts.push(encodedKey + equals + encode(value));
+              }
+            }
+            return parts.join(separator);
           },
         };
       };
