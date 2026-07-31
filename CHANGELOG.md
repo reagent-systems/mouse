@@ -258,6 +258,11 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `fs.writeSync` honours node's TWO signatures — `(fd, buffer, offset, length,
+  position)` and `(fd, string, position, encoding)`. Reading a string call with the buffer
+  signature put the bytes at the wrong offset, silently. And `fs.writeFileSync`'s `flag` option
+  accepts a number, where reading it as text made every numeric spelling mean "truncate", so an
+  append replaced the file.
 - Node layer: `fs.openSync` understands NUMERIC flags — `O_WRONLY|O_CREAT|O_TRUNC` as a number
   is how Go's wasm runtime and every WASI shim open a file, and stringifying it gave "1537",
   which reads as neither write nor append. A descriptor now also writes at its own position

@@ -7587,7 +7587,12 @@ final class NodeEngine: @unchecked Sendable {
           // file it was asked to append to (silent data loss), and an ignored mode:0o600 left a
           // secret world-readable. A sweep for silently-ignored options found them.
           writeFileSync: function(file, data, options) {
-            const flag = String((options && options.flag) || (typeof options === 'string' ? 'w' : 'w'));
+            // A flag is a string OR a number here too — `{ flag: O_WRONLY | O_APPEND }` is
+            // ordinary, and reading it as text made every numeric spelling mean "truncate".
+            const rawFlag = options && options.flag !== undefined ? options.flag : 'w';
+            const flag = typeof rawFlag === 'number'
+              ? ((rawFlag & 8) ? 'a' : (rawFlag & 2048) ? 'wx' : 'w')
+              : String(rawFlag);
             const buffer = __toBytes(data, typeof options === 'string' ? options
                                            : (options && options.encoding) || undefined);
             const path = resolvePath(file);
@@ -7850,11 +7855,24 @@ final class NodeEngine: @unchecked Sendable {
           // writes stdout through `fs.write(1, uint8Array, …)`, and `Buffer.isBuffer` is false
           // for a plain Uint8Array — so this used to stringify it ("7,0,0,0,…") and report that
           // string's length, which made Go panic with "invalid return from write".
+          // node has TWO signatures here and they order their arguments differently:
+          //   writeSync(fd, buffer, offset, length, position)
+          //   writeSync(fd, string, position, encoding)
+          // so for a string the third argument is the POSITION, not an offset into it. Reading a
+          // string call with the buffer signature wrote at the wrong place, silently.
+          if (typeof data === 'string') {
+            const stringPosition = typeof offset === 'number' ? offset : null;
+            const encodingName = typeof length === 'string' ? length : 'utf8';
+            offset = undefined;
+            length = undefined;
+            position = stringPosition;
+            data = Buffer.from(data, encodingName);
+          }
           let buffer;
           if (Buffer.isBuffer(data)) buffer = data;
           else if (ArrayBuffer.isView(data)) buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
           else buffer = Buffer.from(String(data));
-          if (typeof data !== 'string' && typeof offset === 'number') {
+          if (typeof offset === 'number') {
             const from = offset | 0;
             const count = typeof length === 'number' ? length | 0 : buffer.length - from;
             buffer = buffer.slice(from, from + count);
