@@ -38,6 +38,11 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `process.emitWarning` emits the `'warning'` event as well as printing, so code
+  that attaches a listener to observe or route warnings actually receives them; the `{ type,
+  code, detail }` options form works. And `process.on('uncaughtExceptionMonitor')` fires before
+  the `uncaughtException` handlers, which is how an error reporter observes without swallowing.
+
 - Node layer: `process.on('exit')` and `process.on('beforeExit')` fire. They never did, so any
   cleanup registered there — flushing logs, writing coverage, removing lockfiles — was silently
   skipped. `beforeExit` re-fires when a handler schedules more work and does not fire after an

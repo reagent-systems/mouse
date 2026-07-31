@@ -4762,6 +4762,15 @@ final class NodeEngine: @unchecked Sendable {
         return true;
       };
       globalThis.__mouseEmitUncaught = function(error) {
+        // node runs the MONITOR first, always, and it cannot swallow the error — that is the
+        // point of it: an error reporter observes every uncaught exception without changing
+        // whether the process dies.
+        const monitors = processEvents.uncaughtExceptionMonitor;
+        if (monitors && monitors.length) {
+          // A throwing monitor is NOT contained — node lets it propagate, and swallowing it
+          // here would hide a broken error reporter behind the error it was reporting.
+          for (const monitor of monitors.slice()) monitor(error, 'uncaughtException');
+        }
         const handlers = processEvents.uncaughtException;
         if (!handlers || !handlers.length) return false;
         for (const handler of handlers.slice()) handler(error, 'uncaughtException');
@@ -4893,8 +4902,25 @@ final class NodeEngine: @unchecked Sendable {
         },
         emitWarning: function(warning, type, code) {
           const text = warning instanceof Error ? warning.message : String(warning);
+          let options = null;
+          if (type && typeof type === 'object') { options = type; type = options.type; code = options.code; }
           const label = (typeof type === 'string' ? type : 'Warning');
-          process.stderr.write('(mouse:' + process.pid + ') ' + label + ': ' + text + '\n');
+          // node EMITS a 'warning' event carrying a real Error, and only prints to stderr when
+          // nobody is listening. Tooling attaches here to route or suppress warnings, and this
+          // had been printing unconditionally while the event never fired at all.
+          const error = warning instanceof Error ? warning : new Error(text);
+          error.name = warning instanceof Error && type === undefined ? error.name : label;
+          if (code !== undefined) error.code = code;
+          if (options && options.detail !== undefined) error.detail = options.detail;
+          // node emits AND prints: a listener observes warnings, it does not suppress them
+          // (that is what --no-warnings is for). Emitting instead of printing would have made
+          // every warning invisible to anyone who attached a listener to read them.
+          const handlers = processEvents.warning;
+          if (handlers && handlers.length) {
+            for (const handler of handlers.slice()) handler(error);
+          }
+          process.stderr.write('(mouse:' + process.pid + ') ' +
+            (code !== undefined ? '[' + code + '] ' : '') + label + ': ' + text + '\n');
         },
         argv0: 'node',
         // No process table to signal into: only this process exists, and killing it is what
