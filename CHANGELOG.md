@@ -223,6 +223,10 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Terminal: a node program's transcript no longer fills with blank rows when the program clears
+  the screen. A line that was entirely escape sequences is not a blank line, and `ESC[0J`
+  (erase below — how `readline.clearScreenDown`, and therefore vite and every watcher, clears)
+  now clears the scrollback. `npx vite` prints its version and URL and nothing else.
 - Node layer: a forked child's `env` accepts the values node accepts. Booleans and numbers are
   coerced to strings as node coerces them (`PROD: false` arrives as `"false"`); one non-string
   value used to make the whole environment fail to convert, and the child received none of it.

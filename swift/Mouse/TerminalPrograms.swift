@@ -306,6 +306,9 @@ final class NodeProgram: TerminalProgram {
     /// writes feed the grid through `io.write` instead). Escapes are stripped: the
     /// scrollback renders plain text.
     private let transcript: (String, _ isError: Bool) -> Void
+    /// A clear-screen escape in TRANSCRIPT mode: vite, nodemon and every watcher clear before
+    /// each run, and a terminal that ignores it shows the old output above the new.
+    private let clearTranscript: () -> Void
     private let onExit: () -> Void
     private let engine: NodeEngine
     private let source: String
@@ -324,7 +327,9 @@ final class NodeProgram: TerminalProgram {
     init(title: String, source: String, path: String, argv: [String], cwd: String,
          engine: NodeEngine,
          transcript: @escaping (String, _ isError: Bool) -> Void,
+         clearTranscript: @escaping () -> Void = {},
          onExit: @escaping () -> Void) {
+        self.clearTranscript = clearTranscript
         self.title = title
         self.source = source
         self.path = path
@@ -409,13 +414,32 @@ final class NodeProgram: TerminalProgram {
             let scalars = pendingLine.unicodeScalars
             let line = String(String.UnicodeScalarView(scalars[..<newline]))
             pendingLine = String(String.UnicodeScalarView(scalars[scalars.index(after: newline)...]))
-            transcript(Self.strippingEscapes(line), isError)
+            emitTranscriptLine(line, isError)
         }
+    }
+
+    /// One transcript line. A line that was ENTIRELY escapes is not a blank line — a cursor
+    /// move is not something a terminal prints — and dropping the distinction is what put two
+    /// dozen empty rows above vite's banner, which clears the screen before writing it.
+    private func emitTranscriptLine(_ line: String, _ isError: Bool) {
+        if Self.clearsScreen(line) { clearTranscript() }
+        let text = Self.strippingEscapes(line)
+        if text.isEmpty, !line.isEmpty, line.unicodeScalars.contains("\u{1b}") { return }
+        transcript(text, isError)
+    }
+
+    /// ESC[2J / ESC[3J (erase display, and the scrollback with it), ESC c (full reset), and
+    /// ESC[J / ESC[0J — erase from the cursor DOWN, which is how readline's `clearScreenDown`
+    /// clears and therefore how vite, nodemon and every watcher clear: home the cursor, erase
+    /// below. In a transcript there is nothing below, so it means the same thing.
+    static func clearsScreen(_ text: String) -> Bool {
+        text.contains("\u{1b}[2J") || text.contains("\u{1b}[3J") || text.contains("\u{1b}c")
+            || text.contains("\u{1b}[0J") || text.contains("\u{1b}[J")
     }
 
     private func flushPendingLine() {
         guard !pendingLine.isEmpty else { return }
-        transcript(Self.strippingEscapes(pendingLine), pendingLineIsError)
+        emitTranscriptLine(pendingLine, pendingLineIsError)
         pendingLine = ""
     }
 

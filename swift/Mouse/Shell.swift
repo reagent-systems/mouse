@@ -1311,6 +1311,7 @@ final class MouseShell {
                 title: title, source: source, path: path, argv: ["node", path] + args,
                 cwd: "/" + cwd, engine: engine,
                 transcript: { line, isError in context.emit(Output(text: line, isError: isError)) },
+                clearTranscript: { context.clear() },
                 onExit: { context.reloadTree() })
             launch(program)
             return IO()
