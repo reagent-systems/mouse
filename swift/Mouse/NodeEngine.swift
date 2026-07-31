@@ -2751,7 +2751,7 @@ final class NodeEngine: @unchecked Sendable {
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
     /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
     /// without this a stale rewrite would be reused after an engine update.
-    private static let transpilerVersion = 4
+    private static let transpilerVersion = 6
 
     /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
     /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
@@ -3104,7 +3104,14 @@ final class NodeEngine: @unchecked Sendable {
                 lines.append("const \(defaultName) = __esmDefault(\(temp));")
             }
             if let named = group(match, 2, ns) {
-                lines.append("const { \(namedBindings(named)) } = \(temp);")
+                // Read through __esmBinding, not destructured outright. In a CYCLE the exporting
+                // module is still evaluating and its `const` is in TDZ — real ESM never reads it
+                // there, because a binding is read where it is USED, and by then the cycle has
+                // closed. Destructuring reads it at import time and turns a legal cycle into a
+                // ReferenceError, which is what execa's send.js ↔ strict.js pair hit.
+                for binding in bindings(named) {
+                    lines.append("const \(binding.alias) = __esmBinding(\(temp), '\(binding.source)');")
+                }
             }
             if let namespace = group(match, 3, ns) {
                 lines.append("const \(namespace) = \(temp);")
@@ -3169,6 +3176,77 @@ final class NodeEngine: @unchecked Sendable {
         // export default <expression>
         replace(#"(?:^|(?<=[;}]))[ \t]*export\s+default\s+"#) { _, _ in "module.exports.default = " }
         // export const/let/var/function/class NAME — strip keyword, assign at EOF.
+        /// The names a destructuring pattern BINDS, which is not the same as the identifiers in
+        /// it: `{ a, b: c, d = 1, ...rest }` binds a, c, d and rest, and `b` is a key. Balanced
+        /// scanning, because a regex cannot find the end of a pattern that nests.
+        func destructuredNames(_ ns: NSString, _ start: Int, _ masked: NSString) -> (names: [String], end: Int) {
+            var names: [String] = []
+            var depth = 0
+            var index = start
+            var expectBinding = true            // at the start of an element, before any ':'
+            var inArray: [Bool] = []
+            while index < masked.length {
+                let ch = Character(UnicodeScalar(masked.character(at: index))!)
+                if ch == "{" || ch == "[" {
+                    depth += 1
+                    inArray.append(ch == "[")
+                    expectBinding = true
+                    index += 1
+                    continue
+                }
+                if ch == "}" || ch == "]" {
+                    depth -= 1
+                    if !inArray.isEmpty { inArray.removeLast() }
+                    index += 1
+                    if depth == 0 { return (names, index) }
+                    continue
+                }
+                if ch == "," { expectBinding = true; index += 1; continue }
+                if ch == ":" { expectBinding = true; index += 1; continue }
+                if ch == "=" {
+                    // A default value: skip to the next comma or closing brace at this depth.
+                    expectBinding = false
+                    index += 1
+                    continue
+                }
+                if ch.isLetter || ch == "_" || ch == "$" {
+                    var end = index
+                    while end < masked.length {
+                        let next = Character(UnicodeScalar(masked.character(at: end))!)
+                        guard next.isLetter || next.isNumber || next == "_" || next == "$" else { break }
+                        end += 1
+                    }
+                    let word = ns.substring(with: NSRange(location: index, length: end - index))
+                    // In an object pattern `a:` is a KEY, so only take it when nothing follows
+                    // that makes it one; in an array pattern every identifier is a binding.
+                    var lookahead = end
+                    while lookahead < masked.length, masked.character(at: lookahead) == 0x20 { lookahead += 1 }
+                    let followedByColon = lookahead < masked.length && masked.character(at: lookahead) == 0x3a
+                    if expectBinding, !followedByColon { names.append(word) }
+                    if followedByColon { expectBinding = true }
+                    index = end
+                    continue
+                }
+                index += 1
+            }
+            return (names, index)
+        }
+
+        // export const { a, b: c } = … / export const [x] = … — a destructuring declaration,
+        // which signal-exit (under execa) uses, and which the NAME form below cannot match.
+        replace(#"(?:^|(?<=[;}]))[ \t]*export\s+(const|let|var)\s*(?=[{\[])"#) { match, ns in
+            let keyword = group(match, 1, ns)!
+            let start = match.range.location + match.range.length
+            let masked = (maskCache ?? (ns as String)) as NSString
+            if masked.length == ns.length {
+                let found = destructuredNames(ns, start, masked)
+                for name in found.names {
+                    prologue.append("__mouseLive(module.exports, '\(name)', function(){ return \(name); });")
+                }
+            }
+            return keyword + " "
+        }
+
         // The `*` is its own group because a generator is declared `function* name` — and
         // `export async function* _iterSSEMessages` is how the Anthropic SDK streams. Without
         // it the declaration kept its `export` keyword and the file would not parse.
@@ -4264,6 +4342,10 @@ final class NodeEngine: @unchecked Sendable {
           Object.defineProperty(buffer, '__mouseShared', { value: true });
           return buffer;
         };
+        // The prototype IS ArrayBuffer's, because the object is one: code reads
+        // `SharedArrayBuffer.prototype.byteLength`'s getter off it (jsdom and mongoose both do,
+        // to tell buffer kinds apart), and a fresh empty prototype has no such accessor.
+        Shared.prototype = ArrayBuffer.prototype;
         Object.defineProperty(Shared, Symbol.hasInstance, {
           value: function(value) { return !!(value && value.__mouseShared); },
         });
@@ -4777,6 +4859,19 @@ final class NodeEngine: @unchecked Sendable {
         return { text: output.outputText };
       };
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
+      // An imported binding, read now if it can be. If the exporting module is mid-cycle its
+      // export is still in TDZ, and real ESM would not have read it yet at all — the read
+      // belongs at the USE. A forwarder gives exactly that for the case that occurs in practice
+      // (a function called later), and this path is reached ONLY where the alternative is the
+      // ReferenceError that a destructure throws today.
+      globalThis.__esmBinding = function(module, key) {
+        try { return module[key]; }
+        catch (error) {
+          const forward = function() { return module[key].apply(this, arguments); };
+          try { Object.defineProperty(forward, 'name', { value: key, configurable: true }); } catch (ignored) {}
+          return forward;
+        }
+      };
       // An ES module exports BINDINGS, not values: `export let count` seen by an importer
       // changes when the exporter changes it. Assigning at end-of-module made a snapshot, so a
       // mutable export read zero forever and a cycle saw `undefined` where node sees a hoisted

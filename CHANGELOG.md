@@ -223,6 +223,14 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: a cyclic ESM import no longer throws. Real ESM reads a binding where it is used,
+  by which time the cycle has closed; destructuring it at import time read it mid-evaluation, in
+  TDZ — which is what execa's `send.js` ↔ `strict.js` pair hit. Imported names are read through
+  a helper that falls back to reading at the call, and only where the alternative was a throw.
+- Node layer: `export const { a, b: c } = …` and `export const [x] = …` are transpiled. The
+  declaration had no pass at all, so signal-exit (under execa) failed to parse.
+- Node layer: `SharedArrayBuffer.prototype` is `ArrayBuffer.prototype`, so the `byteLength`
+  accessor is where jsdom and mongoose look for it.
 - Node layer: `child_process` IPC honours node's two serialisation modes — `json` (the default,
   which drops functions and flattens a Map) and `advanced` (the structured clone algorithm).
   A sweep had moved this site onto the clone codec, making the engine stricter than node: a
