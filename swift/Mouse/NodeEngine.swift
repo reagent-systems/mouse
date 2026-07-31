@@ -9750,7 +9750,14 @@ final class NodeEngine: @unchecked Sendable {
         }
 
         // node's default agent pools with keepAlive since v19.
-        const globalAgent = new Agent({ keepAlive: true, scheduling: 'lifo' });
+        // The module's own scheme, so `https.globalAgent` reports https:/443 rather than
+        // inheriting the plaintext defaults — node keeps a separate agent per protocol and
+        // callers read these to decide a default port.
+        const isSecure = defaultProtocol === 'https:';
+        const globalAgent = new Agent({
+          keepAlive: true, scheduling: 'lifo',
+          protocol: defaultProtocol, defaultPort: isSecure ? 443 : 80,
+        });
 
         // One entry point, two transports: plaintext over our own sockets, TLS over URLSession.
         function request(url, options, callback) {

@@ -38,6 +38,10 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `https.globalAgent` reports `https:` and port 443. Both protocol modules built
+  their agent with the same defaults, so the https one claimed `http:` and 80 — a wrong value
+  a caller would act on rather than an error it could catch.
+
 - Node layer: a custom `http.Agent` is honoured. The client tested for an internal field before
   accepting one, so every subclass — including every proxy agent — was silently replaced by the
   global agent and the request went direct. An agent that overrides `createConnection` now
