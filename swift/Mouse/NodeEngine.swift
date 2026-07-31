@@ -3606,9 +3606,25 @@ final class NodeEngine: @unchecked Sendable {
           // path below is the correct one — measured against node, which corrected a guess.
           return new Buffer(value);
         }
-        static alloc(size, fill) {
+        static alloc(size, fill, encoding) {
           const buffer = new Buffer(size);
-          if (fill !== undefined) buffer.fill(typeof fill === 'string' ? fill.charCodeAt(0) : fill);
+          if (fill === undefined) return buffer;
+          // A string fill is a PATTERN that repeats — `Buffer.alloc(6, 'ab')` is 'ababab', not
+          // 'aaaaaa'. Taking only its first character quietly produced the wrong bytes, which is
+          // the kind of wrong that shows up as corrupt output somewhere else entirely.
+          if (typeof fill === 'string') {
+            const pattern = Buffer.from(fill, encoding || 'utf8');
+            if (!pattern.length) return buffer;
+            for (let index = 0; index < size; index += 1) buffer[index] = pattern[index % pattern.length];
+            return buffer;
+          }
+          if (Buffer.isBuffer(fill) || ArrayBuffer.isView(fill)) {
+            const pattern = Buffer.isBuffer(fill) ? fill : Buffer.from(fill.buffer, fill.byteOffset, fill.byteLength);
+            if (!pattern.length) return buffer;
+            for (let index = 0; index < size; index += 1) buffer[index] = pattern[index % pattern.length];
+            return buffer;
+          }
+          buffer.fill(fill);
           return buffer;
         }
         static allocUnsafe(size) { return new Buffer(size); }
@@ -7694,9 +7710,23 @@ final class NodeEngine: @unchecked Sendable {
               if (!fs._parentExists(dir)) fs._fail('ENOENT', 'mkdir', dir, 'no such file or directory');
             }
             const path = resolvePath(dir);
+            // node returns the FIRST path it had to create, and undefined when there was
+            // nothing to do — which is how a caller learns whether it made the tree.
+            let firstCreated;
+            if (recursive) {
+              const pieces = path.split('/').filter(Boolean);
+              let walked = '';
+              for (const piece of pieces) {
+                walked += '/' + piece;
+                if (!fs.existsSync(walked)) { firstCreated = firstCreated || walked; break; }
+              }
+            } else if (!fs.existsSync(path)) {
+              firstCreated = path;
+            }
             bridge.mkdir(path);
             const mode = options && typeof options === 'object' ? options.mode : undefined;
             if (mode !== undefined) bridge.chmodPath(path, Number(mode));
+            return recursive ? firstCreated : undefined;
           },
           rmdirSync: function(dir, options) {
             // Asked to remove a DIRECTORY and handed a file, this used to delete the file. node
@@ -7901,6 +7931,14 @@ final class NodeEngine: @unchecked Sendable {
           return buffer.length;
         };
         fs.readSync = function(fd, buffer, offset, length, position) {
+          // node 13 added `readSync(fd, buffer, { offset, length, position })`, and packages use
+          // it — an engine that reads only the positional form returns nothing and says nothing.
+          if (offset !== null && typeof offset === 'object') {
+            const options = offset;
+            position = options.position === undefined ? null : options.position;
+            length = options.length === undefined ? buffer.length : options.length;
+            offset = options.offset || 0;
+          }
           // fd 0 is stdin, which is a pipe, not a file: serve it from whatever has arrived.
           if (fd === 0) {
             const pending = process.stdin.read();

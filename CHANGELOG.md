@@ -258,6 +258,12 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `fs.readSync`/`fs.read` accept node's options-object form
+  (`{ offset, length, position }`), which read nothing at all before.
+- Node layer: `fs.mkdirSync(path, { recursive: true })` returns the first path it created, as
+  node does — the way a caller learns whether the tree was already there.
+- Node layer: `Buffer.alloc(size, fill)` treats a string or buffer fill as a repeating PATTERN
+  (`Buffer.alloc(6, 'ab')` is `ababab`), where only its first byte was being used.
 - Node layer: `fs.writeSync` honours node's TWO signatures — `(fd, buffer, offset, length,
   position)` and `(fd, string, position, encoding)`. Reading a string call with the buffer
   signature put the bytes at the wrong offset, silently. And `fs.writeFileSync`'s `flag` option
