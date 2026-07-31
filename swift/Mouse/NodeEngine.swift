@@ -10229,12 +10229,12 @@ final class NodeEngine: @unchecked Sendable {
             const byType = { A: 'resolve4', AAAA: 'resolve6', MX: 'resolveMx', TXT: 'resolveTxt',
                              NS: 'resolveNs', CNAME: 'resolveCname', PTR: 'resolvePtr',
                              SOA: 'resolveSoa', SRV: 'resolveSrv', NAPTR: 'resolveNaptr',
-                             CAA: 'resolveCaa' };
+                             CAA: 'resolveCaa', TLSA: 'resolveTlsa' };
             const method = byType[kind];
             if (!method) {
               const error = Object.assign(
                 new Error("dns.resolve: unsupported record type '" + kind + "': A, AAAA, CNAME, " +
-                          'MX, NAPTR, NS, PTR, SOA, SRV, TXT and CAA are available'),
+                          'MX, NAPTR, NS, PTR, SOA, SRV, TLSA, TXT and CAA are available'),
                 { code: 'ENOTIMP', syscall: 'query' + kind, hostname: host });
               setImmediate(function(){ callback(error); });
               return;
@@ -10304,17 +10304,17 @@ final class NodeEngine: @unchecked Sendable {
               });
             });
           },
-          // TLSA has no CryptoKit or system consumer here and its payload is an opaque hash, so
-          // it stays refused rather than shipping a record nothing can check.
-          resolveTlsa: function(host, callback) {
-            const done = typeof callback === 'function' ? callback : arguments[arguments.length - 1];
-            const error = Object.assign(
-              new Error('dns.resolveTlsa is not available: TLSA carries a certificate-association ' +
-                        'hash for DANE, which needs a TLS stack that can consume it — and TLS ' +
-                        'here belongs to URLSession'),
-              { code: 'ENOTIMP', syscall: 'queryTlsa', hostname: host });
-            setImmediate(function(){ done(error); });
-          },
+          // The refusal here said TLSA needs a TLS stack. That is true of USING the record — a
+          // DANE check compares this hash against the certificate a handshake presented — and
+          // says nothing about RESOLVING it. On the wire it is three bytes and a blob, no
+          // harder than CAA. A constraint attached to the wrong half of the job.
+          resolveTlsa: resolver('Tlsa', function(records) {
+            return records.map(function(r) {
+              return { certUsage: r.certUsage, selector: r.selector, match: r.match,
+                       // node hands back the association data as an ArrayBuffer.
+                       data: Uint8Array.from(r.data || []).buffer };
+            });
+          }),
           reverse: function(address, callback) {
             bridge.dnsReverse(String(address), function(names, code) {
               bridge.dnsDone();

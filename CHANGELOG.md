@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `dns.resolveTlsa()` returns real TLSA records — `{certUsage, selector, match,
+  data}` with the association data as an `ArrayBuffer` — and `dns.resolve(name, 'TLSA')` routes
+  to it. Resolving the record never needed the TLS stack that consuming it does.
+
 - Node layer: `worker_threads.moveMessagePortToContext()` works — a port handed into a `vm`
   context posts to its peer and receives through `onmessage` once started, with node's
   web-shaped port and node's `ERR_INVALID_ARG_TYPE` for a non-context.

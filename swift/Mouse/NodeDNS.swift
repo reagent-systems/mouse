@@ -70,6 +70,7 @@ enum NodeDNS {
         case "SRV": return 33
         case "NAPTR": return 35
         case "CAA": return 257
+        case "TLSA": return 52
         default: return nil
         }
     }
@@ -300,6 +301,20 @@ enum NodeDNS {
             guard valueEnd <= message.count, valueStart <= valueEnd else { return nil }
             let value = String(decoding: message[valueStart..<valueEnd], as: UTF8.self)
             return ["critical": critical, "tag": tag, "value": value, "ttl": Int(ttl)]
+        case 52: // TLSA — usage, selector and matching type, then the association data
+            // The refusal here said TLSA needs a TLS stack. That is true of USING the record —
+            // a DANE check compares this hash against the certificate a handshake presented —
+            // and has nothing to do with resolving it. On the wire it is three bytes and a
+            // blob, no harder than CAA, and node returns exactly those four fields.
+            guard length >= 4 else { return nil }
+            let dataStart = start + 3
+            let dataEnd = start + length
+            guard dataEnd <= message.count, dataStart <= dataEnd else { return nil }
+            return ["certUsage": Int(message[start]),
+                    "selector": Int(message[start + 1]),
+                    "match": Int(message[start + 2]),
+                    "data": [UInt8](message[dataStart..<dataEnd]),
+                    "ttl": Int(ttl)]
         default:
             return nil
         }
