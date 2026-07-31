@@ -14,10 +14,13 @@ carry breaking changes.
   early throws TDZ exactly where node throws it. A destructured named import remains a
   snapshot — making it live means rewriting every reference, which needs scope analysis — and
   the ESM grammar gate pins that divergence on both sides rather than leaving it unsaid.
-- Node layer: **vite's dev server runs on the engine**, serving transformed modules
-  byte-identical to real node's vite. Rollup's parser is a native `.node` addon that iOS can
-  never load; rollup's own `@rollup/wasm-node` is the drop-in for that case, and the proof uses
-  it on both sides so the comparison is between engines, not parsers.
+- Node layer: **vite runs on the engine** — both halves. Its dev server serves transformed
+  modules byte-identical to real node's vite, and its production build, rollup doing the
+  parsing and bundling in WebAssembly, emits a byte-identical bundle. Rollup's parser is
+  normally a native `.node` addon that iOS can never load; rollup's own `@rollup/wasm-node` is
+  the drop-in for that case, and the proof uses it on both sides so the comparison is between
+  engines, not parsers. The build sets vite's `esbuild: false`, since esbuild is a native
+  binary with no iOS build and the step it skips is target lowering.
 - Node layer: **conditional `exports` are resolved by the syntax of the request**, as node does
   — `import` on "import", `require` on "require", and `import()` on "import" even from a
   CommonJS file. **Subpath exports** (`rollup/parseAst`), `*` patterns and array fallbacks now
