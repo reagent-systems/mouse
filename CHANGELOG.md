@@ -8,6 +8,14 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `SharedArrayBuffer` exists. JavaScriptCore has no such constructor and no option
+  turns one on, but its `Atomics` work on an ordinary buffer — so it is one, and the sharing it
+  names is where the refusal lives: a buffer crossing to another engine throws `DataCloneError`
+  with the reason, rather than arriving as an unrelated copy. Worker pools allocate one per
+  worker for their own signalling, so its absence stopped them starting at all.
+- Node layer: source compiled at RUNTIME can `import()`. `new Function('s', 'return import(s)')`
+  is the standard way to keep a dynamic import out of a CommonJS transpile; the loader's rewrite
+  never sees it and JavaScriptCore's own `import` has no module loader.
 - Node layer: **`node app.ts` runs TypeScript**, compiled with the project's own `typescript`
   package (`.ts`, `.tsx`, `.mts`, `.cts`, and as an import target), honouring the nearest
   **`tsconfig.json`** — parsed by that same typescript, so comments and `extends` behave — and
@@ -215,6 +223,14 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `child_process` IPC honours node's two serialisation modes — `json` (the default,
+  which drops functions and flattens a Map) and `advanced` (the structured clone algorithm).
+  A sweep had moved this site onto the clone codec, making the engine stricter than node: a
+  message carrying a callback threw where node quietly drops the property. `worker_threads` is
+  exempt, having no json mode — a Map posted back from a worker stays a Map.
+- Node layer: `MessagePort` no longer exposes its internals as own enumerable properties. Node's
+  has none, and real code spreads a port (`{ ...message, source: 'port' }`), which dragged in the
+  peer pointer and made the message cyclic.
 - msh: `./tool.mjs`, `./app.ts` and the other JavaScript extensions typed at the prompt run on
   the node engine. Only `.js` was routed there, so the rest were handed to the shell, which
   tried to run JavaScript as `sh`.

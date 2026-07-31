@@ -1989,6 +1989,11 @@ final class NodeEngine: @unchecked Sendable {
             return self.makeRequire(fromDir: self.virtualDirname(self.normalize(from)))
         }
         expose("createRequire", createRequireBlock)
+        // The same code-only rewrite the loader applies, for source compiled at RUNTIME.
+        let rewriteImports: @convention(block) (String) -> String = { text in
+            Self.rewriteImportForms(text, meta: false).text
+        }
+        expose("rewriteImports", rewriteImports)
 
         context.setObject(bridge, forKeyedSubscript: "__mouse" as NSString)
         context.setObject(argv, forKeyedSubscript: "__argv" as NSString)
@@ -4246,6 +4251,35 @@ final class NodeEngine: @unchecked Sendable {
       // Set, a Date, a typed array, `undefined`, a BigInt and every cycle. That is the defect
       // that hung jest, and it was already fixed once in deepStrictEqual before turning up
       // again here: the sweep has to follow the MECHANISM, not the word.
+      // JavaScriptCore has Atomics — they work on an ordinary ArrayBuffer, measured — but no
+      // SharedArrayBuffer constructor, and no option turns one on. The constructor's ABSENCE is
+      // a separate thing from the sharing it names, and it was costing programs that never share:
+      // tinypool allocates one per worker for its own signalling, so vitest could not start a
+      // pool at all. So the constructor exists, backed by a real ArrayBuffer, and the SHARING is
+      // where the refusal lives — a buffer that crosses to another engine throws rather than
+      // silently arriving as an unrelated copy, which is the failure nobody would ever debug.
+      if (typeof globalThis.SharedArrayBuffer === 'undefined') {
+        const Shared = function SharedArrayBuffer(length) {
+          const buffer = new ArrayBuffer(length);
+          Object.defineProperty(buffer, '__mouseShared', { value: true });
+          return buffer;
+        };
+        Object.defineProperty(Shared, Symbol.hasInstance, {
+          value: function(value) { return !!(value && value.__mouseShared); },
+        });
+        globalThis.SharedArrayBuffer = Shared;
+      }
+      // node's child IPC defaults to `serialization: 'json'`, and only 'advanced' uses the
+      // structured clone algorithm. The sweep that moved nine JSON sites onto the clone codec
+      // moved this one too, which made the engine STRICTER than node: a message carrying a
+      // function throws here where node quietly drops the property — and tinypool sends exactly
+      // that to every worker it starts, so vitest could not begin. The wire stays the codec; the
+      // difference is a JSON round-trip first, which is what 'json' mode means.
+      globalThis.__ipcPrepare = function(message, advanced) {
+        if (advanced) return message;
+        const text = JSON.stringify(message);
+        return text === undefined ? null : JSON.parse(text);
+      };
       globalThis.__cloneEncode = function(root) {
         const heap = [], seen = new Map();
         function encode(value) {
@@ -4292,6 +4326,13 @@ final class NodeEngine: @unchecked Sendable {
                      v: Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)).toString('base64') };
           }
           if (value instanceof ArrayBuffer) {
+            if (value.__mouseShared) {
+              const error = new Error('A SharedArrayBuffer cannot be shared between workers here: '
+                + 'a worker is a separate JavaScriptCore engine, and two engines cannot address '
+                + 'the same memory. Within one engine it is a real buffer and Atomics work on it.');
+              error.name = 'DataCloneError';
+              throw error;
+            }
             return { '#': 'ab', v: Buffer.from(new Uint8Array(value)).toString('base64') };
           }
           if (Array.isArray(value)) return { '#': 'a', v: value.map(encode) };
@@ -4758,6 +4799,28 @@ final class NodeEngine: @unchecked Sendable {
           __mouseLive(target, key, function(){ return source[key]; });
         }
       };
+      // `new Function("s", "return import(s)")` — the standard way to keep a dynamic import out
+      // of a CommonJS transpile, and what tinypool uses, so vitest's every worker went through
+      // it. Source compiled at RUNTIME never passes the loader's rewrite, and JSC's own
+      // `import` has no module loader wired to our resolver: "No module loader provided."
+      // So the Function constructor rewrites a body that contains one, exactly as the loader
+      // would, and `__mouseRequire` exists globally as the referrer such code has no other way
+      // to name — rooted at "/", which is what an absolute or bare specifier needs.
+      globalThis.__mouseRequire = globalThis.__mouseRequire || bridge.createRequire('/');
+      (function(){
+        const RealFunction = Function;
+        function MouseFunction() {
+          const args = Array.prototype.slice.call(arguments);
+          const last = args.length - 1;
+          if (last >= 0 && typeof args[last] === 'string' && /\bimport\s*\(/.test(args[last])) {
+            args[last] = bridge.rewriteImports(args[last]);
+          }
+          return RealFunction.apply(this, args);
+        }
+        MouseFunction.prototype = RealFunction.prototype;
+        Object.defineProperty(RealFunction.prototype, 'constructor', { value: MouseFunction, writable: true, configurable: true });
+        globalThis.Function = MouseFunction;
+      })();
       globalThis.__dynamicImport = function(require, specifier) {
         // Promise flattening settles a pending (top-level-await) module before wrapping.
         const load = require.__importCondition || require;
@@ -5747,9 +5810,13 @@ final class NodeEngine: @unchecked Sendable {
           const done = typeof callback === 'function' ? callback
                      : (typeof options === 'function' ? options
                      : (typeof sendHandle === 'function' ? sendHandle : null));
-          // The IPC wire is the last site that was still JSON: a Map posted from a worker
-          // arrived as {}. node's message ports use the structured clone algorithm.
-          bridge.ipcSend(globalThis.__cloneEncode(message === undefined ? null : message));
+          // A WORKER's channel is not child_process IPC: worker_threads is defined in terms
+          // of the structured clone algorithm and has no json mode, so a Map posted back from a
+          // worker stays a Map. Only the fork channel takes the mode from the parent.
+          const advanced = __isWorker
+            || String(__env.__MOUSE_IPC_SERIALIZATION || '') === 'advanced';
+          bridge.ipcSend(globalThis.__cloneEncode(
+            globalThis.__ipcPrepare(message === undefined ? null : message, advanced)));
           if (done) process.nextTick(function(){ done(null); });
           return true;
         };
@@ -9163,6 +9230,8 @@ final class NodeEngine: @unchecked Sendable {
           child.spawnfile = 'node';
           child.spawnargs = ['node'].concat(argv.map(String));
           const wantsIPC = !!(options && options.ipc);
+          // node: 'json' unless asked otherwise, and the child has to agree with the parent.
+          const advancedIPC = String((options && options.serialization) || 'json') === 'advanced';
           // The eval marker is a sentinel argv[0] the recursive call above sets — it can never
           // collide with a real path.
           let isEval = false;
@@ -9174,7 +9243,12 @@ final class NodeEngine: @unchecked Sendable {
                                       mode, String((options && options.workerData) || ''),
                                       // node REPLACES the environment when `env` is given; the
                                       // caller spreads process.env in if it wants inheritance.
-                                      options && options.env ? JSON.stringify(options.env) : '',
+                                      // The child must serialise the way the parent does, and a
+                                      // child is a fresh engine with only its environment to
+                                      // learn from.
+                                      JSON.stringify(Object.assign(
+                                        options && options.env ? Object.assign({}, options.env) : Object.assign({}, __env),
+                                        advancedIPC ? { __MOUSE_IPC_SERIALIZATION: 'advanced' } : {})),
                                       function(event, payload) {
             // latin1 both ways: the child wrote bytes, and these are those bytes.
             if (event === 'stdout') { child.stdout.push(Buffer.from(String(payload), 'latin1')); return; }
@@ -9219,7 +9293,8 @@ final class NodeEngine: @unchecked Sendable {
               const done = typeof callback === 'function' ? callback
                          : (typeof options === 'function' ? options
                          : (typeof sendHandle === 'function' ? sendHandle : null));
-              bridge.spawnMessage(id, globalThis.__cloneEncode(message === undefined ? null : message));
+              bridge.spawnMessage(id, globalThis.__cloneEncode(
+                globalThis.__ipcPrepare(message === undefined ? null : message, advancedIPC)));
               if (done) process.nextTick(function(){ done(null); });
               return true;
             };
@@ -11139,6 +11214,21 @@ final class NodeEngine: @unchecked Sendable {
         // A port pair WITHIN one engine — no threads involved, so this is exact.
         function MessagePort() {
           EventEmitter.call(this);
+          // node's MessagePort has NO own enumerable properties — its whole surface is on the
+          // prototype — and real code SPREADS an object carrying one: tinypool relays every
+          // worker message as `{ ...message, source: 'port' }`. With our internals enumerable
+          // that spread dragged in the peer pointer, and a message that points back at its own
+          // port is cyclic, which no serializer can carry. So they are hidden, and the ones
+          // assigned later are declared here to keep the descriptor when they are.
+          for (const key of Object.keys(this)) {
+            Object.defineProperty(this, key, { value: this[key], writable: true, enumerable: false, configurable: true });
+          }
+          for (const key of ['_peer', '_started', '_refed', '_queue', '_scheduled', '_onmessage',
+                             '_closed', 'onmessageerror']) {
+            if (!Object.getOwnPropertyDescriptor(this, key)) {
+              Object.defineProperty(this, key, { value: undefined, writable: true, enumerable: false, configurable: true });
+            }
+          }
           this._peer = null;
           this._started = false;
           this._refed = false;   // node reports hasRef() false until the port is started
