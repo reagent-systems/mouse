@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **timers match node** — 33 behaviours swept against it. `unref()`/`hasRef()` are
+  real (an unref'd timer no longer holds the process open), `refresh()` restarts the countdown,
+  `clearImmediate` can actually cancel one, a non-function callback throws
+  `ERR_INVALID_ARG_TYPE`, every delay below 1 becomes 1 as node's does, and one above 2^31
+  clamps with a `TimeoutOverflowWarning`. Handles also carry `Symbol.dispose`.
 - Node layer: **`EventEmitter` matches node** — 41 behaviours swept against it. `'newListener'`
   and `'removeListener'` are emitted (they never were), `errorMonitor` works, `listeners()`
   unwraps `once`, `eventNames()` includes symbols and drops emptied names, `listenerCount` takes
@@ -171,6 +176,11 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `process.nextTick` rode a microtask, so a tick queued from inside a promise
+  reaction ran BEFORE the reactions queued beside it. node runs the tick queue at the edges of
+  a microtask checkpoint, never inside one — and which edge depends on whether the caller is
+  on a host frame (the entry script, a loop callback) or inside a checkpoint, which the engine
+  now tracks.
 - Node layer: `events.once()` left its own `'error'` listener on the emitter after resolving —
   a subscription the caller never made, on an object that usually outlives the promise.
 - Node layer: `process.emitWarning` delivered the warning synchronously; node hands it to the

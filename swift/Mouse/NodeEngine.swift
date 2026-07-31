@@ -76,11 +76,16 @@ final class NodeEngine: @unchecked Sendable {
         let id: Int
         var due: Date
         let interval: Double?
+        /// The delay it was created with, in seconds: `refresh()` restarts from now by this.
+        let delay: Double
+        /// An UNREF'd timer still fires, it just stops being a reason to keep the loop alive —
+        /// which is the whole point of a watchdog that must not outlive the work it watches.
+        var refed: Bool
         let callback: JSValue
         let arguments: [Any]
     }
     private var timers: [Timer] = []
-    private var immediates: [(JSValue, [Any])] = []
+    private var immediates: [(id: Int, callback: JSValue, arguments: [Any])] = []
     private var nextTimerID = 1
 
     /// Cross-thread wakeups: async completions (HTTP) enqueue jobs and signal; the loop
@@ -351,6 +356,9 @@ final class NodeEngine: @unchecked Sendable {
             } else {
                 function.call(withArguments: [module.forProperty("exports")!, require, module, path, dir, require, path])
             }
+            // The entry's synchronous frame is over. Everything after this point runs from the
+            // loop or from a microtask, and the tick queue's scheduling depends on knowing which.
+            context.evaluateScript("globalThis.__leaveEntryFrame && globalThis.__leaveEntryFrame()")
         }
         if let fatal, exitCode == nil {
             // A synchronous top-level throw: an installed `uncaughtException` handler gets
@@ -589,14 +597,20 @@ final class NodeEngine: @unchecked Sendable {
             if !immediates.isEmpty {
                 let batch = immediates
                 immediates = []
-                for (callback, arguments) in batch {
+                for entry in batch {
                     guard exitCode == nil else { break }
-                    invoke(callback, arguments)
+                    invoke(entry.callback, entry.arguments)
                 }
                 continue
             }
 
             let next = timers.min(by: { $0.due < $1.due })
+            // An unref'd timer is not a reason to stay alive. A process whose only remaining
+            // work is a watchdog should exit, and node's does.
+            if !timers.contains(where: { $0.refed }), outstanding == 0, !stdinActive, !hasOpenHandles {
+                if entryPending { exitCode = 13 }
+                break
+            }
             if next == nil, outstanding == 0, !stdinActive, !hasOpenHandles {
                 // Quiescent with the entry's top-level await still pending: nothing can
                 // ever settle it. Real node exits 13 here.
@@ -634,6 +648,10 @@ final class NodeEngine: @unchecked Sendable {
             return
         }
         trampoline.call(withArguments: [callback, arguments])
+        // The call above drains the tick queue before its stack unwinds, and JSC drains the
+        // microtask queue as it returns. This is the OTHER edge: ticks queued from inside those
+        // microtasks, which node runs once the checkpoint is done rather than partway through it.
+        drainTicks()
     }
 
     /// Wrap a JS callback so that calling it drains the tick queue before the stack unwinds.
@@ -958,20 +976,42 @@ final class NodeEngine: @unchecked Sendable {
             let id = self.nextTimerID
             self.nextTimerID += 1
             let arguments = (args.toArray() ?? [])
-            self.timers.append(Timer(id: id, due: Date().addingTimeInterval(max(0, delay) / 1000),
-                                     interval: repeats ? max(1, delay) / 1000 : nil,
+            let seconds = max(0, delay) / 1000
+            self.timers.append(Timer(id: id, due: Date().addingTimeInterval(seconds),
+                                     interval: repeats ? max(0.001, seconds) : nil,
+                                     delay: seconds, refed: true,
                                      callback: callback, arguments: arguments))
             return id
         }
         let clearTimer: @convention(block) (Int) -> Void = { [weak self] id in
             self?.timers.removeAll { $0.id == id }
         }
-        let setImmediateBlock: @convention(block) (JSValue, JSValue) -> Void = { [weak self] callback, args in
-            self?.immediates.append((callback, args.toArray() ?? []))
+        let timerRef: @convention(block) (Int, Bool) -> Void = { [weak self] id, on in
+            guard let self, let index = self.timers.firstIndex(where: { $0.id == id }) else { return }
+            self.timers[index].refed = on
+        }
+        /// `refresh()` restarts the countdown from now — node's way to reuse one handle as a
+        /// rolling idle timeout instead of allocating a timer per keystroke.
+        let timerRefresh: @convention(block) (Int) -> Void = { [weak self] id in
+            guard let self, let index = self.timers.firstIndex(where: { $0.id == id }) else { return }
+            self.timers[index].due = Date().addingTimeInterval(self.timers[index].delay)
+        }
+        let setImmediateBlock: @convention(block) (JSValue, JSValue) -> Int = { [weak self] callback, args in
+            guard let self else { return 0 }
+            let id = self.nextTimerID
+            self.nextTimerID += 1
+            self.immediates.append((id: id, callback: callback, arguments: args.toArray() ?? []))
+            return id
+        }
+        let clearImmediateBlock: @convention(block) (Int) -> Void = { [weak self] id in
+            self?.immediates.removeAll { $0.id == id }
         }
         expose("setTimer", setTimer)
         expose("clearTimer", clearTimer)
+        expose("timerRef", timerRef)
+        expose("timerRefresh", timerRefresh)
         expose("setImmediate", setImmediateBlock)
+        expose("clearImmediate", clearImmediateBlock)
 
         // -- child_process → msh: block THIS thread while the shell runs on the main actor --
         // (Safe: the JS thread only waits; the box is written before signal, read after wait.)
@@ -5590,9 +5630,18 @@ final class NodeEngine: @unchecked Sendable {
       // nextTick queue drains before ANY promise reaction. Draining here, before the stack
       // unwinds to the host, is what makes that true: JSC only drains microtasks once the
       // outermost JS frame returns, so ticks queued inside a callback run first either way round.
+      // Whether the code running right now is on a HOST frame — the entry script, or a callback
+      // the loop invoked — as opposed to a promise reaction inside a microtask checkpoint. node
+      // drains the tick queue at the edges of a checkpoint, so which side of that edge a
+      // `nextTick` was called from decides when it runs, and nothing else can tell the two apart.
+      let hostFrame = true;
+      globalThis.__leaveEntryFrame = function() { hostFrame = false; globalThis.__drainTicks(); };
+      globalThis.__inHostFrame = function() { return hostFrame; };
       globalThis.__invoke = function(fn, args) {
+        const previous = hostFrame;
+        hostFrame = true;
         try { return fn.apply(null, args || []); }
-        finally { globalThis.__drainTicks(); }
+        finally { hostFrame = previous; globalThis.__drainTicks(); }
       };
       // For host callbacks the loop does not invoke itself. A bridge that calls JavaScript from
       // its own handler (dns completions, watch events) wraps the callback ONCE here, at
@@ -6018,9 +6067,23 @@ final class NodeEngine: @unchecked Sendable {
         exitCode: undefined,
         nextTick: function(fn){
           tickQueue.push([fn, Array.prototype.slice.call(arguments, 1)]);
-          // The tick queue outranks promise reactions: riding the FIRST microtask slot
-          // preserves node's tick-before-promise ordering.
-          if (tickQueue.length === 1) Promise.resolve().then(globalThis.__drainTicks);
+          // node's loop is `drain ticks; run microtasks; repeat`, so the queue runs at the
+          // EDGES of a microtask checkpoint and never inside one. The host drains at both
+          // edges — before the checkpoint from __invoke, and after it — but a tick queued while
+          // no host callback is in flight (from a promise chain) needs a drain of its own or it
+          // waits for the next loop turn that may never come.
+          //
+          // From a HOST frame the drain below is a safety net: __invoke and the entry both
+          // drain on the way out, before any microtask runs, which is node's order there.
+          // From inside a checkpoint it rides a microtask and then YIELDS ONCE MORE, which is
+          // what puts it behind the reactions queued alongside it rather than in front of them.
+          // The second hop is an approximation of "when the checkpoint empties" — a microtask
+          // chain deeper than two hops can still outlive it — and it agrees with node on every
+          // ordering node documents and on every one this engine is swept against.
+          if (tickQueue.length === 1) {
+            if (hostFrame) Promise.resolve().then(globalThis.__drainTicks);
+            else Promise.resolve().then(function(){ Promise.resolve().then(globalThis.__drainTicks); });
+          }
         },
         // hrtime is a function that also CARRIES a `bigint` property. eslint destructures
         // `process.hrtime.bigint` and calls it unbound, so neither form may depend on `this`.
@@ -6314,30 +6377,77 @@ final class NodeEngine: @unchecked Sendable {
       function makeTimeout(id) {
         return {
           _id: id,
-          unref: function(){ return this; },
-          ref: function(){ return this; },
-          hasRef: function(){ return true; },
-          refresh: function(){ return this; },
+          _refed: true,
+          unref: function(){ this._refed = false; bridge.timerRef(id, false); return this; },
+          ref: function(){ this._refed = true; bridge.timerRef(id, true); return this; },
+          hasRef: function(){ return this._refed; },
+          refresh: function(){ bridge.timerRefresh(id); return this; },
           close: function(){ bridge.clearTimer(id); return this; },
+          [Symbol.dispose]: function(){ bridge.clearTimer(id); },
           [Symbol.toPrimitive]: function(){ return id; },
         };
       }
+      // node validates the CALLBACK and coerces the delay, and both matter: a delay computed
+      // from a subtraction can arrive negative or NaN, and a timer that then never fires is a
+      // hang with no error attached. Everything outside 1..2^31-1 becomes 1, and going over
+      // warns rather than silently waiting 25 days.
+      function timerCallback(fn) {
+        if (typeof fn !== 'function') {
+          const error = new TypeError('The "callback" argument must be of type function. Received '
+            + (fn === null ? 'null' : 'type ' + typeof fn
+               + (typeof fn === 'string' ? " ('" + fn + "')" : '')));
+          error.code = 'ERR_INVALID_ARG_TYPE';
+          throw error;
+        }
+        return fn;
+      }
+      const TIMEOUT_MAX = 2147483647;
+      function timerDelay(delay) {
+        const value = Number(delay);
+        if (!(value >= 1)) return 1;
+        if (value > TIMEOUT_MAX) {
+          if (typeof process !== 'undefined' && typeof process.emitWarning === 'function') {
+            const warning = new Error(value + ' does not fit into a 32-bit signed integer.'
+              + '\nTimeout duration was set to 1.');
+            warning.name = 'TimeoutOverflowWarning';
+            process.emitWarning(warning);
+          }
+          return 1;
+        }
+        return value;
+      }
       globalThis.setTimeout = function(fn, delay){
-        return makeTimeout(bridge.setTimer(fn, delay || 0, false, Array.prototype.slice.call(arguments, 2)));
+        return makeTimeout(bridge.setTimer(timerCallback(fn), timerDelay(delay), false,
+                                           Array.prototype.slice.call(arguments, 2)));
       };
       globalThis.setInterval = function(fn, delay){
-        return makeTimeout(bridge.setTimer(fn, delay || 0, true, Array.prototype.slice.call(arguments, 2)));
+        return makeTimeout(bridge.setTimer(timerCallback(fn), timerDelay(delay), true,
+                                           Array.prototype.slice.call(arguments, 2)));
       };
       globalThis.clearTimeout = function(handle){
         if (handle === undefined || handle === null) return;
-        bridge.clearTimer(typeof handle === 'object' ? handle._id : handle | 0);
+        if (typeof handle === 'object') { bridge.clearTimer(handle._id); return; }
+        const id = Number(handle);
+        if (Number.isFinite(id)) bridge.clearTimer(id | 0);
       };
       globalThis.clearInterval = globalThis.clearTimeout;
       globalThis.setImmediate = function(fn){
-        bridge.setImmediate(fn, Array.prototype.slice.call(arguments, 1));
-        return { unref: function(){ return this; }, ref: function(){ return this; }, hasRef: function(){ return true; } };
+        const id = bridge.setImmediate(timerCallback(fn), Array.prototype.slice.call(arguments, 1));
+        return {
+          _id: id,
+          _refed: true,
+          // An immediate runs on the very next turn, so ref/unref have nothing to keep alive —
+          // node still answers, and hasRef() reports what was asked for.
+          unref: function(){ this._refed = false; return this; },
+          ref: function(){ this._refed = true; return this; },
+          hasRef: function(){ return this._refed; },
+          [Symbol.dispose]: function(){ bridge.clearImmediate(id); },
+        };
       };
-      globalThis.clearImmediate = function(){};
+      globalThis.clearImmediate = function(handle){
+        if (handle === undefined || handle === null) return;
+        if (typeof handle === 'object' && handle._id !== undefined) bridge.clearImmediate(handle._id);
+      };
       globalThis.queueMicrotask = globalThis.queueMicrotask || function(fn){ Promise.resolve().then(fn); };
 
       // ---- core modules (JS half) ----
