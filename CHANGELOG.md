@@ -38,6 +38,11 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `process.on('exit')` and `process.on('beforeExit')` fire. They never did, so any
+  cleanup registered there — flushing logs, writing coverage, removing lockfiles — was silently
+  skipped. `beforeExit` re-fires when a handler schedules more work and does not fire after an
+  explicit `process.exit()`; `exit` runs last and synchronously with the final code.
+
 - Node layer: `querystring` handles repeated keys as arrays rather than keeping only the last
   value, decodes `+` as a space, repeats the key when stringifying an array instead of joining
   with commas, writes `null` as empty, honours the separator/equals arguments, and survives a

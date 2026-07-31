@@ -349,6 +349,28 @@ final class NodeEngine: @unchecked Sendable {
         if socketsUsed { sockets.closeAll() }
         if watchersUsed { watchers.closeAll() }
 
+        // `beforeExit`: the loop has emptied and nothing has called process.exit(). A handler
+        // may schedule more work, in which case node drains again and emits again — so this
+        // loops, with a cap, rather than firing once. node does NOT emit it after an explicit
+        // exit, which is why this is guarded on exitCode.
+        if exitCode == nil {
+            var rounds = 0
+            while exitCode == nil, rounds < 32 {
+                rounds += 1
+                let recorded = context.objectForKeyedSubscript("process")?.forProperty("exitCode")
+                let code = (recorded?.isUndefined == false && recorded?.isNull == false)
+                    ? Int32(recorded!.toInt32()) : 0
+                let handled = context.objectForKeyedSubscript("__mouseEmitBeforeExit")?
+                    .call(withArguments: [code])?.toBool() ?? false
+                if !handled { break }
+                // Whether the handler scheduled anything has to be read BEFORE draining —
+                // afterwards the queues are empty again and every round looks identical.
+                let scheduled = !immediates.isEmpty || !timers.isEmpty || outstanding > 0
+                if !scheduled { break }
+                runEventLoop()
+            }
+        }
+
         // `process.exitCode = n` is the OTHER way a program reports failure: it does not exit,
         // it records what the exit status should be once the loop drains. It was a plain
         // property nothing ever read, so every tool that reports failure this way — mocha,
@@ -359,6 +381,10 @@ final class NodeEngine: @unchecked Sendable {
            !recorded.isUndefined, !recorded.isNull {
             exitCode = Int32(recorded.toInt32())
         }
+
+        // `exit` runs last, synchronously, for every kind of exit — natural drain, an explicit
+        // process.exit(), or a fatal error. Anything it writes still belongs in the output.
+        context.objectForKeyedSubscript("__mouseEmitExit")?.call(withArguments: [exitCode ?? 0])
 
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
@@ -4717,6 +4743,24 @@ final class NodeEngine: @unchecked Sendable {
         bridge.unhandledRejection(text);
       };
 
+      // `beforeExit` fires when the loop has emptied but the process has NOT been told to
+      // exit — a handler may schedule more work, and node will then drain again and re-emit.
+      // It does not fire when `process.exit()` was called explicitly.
+      globalThis.__mouseEmitBeforeExit = function(code) {
+        const handlers = processEvents.beforeExit;
+        if (!handlers || !handlers.length) return false;
+        for (const handler of handlers.slice()) handler(code);
+        return true;
+      };
+      // `exit` is the last thing that runs, synchronously, for every kind of exit. It is where
+      // cleanup lives — flushing a log, writing coverage, removing a lockfile — so a process
+      // that never emits it silently skips all of that.
+      globalThis.__mouseEmitExit = function(code) {
+        const handlers = processEvents.exit;
+        if (!handlers || !handlers.length) return false;
+        for (const handler of handlers.slice()) handler(code);
+        return true;
+      };
       globalThis.__mouseEmitUncaught = function(error) {
         const handlers = processEvents.uncaughtException;
         if (!handlers || !handlers.length) return false;
