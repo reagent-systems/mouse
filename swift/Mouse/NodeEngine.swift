@@ -15012,15 +15012,58 @@ final class NodeEngine: @unchecked Sendable {
             }
           }
           question(query, options, callback) {
-            if (typeof options === 'function') callback = options;
+            if (typeof options === 'function') { callback = options; options = null; }
             if (this.output) this.output.write(query);
             this._questionCb = callback;
+            const self = this;
+            const signal = options && options.signal;
+            if (signal) {
+              if (signal.aborted) { this._questionCb = null; return; }
+              globalThis.__onAbort(signal, function() { self._questionCb = null; });
+            }
           }
           prompt() { if (this.output) this.output.write(this._prompt); }
           setPrompt(prompt) { this._prompt = prompt; return this; }
           getPrompt() { return this._prompt; }
           get line() { return this._line; }
-          get cursor() { return this._line.length; }
+          // node leaves `cursor` UNDEFINED until there is a line to have a cursor in. Reporting
+          // 0 says the cursor is at the start of an empty line, which is a different claim.
+          get cursor() { return this._line ? this._line.length : undefined; }
+          // `for await (const line of rl)` is how a program reads stdin a line at a time, and
+          // without this it throws instead. Lines that arrive while nobody is awaiting are
+          // QUEUED — the loop body may take as long as it likes without losing input.
+          [Symbol.asyncIterator]() {
+            const self = this;
+            const queue = [];
+            let waiting = null;
+            let finished = false;
+            const onLine = function(value) {
+              if (waiting) { const settle = waiting; waiting = null; settle({ value: value, done: false }); }
+              else queue.push(value);
+            };
+            const onClose = function() {
+              finished = true;
+              if (waiting) { const settle = waiting; waiting = null; settle({ value: undefined, done: true }); }
+            };
+            self.on('line', onLine);
+            self.once('close', onClose);
+            return {
+              next: function() {
+                if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+                if (finished) return Promise.resolve({ value: undefined, done: true });
+                return new Promise(function(resolve){ waiting = resolve; });
+              },
+              // Leaving the loop early CLOSES the interface, as node's does: the program has
+              // said it is done reading, and the input should stop being consumed on its behalf.
+              return: function() {
+                self.off('line', onLine);
+                self.off('close', onClose);
+                self.close();
+                return Promise.resolve({ value: undefined, done: true });
+              },
+              [Symbol.asyncIterator]: function() { return this; },
+            };
+          }
           getCursorPos() {
             const columns = (this.output && this.output.columns) || 80;
             const total = this._prompt.length + this._line.length;
@@ -15117,8 +15160,31 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories['readline/promises'] = function() {
         const readline = coreRequire('readline');
         class PromisesInterface extends readline.Interface {
-          question(query) {
-            return new Promise((resolve) => readline.Interface.prototype.question.call(this, query, resolve));
+          // The SIGNAL is the whole reason to prefer this form: a prompt with no way out leaves
+          // a program waiting on a person who has already gone. Ignoring it made the promise one
+          // that could never settle.
+          question(query, options) {
+            const self = this;
+            const signal = options && options.signal;
+            return new Promise(function(resolve, reject) {
+              // node's own AbortError, NOT the signal's reason — even when the caller aborted
+              // with one of their own. Checked against node rather than assumed, because the
+              // timers/promises form does the opposite and rejects with the reason.
+              if (signal && signal.aborted) { reject(globalThis.__abortError()); return; }
+              let settled = false;
+              const stop = globalThis.__onAbort(signal, function() {
+                if (settled) return;
+                settled = true;
+                self._questionCb = null;
+                reject(globalThis.__abortError());
+              });
+              readline.Interface.prototype.question.call(self, query, function(answer) {
+                if (settled) return;
+                settled = true;
+                stop();
+                resolve(answer);
+              });
+            });
           }
         }
         return Object.assign({}, readline, {

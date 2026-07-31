@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **readline matches node** — 24 behaviours swept. `for await (const line of rl)`
+  works at last (the interface had no async iterator), queueing lines that arrive while the
+  loop body is busy and closing the interface when the loop breaks; `rl.question` honours an
+  `AbortSignal` in both the callback and promise forms; and `rl.cursor` is `undefined` on an
+  empty line, as node reports it.
 - Node layer: **the fetch value types match node** — 32 behaviours across `Headers`,
   `Request`, `Response`, `Blob` and `FormData`. A body is now readable exactly once (and a
   clone gives a second read), `response.body` is `null` when there is no body, 204/205/304
