@@ -6778,6 +6778,10 @@ final class NodeEngine: @unchecked Sendable {
             const { absolute, parts } = normalizeParts(p);
             let result = (absolute ? '/' : '') + parts.join('/');
             if (!result) result = absolute ? '/' : '.';
+            // A trailing separator is KEPT: node's `normalize('/a/b/')` is '/a/b/', and the
+            // difference is load-bearing for anything that joins onto the result — dropping it
+            // turns "this is a directory" into "this is a file".
+            if (p.endsWith('/') && !result.endsWith('/')) result += '/';
             return result;
           },
           join: function() {
@@ -6791,22 +6795,44 @@ final class NodeEngine: @unchecked Sendable {
               if (arguments[i]) resolved = arguments[i] + (resolved ? '/' + resolved : '');
             }
             if (!resolved.startsWith('/')) resolved = __cwd + '/' + resolved;
-            return path.normalize(resolved) || '/';
+            // resolve STRIPS a trailing separator where normalize keeps it: it answers with a
+            // canonical absolute path, and '/a/' and '/a' are the same one.
+            const normalized = path.normalize(resolved) || '/';
+            return normalized.length > 1 && normalized.endsWith('/')
+              ? path._stripTrailing(normalized) : normalized;
+          },
+          // A trailing separator names the same place, so dirname and basename look past it:
+          // node's `basename('/a/b/')` is 'b', not the empty string an unstripped lastIndexOf
+          // gives.
+          _stripTrailing: function(p) {
+            let end = p.length;
+            while (end > 1 && p.charCodeAt(end - 1) === 47) end -= 1;
+            return p.slice(0, end);
           },
           dirname: function(p) {
-            const i = p.lastIndexOf('/');
+            const trimmed = path._stripTrailing(String(p));
+            const i = trimmed.lastIndexOf('/');
             if (i < 0) return '.';
             if (i === 0) return '/';
-            return p.slice(0, i);
+            return trimmed.slice(0, i);
           },
           basename: function(p, ext) {
-            const base = p.slice(p.lastIndexOf('/') + 1);
-            return ext && base.endsWith(ext) ? base.slice(0, -ext.length) : base;
+            const trimmed = path._stripTrailing(String(p));
+            const base = trimmed === '/' ? '' : trimmed.slice(trimmed.lastIndexOf('/') + 1);
+            // An extension is only stripped when something is LEFT: node keeps '.txt' whole
+            // rather than answering with the empty string.
+            if (ext && base !== ext && base.endsWith(ext)) return base.slice(0, -ext.length);
+            return base;
           },
           extname: function(p) {
-            const base = p.slice(p.lastIndexOf('/') + 1);
+            const base = path.basename(p);
             const dot = base.lastIndexOf('.');
-            return dot > 0 ? base.slice(dot) : '';
+            // A name that is all dots has no extension — '..' is a name, not '.' plus '.'.
+            if (dot <= 0) return '';
+            for (let index = 0; index < dot; index += 1) {
+              if (base.charCodeAt(index) !== 46) return base.slice(dot);
+            }
+            return '';
           },
           isAbsolute: function(p) { return p.startsWith('/'); },
           relative: function(from, to) {
@@ -6817,14 +6843,78 @@ final class NodeEngine: @unchecked Sendable {
             return a.slice(common).map(() => '..').concat(b.slice(common)).join('/');
           },
           parse: function(p) {
-            const dir = path.dirname(p), base = path.basename(p), ext = path.extname(p);
-            return { root: p.startsWith('/') ? '/' : '', dir, base, ext, name: base.slice(0, base.length - ext.length) };
+            const text = String(p);
+            const base = path.basename(text), ext = path.extname(text);
+            // `dir` is EMPTY when there is no directory part — node does not say '.' here, and
+            // format() would then rebuild './c.txt' from what parse gave it.
+            const trimmed = path._stripTrailing(text);
+            const cut = trimmed.lastIndexOf('/');
+            const dir = cut < 0 ? '' : (cut === 0 ? '/' : trimmed.slice(0, cut));
+            return { root: text.startsWith('/') ? '/' : '', dir: dir, base: base, ext: ext,
+                     name: base.slice(0, base.length - ext.length) };
+          },
+          format: function(parsed) {
+            parsed = parsed || {};
+            // node's precedence: `dir` wins over `root`, and `base` wins over `name` + `ext`.
+            const directory = parsed.dir || parsed.root || '';
+            // An `ext` without its dot gets one — node writes the separator, not the caller.
+            const extension = parsed.ext ? (parsed.ext.startsWith('.') ? parsed.ext : '.' + parsed.ext) : '';
+            const base = parsed.base || ((parsed.name || '') + extension);
+            if (!directory) return base;
+            return directory === (parsed.root || '') ? directory + base : directory + '/' + base;
           },
         };
         path.posix = path;
-        // win32 delegates to the posix logic — this device has no Windows paths; only the
-        // separators differ for display.
-        path.win32 = Object.assign({}, path, { sep: '\\', delimiter: ';' });
+        // win32 is a real implementation, not posix wearing a different separator: a package
+        // computing a Windows path (a cross-platform test, a config writer) gets backslashes
+        // and drive-letter absoluteness or it gets nonsense. What it does NOT do is UNC and
+        // drive-relative paths — those say so rather than guessing.
+        const win32 = {
+          sep: '\\',
+          delimiter: ';',
+          _toPosix: function(p) { return String(p).replace(/\\/g, '/'); },
+          isAbsolute: function(p) {
+            const text = String(p);
+            return /^[\\/]/.test(text) || /^[a-zA-Z]:[\\/]/.test(text);
+          },
+          normalize: function(p) {
+            const text = String(p);
+            const drive = /^([a-zA-Z]:)([\\/].*)?$/.exec(text);
+            if (drive) {
+              const rest = path.normalize(win32._toPosix(drive[2] || '/'));
+              return drive[1] + rest.replace(/\//g, '\\');
+            }
+            return path.normalize(win32._toPosix(text)).replace(/\//g, '\\');
+          },
+          join: function() {
+            const pieces = Array.prototype.filter.call(arguments, function(piece) { return piece !== ''; });
+            if (!pieces.length) return '.';
+            return win32.normalize(pieces.join('\\'));
+          },
+          resolve: function() {
+            const args = Array.prototype.map.call(arguments, win32._toPosix);
+            return path.resolve.apply(path, args).replace(/\//g, '\\');
+          },
+          dirname: function(p) { return path.dirname(win32._toPosix(p)).replace(/\//g, '\\'); },
+          basename: function(p, ext) { return path.basename(win32._toPosix(p), ext); },
+          extname: function(p) { return path.extname(win32._toPosix(p)); },
+          relative: function(from, to) {
+            return path.relative(win32._toPosix(from), win32._toPosix(to)).replace(/\//g, '\\');
+          },
+          parse: function(p) {
+            const drive = /^([a-zA-Z]:)/.exec(String(p));
+            const parsed = path.parse(win32._toPosix(p));
+            return { root: drive ? drive[1] + '\\' : (parsed.root ? '\\' : ''),
+                     dir: parsed.dir.replace(/\//g, '\\'), base: parsed.base,
+                     ext: parsed.ext, name: parsed.name };
+          },
+          format: function(parsed) { return path.format(parsed).replace(/\//g, '\\'); },
+          toNamespacedPath: function(p) { return String(p); },
+          matchesGlob: path.matchesGlob,
+        };
+        win32.win32 = win32;
+        win32.posix = path;
+        path.win32 = win32;
         return path;
       };
 

@@ -258,6 +258,13 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: **`path` handles trailing separators as node does** — `normalize` and `join` keep
+  one, `resolve` strips it, and `dirname`/`basename` look past it (`basename('/a/b/')` is `b`).
+  Also `extname('..')` is `''`, `basename('/a/.txt', '.txt')` leaves `.txt` whole,
+  `parse('c.txt').dir` is `''` so `format(parse(x))` round-trips, and `format` supplies the dot
+  for an `ext` written without one. 110 results verified against node.
+- Node layer: `path.win32` is a real implementation rather than posix with a different `sep` —
+  backslash separators, drive-letter absoluteness, and its own `parse`/`format`.
 - Node layer: a stream decodes a string chunk before `_write` sees it — `write(text, 'hex')` is
   the bytes those characters spell, not the characters — and `setDefaultEncoding` now applies.
 - Node layer: `readable.read(size)` returns exactly that many bytes and keeps the rest. It
