@@ -8,6 +8,13 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- msh: **`npm create <starter>`** (and `npm init <starter>`, and bare `npm init` to write a
+  package.json) — npm's rule that `create vite` runs `create-vite`, so `npm create vite@latest
+  app -- --template vanilla-ts` scaffolds a real project on the phone.
+- Package manager: a napi-rs package's `-wasm32-wasi` optional binding is installed — the
+  author's own portable build for platforms they ship no binary for, the same principle as the
+  rollup and esbuild substitutes in the shape napi-rs uses. It loads as far as `node:wasi`,
+  which this engine does not have; the first-run gate pins that so it cannot rot.
 - msh: **`npm run <script>`** (and `npm test`/`start`/`stop`/`restart`, plus bare `npm run` to
   list). Scripts run as ordinary msh programs, so `&&`, pipes and env prefixes behave and a
   long-running script takes the terminal the way it does when typed by hand; `pre`/`post` hooks
@@ -229,6 +236,11 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- msh: `npm install` reads the package.json governing the current directory, not the workspace
+  root's, so `cd app && npm install` works after scaffolding — and writes a new dependency back
+  to that same file.
+- msh: `npm create`'s `--` separator is consumed by npm rather than passed to the scaffolder,
+  which read it as the project name.
 - Node layer: `node -e "…" value` puts no script path in `process.argv` — argv[1] is the first
   real argument, as node's is. A phantom path made every `node -e` script read the wrong one,
   which is most of what npm scripts are made of.

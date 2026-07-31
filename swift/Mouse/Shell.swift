@@ -1347,9 +1347,14 @@ final class MouseShell {
         case "install", "i", "add", "ci", "update":
             var requirements: [String: String] = [:]
             if specs.isEmpty {
-                guard let json = PackageManager.readPackageJSON(root: context.root) else {
+                // The package.json governing THIS directory, as npm reads it — a scaffolded
+                // project sits in its own folder, and `cd app && npm install` is how anyone
+                // fills it in. node_modules still lands at the workspace root, where the
+                // resolver's walk-up finds it from any depth and where the bin manifest lives.
+                guard let found = nearestPackage(context: context) else {
                     return IO(err: "\(tool): no package.json here", status: 1)
                 }
+                let json = found.json
                 for key in ["dependencies", "devDependencies"] {
                     for (depName, range) in json[key] as? [String: String] ?? [:] { requirements[depName] = range }
                 }
@@ -1363,8 +1368,8 @@ final class MouseShell {
             do {
                 let report = try await PackageManager.install(requirements: requirements, into: context.root)
                 if !specs.isEmpty {
-                    var json = PackageManager.readPackageJSON(root: context.root)
-                        ?? ["name": context.root.lastPathComponent, "version": "1.0.0"]
+                    let existing = nearestPackage(context: context)
+                    var json = existing?.json ?? ["name": context.root.lastPathComponent, "version": "1.0.0"]
                     var dependencies = json["dependencies"] as? [String: String] ?? [:]
                     for spec in specs {
                         let (depName, _) = Self.splitSpec(spec)
@@ -1373,7 +1378,9 @@ final class MouseShell {
                         }
                     }
                     json["dependencies"] = dependencies
-                    try PackageManager.writePackageJSON(json, root: context.root)
+                    // Back to the package.json it came from, which is not always the root's.
+                    try PackageManager.writePackageJSON(json, root: existing?.directory
+                        ?? (cwd.isEmpty ? context.root : context.root.appendingPathComponent(cwd)))
                 }
                 context.reloadTree()
                 var out = "added \(report.placements.count) packages\n"
@@ -1384,6 +1391,30 @@ final class MouseShell {
             } catch {
                 return IO(err: "\(tool): \(error.localizedDescription)", status: 1)
             }
+        // `npm create vite@latest my-app` is how a project BEGINS: npm's `create <name>` runs
+        // the package `create-<name>`, and `init <name>` is the same thing under its older name.
+        case "create", "init", "innit":
+            guard let target = specs.first else {
+                if sub == "init" { return npmInit(tool: tool, args: args, context: context) }
+                return IO(err: "\(tool): usage: \(tool) create <starter> [args]", status: 2)
+            }
+            let (name, requirement) = Self.splitSpec(target)
+            // `create vite` → `create-vite`; a scope keeps its shape (`@scope/create-x`), and a
+            // name that already says create is left alone.
+            let starter: String
+            if name.hasPrefix("@") {
+                let pieces = name.split(separator: "/", maxSplits: 1).map(String.init)
+                let bare = pieces.count > 1 ? pieces[1] : ""
+                starter = bare.hasPrefix("create-") || bare.isEmpty ? name : pieces[0] + "/create-" + bare
+            } else {
+                starter = name.hasPrefix("create-") ? name : "create-" + name
+            }
+            let spec = requirement == "latest" ? starter : starter + "@" + requirement
+            // npm consumes the `--` separator itself; passing it through makes a scaffolder
+            // read it as the project name.
+            var rest = Array(args.dropFirst()).filter { $0 != target }
+            if let separator = rest.firstIndex(of: "--") { rest.remove(at: separator) }
+            return await npxCmd([spec] + rest, stdin: "", context: context, interactive: interactive)
         // `npm run dev` is how a project is actually started — every README's first line.
         case "run", "run-script", "start", "test", "stop", "restart":
             return await npmRun(tool: tool, sub: sub, args: Array(args.dropFirst()),
@@ -1397,8 +1428,28 @@ final class MouseShell {
             }
             return IO(out: joinLines(lines))
         default:
-            return IO(err: "\(tool): supported: install run ls", status: 1)
+            return IO(err: "\(tool): supported: install create run ls", status: 1)
         }
+    }
+
+    /// `npm init` with no starter: the package.json npm writes, with this directory's name.
+    private func npmInit(tool: String, args: [String], context: Context) -> IO {
+        guard let here = resolve(".", context: context) else {
+            return IO(err: "\(tool): cannot resolve this directory", status: 1)
+        }
+        let file = here.url.appendingPathComponent("package.json")
+        if FileManager.default.fileExists(atPath: file.path) {
+            return IO(err: "\(tool): package.json already exists here", status: 1)
+        }
+        let name = here.url.lastPathComponent.isEmpty ? "app" : here.url.lastPathComponent
+        let json: [String: Any] = ["name": name, "version": "1.0.0", "private": true,
+                                   "type": "module", "scripts": ["test": "echo no tests yet"]]
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+              (try? data.write(to: file)) != nil else {
+            return IO(err: "\(tool): could not write package.json", status: 1)
+        }
+        context.reloadTree()
+        return IO(out: "wrote \(here.rel.isEmpty ? "" : here.rel + "/")package.json\n")
     }
 
     /// `npm run <script>` — the package.json script, run as an ordinary msh program so that a
@@ -1408,12 +1459,12 @@ final class MouseShell {
     /// The package.json that governs the CURRENT directory — the one you are in, then upward.
     /// A project in `app/` has its own scripts and the workspace root's are not them, which is
     /// exactly the layout `npm run dev` is typed in.
-    private func nearestPackage(context: Context) -> [String: Any]? {
+    private func nearestPackage(context: Context) -> (json: [String: Any], directory: URL)? {
         var directory = cwd.isEmpty ? context.root : context.root.appendingPathComponent(cwd)
         while true {
             if let data = try? Data(contentsOf: directory.appendingPathComponent("package.json")),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                return json
+                return (json, directory)
             }
             if directory.path == context.root.path { return nil }
             directory.deleteLastPathComponent()
@@ -1422,9 +1473,10 @@ final class MouseShell {
 
     private func npmRun(tool: String, sub: String, args: [String], context: Context,
                         interactive: Bool) async -> IO {
-        guard let json = nearestPackage(context: context) else {
+        guard let found = nearestPackage(context: context) else {
             return IO(err: "\(tool): no package.json here", status: 1)
         }
+        let json = found.json
         let scripts = json["scripts"] as? [String: String] ?? [:]
         var name = sub
         var extra = args

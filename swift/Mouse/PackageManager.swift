@@ -281,6 +281,9 @@ enum PackageManager {
         let integrity: String?
         let shasum: String?
         let dependencies: [String: String]
+        /// The per-platform binaries a package publishes. All of them are skipped except one:
+        /// see `wasiBinding`.
+        let optionalDependencies: [String: String]
         let bin: [String: String]
     }
 
@@ -355,6 +358,7 @@ enum PackageManager {
                 integrity: dist["integrity"] as? String,
                 shasum: dist["shasum"] as? String,
                 dependencies: meta["dependencies"] as? [String: String] ?? [:],
+                optionalDependencies: meta["optionalDependencies"] as? [String: String] ?? [:],
                 bin: bins
             )
         }
@@ -387,6 +391,20 @@ enum PackageManager {
         "esbuild": "esbuild-wasm",
     ]
 
+    /// The same idea as `wasmSubstitutes`, but for the shape napi-rs uses: a package lists every
+    /// platform's binary in `optionalDependencies` and its loader tries them in turn, ending at
+    /// `…-wasm32-wasi` — the author's own portable build, published for platforms they do not
+    /// ship a binary for. Every native one is skipped here (none can load on iOS) and that one
+    /// is installed, so the loader's last resort is the one that is present. rolldown, which
+    /// vite 7 bundles with, is exactly this shape.
+    static func wasiBinding(of package: ResolvedPackage) -> (name: String, requirement: String)? {
+        for (name, requirement) in package.optionalDependencies.sorted(by: { $0.key < $1.key })
+        where name.hasSuffix("-wasm32-wasi") {
+            return (name, requirement)
+        }
+        return nil
+    }
+
     static func resolveTree(requirements: [String: String], session: Session) async throws -> [Placement] {
         var placements: [Placement] = []
         var rootVersions: [String: String] = [:]
@@ -418,6 +436,9 @@ enum PackageManager {
             placements.append(Placement(package: package, path: path, installedAs: wasmSubstitutes[name] == nil ? nil : name))
             for (depName, depRequirement) in package.dependencies.sorted(by: { $0.key < $1.key }) {
                 queue.append((depName, depRequirement, path))
+            }
+            if let wasi = wasiBinding(of: package) {
+                queue.append((wasi.name, wasi.requirement, path))
             }
         }
         return placements
