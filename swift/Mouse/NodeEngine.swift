@@ -1466,6 +1466,13 @@ final class NodeEngine: @unchecked Sendable {
                                        0x03, 0x21, 0x00])
         let ed25519PublicPrefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
                                         0x03, 0x21, 0x00])
+        // X448 (OID 1.3.101.111). Fixed-shape wrappers like X25519's, over 56 raw bytes rather
+        // than 32 — the keys themselves are computed in JS, since X448 is arithmetic and not a
+        // system key type, but they still have to be RECOGNISED here.
+        let x448PrivatePrefix = Data([0x30, 0x46, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03,
+                                      0x2b, 0x65, 0x6f, 0x04, 0x3a, 0x04, 0x38])
+        let x448PublicPrefix = Data([0x30, 0x42, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6f,
+                                     0x03, 0x39, 0x00])
         func pemBody(_ pem: String) -> Data? {
             let lines = pem.split(separator: "\n").filter { !$0.hasPrefix("-----") }
             return Data(base64Encoded: lines.joined())
@@ -1524,6 +1531,14 @@ final class NodeEngine: @unchecked Sendable {
                 if body.count == x25519PublicPrefix.count + 32,
                    body.prefix(x25519PublicPrefix.count) == x25519PublicPrefix {
                     return ["type": "x25519", "curve": ""] as [String: Any]
+                }
+                if body.count == x448PrivatePrefix.count + 56,
+                   body.prefix(x448PrivatePrefix.count) == x448PrivatePrefix {
+                    return ["type": "x448", "curve": ""] as [String: Any]
+                }
+                if body.count == x448PublicPrefix.count + 56,
+                   body.prefix(x448PublicPrefix.count) == x448PublicPrefix {
+                    return ["type": "x448", "curve": ""] as [String: Any]
                 }
             }
             return ["type": "unknown", "curve": ""] as [String: Any]
@@ -4062,6 +4077,94 @@ final class NodeEngine: @unchecked Sendable {
         for (const pair of new URLSearchParams(text)) form.append(pair[0], pair[1]);
         return form;
       };
+
+      // RFC 7748 X448: a Montgomery ladder over p = 2^448 - 2^224 - 1. The refusal said "X448
+      // has no system implementation", which is true of the SYSTEM and says nothing about
+      // whether it can be written — the same shape as scrypt, refused as a missing primitive
+      // and turning out to be arithmetic nobody had written. JSC's BigInt does the rest.
+      globalThis.__x448 = (function(){
+        const P = (1n << 448n) - (1n << 224n) - 1n;
+        const A24 = 39081n;
+        function decodeLE(bytes) {
+          let value = 0n;
+          for (let i = bytes.length - 1; i >= 0; i--) value = (value << 8n) | BigInt(bytes[i]);
+          return value;
+        }
+        function encodeLE(value) {
+          const out = Buffer.alloc(56);
+          for (let i = 0; i < 56; i++) { out[i] = Number(value & 0xffn); value >>= 8n; }
+          return out;
+        }
+        function invert(a) {
+          let result = 1n, base = ((a % P) + P) % P, e = P - 2n;
+          while (e > 0n) { if (e & 1n) result = result * base % P; base = base * base % P; e >>= 1n; }
+          return result;
+        }
+        function scalarMult(scalarBytes, uBytes) {
+          const k = Buffer.from(scalarBytes);
+          k[0] &= 252; k[55] |= 128;   // RFC 7748 clamping
+          const scalar = decodeLE(k);
+          const u = decodeLE(uBytes) % P;
+          let x1 = u, x2 = 1n, z2 = 0n, x3 = u, z3 = 1n, swap = 0n;
+          for (let t = 447; t >= 0; t--) {
+            const bit = (scalar >> BigInt(t)) & 1n;
+            swap ^= bit;
+            if (swap) { let s = x2; x2 = x3; x3 = s; s = z2; z2 = z3; z3 = s; }
+            swap = bit;
+            const A = (x2 + z2) % P, AA = A * A % P;
+            const B = ((x2 - z2) % P + P) % P, BB = B * B % P;
+            const E = ((AA - BB) % P + P) % P;
+            const C = (x3 + z3) % P, D = ((x3 - z3) % P + P) % P;
+            const DA = D * A % P, CB = C * B % P;
+            x3 = (DA + CB) % P; x3 = x3 * x3 % P;
+            z3 = ((DA - CB) % P + P) % P; z3 = z3 * z3 % P; z3 = x1 * z3 % P;
+            x2 = AA * BB % P;
+            z2 = E * ((AA + A24 * E) % P) % P;
+          }
+          if (swap) { let s = x2; x2 = x3; x3 = s; s = z2; z2 = z3; z3 = s; }
+          return encodeLE(x2 * invert(z2) % P);
+        }
+        // The DER wrappers are fixed-shape, like Ed25519's and X25519's — only the OID differs
+        // (1.3.101.111).
+        const SPKI = Buffer.from('3042300506032b656f033900', 'hex');
+        const PKCS8 = Buffer.from('3046020100300506032b656f043a0438', 'hex');
+        const BASE = (function(){ const b = Buffer.alloc(56); b[0] = 5; return b; })();
+        return {
+          generate: function() {
+            const secret = cryptoRandom(56);
+            const pub = scalarMult(secret, BASE);
+            return {
+              privateKey: pemWrap(Buffer.concat([PKCS8, secret]), 'PRIVATE KEY'),
+              publicKey: pemWrap(Buffer.concat([SPKI, pub]), 'PUBLIC KEY'),
+            };
+          },
+          agree: function(privatePem, publicPem) {
+            const priv = pemBody(privatePem);
+            const pub = pemBody(publicPem);
+            if (!priv || !pub || priv.length !== PKCS8.length + 56 || pub.length !== SPKI.length + 56) return null;
+            return scalarMult(priv.slice(PKCS8.length), pub.slice(SPKI.length));
+          },
+          isPrivate: function(pem) {
+            const body = pemBody(pem);
+            return !!body && body.length === PKCS8.length + 56 && body.slice(0, PKCS8.length).equals(PKCS8);
+          },
+          isPublic: function(pem) {
+            const body = pemBody(pem);
+            return !!body && body.length === SPKI.length + 56 && body.slice(0, SPKI.length).equals(SPKI);
+          },
+        };
+        function cryptoRandom(n) { return Buffer.from(bridge.randomBytes(n), 'base64'); }
+        function pemBody(pem) {
+          const text = String(pem || '');
+          const match = /-----BEGIN [^-]+-----([\s\S]*?)-----END/.exec(text);
+          if (!match) return null;
+          return Buffer.from(match[1].replace(/\s+/g, ''), 'base64');
+        }
+        function pemWrap(der, label) {
+          const base64 = der.toString('base64').replace(/(.{64})/g, '$1\n');
+          return '-----BEGIN ' + label + '-----\n' + base64 + '\n-----END ' + label + '-----\n';
+        }
+      })();
 
       globalThis.__toBytes = function(value, encoding) {
         if (Buffer.isBuffer(value)) return value;
@@ -12081,12 +12184,14 @@ final class NodeEngine: @unchecked Sendable {
               { code: 'ERR_INVALID_ARG_TYPE' });
           }
           const kind = String(type).toLowerCase();
-          if (kind !== 'ec' && kind !== 'ed25519' && kind !== 'x25519' && kind !== 'rsa') {
-            throw Object.assign(new Error("Key type '" + type + "' is not available: this device generates RSA through SecKey and EC (P-256/384/521), Ed25519 and X25519 through CryptoKit; DSA, DH and X448 have no system implementation"),
+          if (kind !== 'ec' && kind !== 'ed25519' && kind !== 'x25519' && kind !== 'x448' && kind !== 'rsa') {
+            throw Object.assign(new Error("Key type '" + type + "' is not available: this device generates RSA through SecKey and EC (P-256/384/521), Ed25519 and X25519 through CryptoKit; DSA has no system implementation"),
                                 { code: 'ERR_CRYPTO_OPERATION_NOT_SUPPORTED' });
           }
-          const pair = kind === 'rsa'
-            ? bridge.rsaGenerate(Number(options.modulusLength) || 2048)
+          // X448 is computed here rather than by the bridge — it is arithmetic, not a system
+          // key type — but it produces the same PEM pair, so it joins the common path.
+          const pair = kind === 'x448' ? globalThis.__x448.generate()
+            : kind === 'rsa' ? bridge.rsaGenerate(Number(options.modulusLength) || 2048)
             : bridge.keyGenerate(kind, String(options.namedCurve || ''));
           if (!pair) {
             throw Object.assign(new Error("Unsupported curve '" + options.namedCurve + "': P-256 (prime256v1), P-384 (secp384r1) and P-521 (secp521r1) are available"),
@@ -12330,6 +12435,13 @@ final class NodeEngine: @unchecked Sendable {
             options = options || {};
             const privatePem = keyPem(options.privateKey);
             const publicPem = keyPem(options.publicKey);
+            // X448 agreement is the same scalar multiplication as its key generation, so it
+            // is handled here rather than by the bridge, which has no such key type.
+            if (privatePem && publicPem &&
+                globalThis.__x448.isPrivate(privatePem) && globalThis.__x448.isPublic(publicPem)) {
+              const shared = globalThis.__x448.agree(privatePem, publicPem);
+              if (shared) return shared;
+            }
             if (!privatePem || !publicPem) {
               throw Object.assign(new TypeError('The "options.privateKey" and ' +
                                                 '"options.publicKey" properties are required'),

@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **X448 is real** — `generateKeyPairSync('x448')` and `crypto.diffieHellman()`.
+  RFC 7748's Montgomery ladder over p = 2^448 − 2^224 − 1 on JavaScriptCore's `BigInt`, with
+  node's DER encodings both ways. Verified cross-engine: real node generates one half of an
+  exchange and this engine the other, and both derive the same 56-byte secret. The refusal it
+  replaces said "no CryptoKit support" — true of the system, and silent on whether the curve
+  could be written, the same shape as `scrypt` and finite-field DH.
 - Node layer: `dns.resolveTlsa()` returns real TLSA records — `{certUsage, selector, match,
   data}` with the association data as an `ArrayBuffer` — and `dns.resolve(name, 'TLSA')` routes
   to it. Resolving the record never needed the TLS stack that consuming it does.
