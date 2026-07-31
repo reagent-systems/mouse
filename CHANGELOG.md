@@ -38,6 +38,10 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `url.resolve()` handles a base that is only a path — it returned the relative part
+  alone, discarding the base. And `url.urlToHttpOptions()` reports `hash`, `search`, `pathname`
+  and `auth`, with `port` as a number, so options built from a URL keep its credentials.
+
 - Node layer: `url.parse()` is a real parser rather than one regex. A bare path parsed to `/`,
   `user:pass@host` put the user in `hostname`, `mailto:` returned nulls, and `host`, `hash` and
   `path` were never populated at all. 13 vectors match node, including IPv6 literals and the

@@ -7982,7 +7982,18 @@ final class NodeEngine: @unchecked Sendable {
                    (parts.pathname || '') + search + hash;
           },
           resolve: function(from, to) {
-            try { return new URL(to, from).href; } catch (error) { return to; }
+            try { return new URL(to, from).href; } catch (error) { /* base has no scheme */ }
+            // A base that is only a PATH cannot go through the URL constructor, and node still
+            // resolves it — `url.resolve('/base/path', 'sub')` is '/base/sub'. Resolve against
+            // a placeholder origin and strip it back off.
+            try {
+              const base = String(from);
+              if (base[0] === '/' || base.indexOf(':') < 0) {
+                const resolved = new URL(String(to), 'resolve-base:///' + base.replace(/^\/+/, ''));
+                return resolved.pathname + resolved.search + resolved.hash;
+              }
+            } catch (error) { /* fall through */ }
+            return to;
           },
           resolveObject: function(from, to) {
             try { return new URL(to, from); } catch (error) { return null; }
@@ -7996,9 +8007,26 @@ final class NodeEngine: @unchecked Sendable {
           },
           domainToUnicode: function(name) { return String(name); },
           fileURLToPathBuffer: function(url) { return Buffer.from(String(url).replace('file://', '')); },
+          // This is how a WHATWG URL becomes http.request options, so a missing field is a
+          // request that goes somewhere else. node reports hash, search and pathname as well as
+          // path; carries auth across when the URL has credentials; and gives port as a NUMBER,
+          // omitting the key entirely when there is none.
           urlToHttpOptions: function(url) {
-            return { protocol: url.protocol, hostname: url.hostname, port: url.port,
-                     path: (url.pathname || '') + (url.search || ''), href: url.href };
+            const options = {
+              protocol: url.protocol,
+              hostname: typeof url.hostname === 'string' && url.hostname.startsWith('[')
+                ? url.hostname.slice(1, -1) : url.hostname,
+              hash: url.hash,
+              search: url.search,
+              pathname: url.pathname,
+              path: (url.pathname || '') + (url.search || ''),
+              href: url.href,
+            };
+            if (url.port !== '') options.port = Number(url.port);
+            if (url.username || url.password) {
+              options.auth = decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password);
+            }
+            return options;
           },
         };
       };
