@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **a stack trace out of a bundle names the author's file and line**. Any loaded
+  file's `//# sourceMappingURL` is honoured — inline `data:` URI or a `.map` beside it — which
+  node does only under `--enable-source-maps`; here it is the default, because a trace into line
+  4000 of a bundle says nothing. Verified against node with that flag, on a bundle esbuild built
+  on this engine.
 - Node layer: an uncaught error prints node's source-context header — the file, the line, that
   line's own text and a caret — above the stack. A trace says where; this says what is there.
 - Node layer: `NAPI_RS_FORCE_WASI` is set by default. napi-rs generates a loader that tries the
@@ -253,6 +258,14 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: `fs.openSync` understands NUMERIC flags — `O_WRONLY|O_CREAT|O_TRUNC` as a number
+  is how Go's wasm runtime and every WASI shim open a file, and stringifying it gave "1537",
+  which reads as neither write nor append. A descriptor now also writes at its own position
+  (or the one given) instead of appending, which had been putting content in the file twice.
+- Node layer: `Atomics.wait` on a shared buffer says what the wall is — it waits for another
+  thread to write memory no separate engine can address — instead of JavaScriptCore's message
+  about SharedArrayBuffer, which reads as a type error. esbuild's `buildSync` is this call; its
+  `build()` works.
 - Node layer: **a TypeScript stack trace names the line in the .ts file**. Erasing types moves
   lines in both directions — an `interface` disappears, an `enum` expands — so the compiler's own
   source map is now requested, decoded, and applied to the source-context header and to every

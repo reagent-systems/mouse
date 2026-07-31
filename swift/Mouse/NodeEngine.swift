@@ -290,6 +290,9 @@ final class NodeEngine: @unchecked Sendable {
         installRejectionHook()
 
         let dir = virtualDirname(path)
+        // The entry carries a map as often as anything it requires — an installed CLI IS a
+        // bundle, and it is usually what you run.
+        registerSourceMap(id: normalize(path), source: source)
         switch typeScriptSource(id: normalize(path), source: source) {
         case .failed(let message):
             err += message + "\n"
@@ -416,15 +419,44 @@ final class NodeEngine: @unchecked Sendable {
     /// The file, the line, the line's own text and a caret — what node prints above an
     /// uncaught error, and the part an editor can act on. A stack tells you where; this tells
     /// you what is there, which is the difference between reading a trace and reading the code.
+    /// A file that carries its own source map — which every bundled CLI does, since esbuild,
+    /// webpack and tsup all emit one. node maps these only under `--enable-source-maps`; here it
+    /// is the default, deliberately: a trace into line 45678 of a bundle tells a reader nothing,
+    /// and this is an editor. Both spellings are honoured — a data: URI carrying the map, and a
+    /// path beside the file.
+    private func registerSourceMap(id: String, source: String) {
+        guard let marker = source.range(of: "//# sourceMappingURL=", options: .backwards) else { return }
+        let rest = source[marker.upperBound...]
+        let reference = String(rest.prefix(while: { !$0.isNewline })).trimmingCharacters(in: .whitespaces)
+        guard !reference.isEmpty else { return }
+        var text: String?
+        if reference.hasPrefix("data:") {
+            if let comma = reference.range(of: "base64,") {
+                let encoded = String(reference[comma.upperBound...])
+                text = Data(base64Encoded: encoded).map { String(decoding: $0, as: UTF8.self) }
+            } else if let comma = reference.firstIndex(of: ",") {
+                text = String(reference[reference.index(after: comma)...]).removingPercentEncoding
+            }
+        } else if !reference.hasPrefix("http") {
+            let beside = normalize(virtualDirname(id) + "/" + reference)
+            text = try? String(contentsOf: realURL(beside), encoding: .utf8)
+        }
+        guard let text, text.contains("\"mappings\"") else { return }
+        context.objectForKeyedSubscript("__rememberSourceMap")?.call(withArguments: [id, text])
+    }
+
     /// A compiled file's position, in the terms its AUTHOR wrote. Empty when the file was not
     /// compiled — the ordinary case, and the reason this is a lookup rather than a transform.
-    private func originalPosition(file: String, line: Int, column: Int) -> (line: Int, column: Int)? {
+    private func originalPosition(file: String, line: Int, column: Int)
+        -> (file: String, line: Int, column: Int)? {
         guard let mapper = context.objectForKeyedSubscript("__mapPosition"),
               let mapped = mapper.call(withArguments: [file, line, column])?.toString(),
               !mapped.isEmpty else { return nil }
-        let parts = mapped.split(separator: ":").compactMap { Int($0) }
-        guard parts.count == 2 else { return nil }
-        return (parts[0], parts[1])
+        let parts = mapped.components(separatedBy: "|")
+        guard parts.count == 3, let line = Int(parts[1]), let column = Int(parts[2]) else { return nil }
+        // The map names its sources relative to the compiled file; a bundle's are its inputs.
+        let source = parts[0].isEmpty ? file : normalize(virtualDirname(file) + "/" + parts[0])
+        return (source, line, column)
     }
 
     /// Every frame in a rendered stack, moved back to the source it was written in. A stack is
@@ -441,7 +473,7 @@ final class NodeEngine: @unchecked Sendable {
             let column = Int(ns.substring(with: match.range(at: 3))) ?? 0
             guard let original = originalPosition(file: file, line: line, column: column) else { continue }
             result += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
-            result += "mouse://\(file):\(original.line):\(original.column)"
+            result += "mouse://\(original.file):\(original.line):\(original.column)"
             cursor = match.range.location + match.range.length
         }
         guard cursor > 0 else { return text }
@@ -463,14 +495,21 @@ final class NodeEngine: @unchecked Sendable {
         var column = Int(error.forProperty("column")?.toInt32() ?? 1)
         // A compiled file: the header must quote the line the AUTHOR wrote, or it points
         // confidently at whatever happens to sit there in the output.
+        var quoted = virtual
+        var body = text
         if let original = originalPosition(file: virtual, line: line, column: column) {
             reportedLine = original.line
             column = original.column
+            quoted = original.file
+            // Quote the SOURCE file's line, which for a bundle is a different file entirely.
+            if original.file != virtual, let source = try? String(contentsOf: realURL(original.file), encoding: .utf8) {
+                body = source
+            }
         }
-        let lines = text.components(separatedBy: "\n")
+        let lines = body.components(separatedBy: "\n")
         guard reportedLine <= lines.count else { return "" }
         let caret = String(repeating: " ", count: max(0, column - 1)) + "^"
-        return "\(virtual):\(reportedLine)\n\(lines[reportedLine - 1])\n\(caret)\n\n"
+        return "\(quoted):\(reportedLine)\n\(lines[reportedLine - 1])\n\(caret)\n\n"
     }
 
     private func wrapModule(_ source: String, async: Bool = false, sourceURL: String? = nil) -> JSValue? {
@@ -2719,6 +2758,7 @@ final class NodeEngine: @unchecked Sendable {
             case .compiled(let compiled): source = compiled
             case .notTypeScript: break
             }
+            registerSourceMap(id: id, source: source)
             let esm = isESModule(id: id, source: source)
             if esm {
                 source = transpileCached(source)
@@ -4487,6 +4527,25 @@ final class NodeEngine: @unchecked Sendable {
           value: function(value) { return !!(value && value.__mouseShared); },
         });
         globalThis.SharedArrayBuffer = Shared;
+        // `Atomics.wait` on one of these is a program asking to BLOCK until another thread
+        // writes the memory — and there is no other thread that can: a worker here is a separate
+        // engine, and two engines cannot address one buffer. JavaScriptCore's own message names
+        // SharedArrayBuffer, which reads like a type error and sends the reader to the wrong
+        // question. esbuild's `buildSync` is exactly this call; its async form works.
+        if (typeof Atomics !== 'undefined' && typeof Atomics.wait === 'function') {
+          const realWait = Atomics.wait;
+          Atomics.wait = function(typed, index, value, timeout) {
+            if (typed && typed.buffer && typed.buffer.__mouseShared) {
+              throw Object.assign(new Error(
+                'Atomics.wait cannot block here: it waits for another thread to write shared '
+                + 'memory, and a worker in this runtime is a separate JavaScriptCore engine that '
+                + 'cannot address this buffer. The asynchronous form of whatever called this '
+                + 'works — esbuild\'s build() rather than buildSync(), for instance.'),
+                { code: 'ERR_ATOMICS_WAIT_UNAVAILABLE' });
+            }
+            return realWait.apply(this, arguments);
+          };
+        }
       }
       // node's child IPC defaults to `serialization: 'json'`, and only 'advanced' uses the
       // structured clone algorithm. The sweep that moved nine JSON sites onto the clone codec
@@ -5003,6 +5062,7 @@ final class NodeEngine: @unchecked Sendable {
       // continuation bit, and its numbers are DELTAS that accumulate across the whole file —
       // which is the part that catches people who decode it segment by segment.
       const SOURCE_MAP_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      globalThis.__rememberSourceMap = function(fileName, text) { rememberSourceMap(fileName, text); };
       function rememberSourceMap(fileName, text) {
         let parsed;
         try { parsed = JSON.parse(text); } catch (error) { return; }
@@ -5032,27 +5092,33 @@ final class NodeEngine: @unchecked Sendable {
               sourceIndex += values[1];
               sourceLine += values[2];
               sourceColumn += values[3];
-              segments.push([generatedColumn, sourceLine, sourceColumn]);
+              // The source INDEX matters as soon as the file is a bundle: one generated line
+              // can come from any of a hundred inputs, and a position without its file names
+              // the bundle, which is the thing the reader was trying to get out of.
+              segments.push([generatedColumn, sourceIndex, sourceLine, sourceColumn]);
             }
           }
           lines.push(segments);
         }
         globalThis.__sourceMaps = globalThis.__sourceMaps || {};
-        globalThis.__sourceMaps[fileName] = lines;
+        globalThis.__sourceMaps[fileName] = { lines: lines, sources: parsed.sources || [] };
       }
       /// Where a position in the COMPILED file was written in the source. "line:column", or an
       /// empty string for a file that was never compiled — which is most of them.
+      /// "source|line|column" — the source is as the map names it, relative to the compiled
+      /// file, and the caller resolves it. Empty for a file that was never compiled.
       globalThis.__mapPosition = function(fileName, line, column) {
         const maps = globalThis.__sourceMaps;
-        const lines = maps && maps[fileName];
-        if (!lines) return '';
-        const segments = lines[line - 1];
+        const map = maps && maps[fileName];
+        if (!map) return '';
+        const segments = map.lines[line - 1];
         if (!segments || !segments.length) return '';
         let best = segments[0];
         for (const segment of segments) {
           if (segment[0] <= column - 1) best = segment; else break;
         }
-        return (best[1] + 1) + ':' + (best[2] + 1);
+        const source = map.sources[best[1]] || '';
+        return source + '|' + (best[2] + 1) + '|' + (best[3] + 1);
       };
       globalThis.__esmDefault = function(m) { return m && m.__esModule ? m.default : m; };
       // An imported binding, read now if it can be. If the exporting module is mid-cycle its
@@ -7741,13 +7807,40 @@ final class NodeEngine: @unchecked Sendable {
           return entry;
         }
         fs.openSync = function(file, flags, mode) {
-          flags = String(flags === undefined ? 'r' : flags);
           const path = resolvePath(file);
-          if (flags.includes('w')) fs.writeFileSync(path, '');
-          else if (flags.includes('a')) { if (!fs.existsSync(path)) fs.writeFileSync(path, ''); }
-          else if (!fs.existsSync(path)) fs._fail('ENOENT', 'open', file, 'no such file or directory');
+          // NUMERIC flags are how a syscall layer opens a file — Go's wasm runtime and every
+          // WASI shim pass O_WRONLY|O_CREAT|O_TRUNC as a number, and `String(flags)` turned that
+          // into "1537", which contains neither 'w' nor 'a' and so read as read-only. esbuild's
+          // own output is written that way.
+          let writable = false, append = false, truncate = false, create = false, exclusive = false;
+          if (typeof flags === 'number') {
+            writable = (flags & 3) !== 0;              // O_WRONLY | O_RDWR
+            append = (flags & 8) !== 0;                // O_APPEND
+            create = (flags & 512) !== 0;              // O_CREAT
+            truncate = (flags & 1024) !== 0;           // O_TRUNC
+            exclusive = (flags & 2048) !== 0;          // O_EXCL
+          } else {
+            const text = String(flags === undefined ? 'r' : flags);
+            append = text.includes('a');
+            truncate = text.includes('w');
+            create = truncate || append;
+            exclusive = text.includes('x');
+            writable = create || text.includes('+');
+          }
+          const exists = fs.existsSync(path);
+          if (exclusive && exists) fs._fail('EEXIST', 'open', file, 'file already exists');
+          if (!exists) {
+            if (!create) fs._fail('ENOENT', 'open', file, 'no such file or directory');
+            fs.writeFileSync(path, '');
+          } else if (truncate) {
+            fs.writeFileSync(path, '');
+          }
           const fd = nextFd++;
-          fileDescriptors[fd] = { path: path, flags: flags, position: 0 };
+          // A descriptor keeps its own position, and an appending one starts at the end.
+          fileDescriptors[fd] = {
+            path: path, flags: flags, writable: writable, append: append,
+            position: append && exists && !truncate ? fs.statSync(path).size : 0,
+          };
           return fd;
         };
         // writeSync(fd, buffer[, offset[, length[, position]]]) — honor the slice, or a
@@ -7770,7 +7863,23 @@ final class NodeEngine: @unchecked Sendable {
           const encoding = __stdioBinary ? 'latin1' : 'utf8';
           if (fd === 1) { bridge.stdout(buffer.toString(encoding)); return buffer.length; }
           if (fd === 2) { bridge.stderr(buffer.toString(encoding)); return buffer.length; }
-          fs.appendFileSync(descriptor(fd).path, buffer);
+          // A write goes AT a position — the one given, or the descriptor's own, which then
+          // advances. Appending unconditionally made two writes to one descriptor produce the
+          // content twice, and made a positional write land at the end instead.
+          const entry = descriptor(fd);
+          const at = typeof position === 'number' ? position
+                   : (entry.append ? fs.statSync(entry.path).size : entry.position);
+          const existing = fs.existsSync(entry.path) ? fs.readFileSync(entry.path) : Buffer.alloc(0);
+          if (at >= existing.length) {
+            // The ordinary case — writing at or past the end — stays a single append.
+            const gap = at > existing.length ? Buffer.alloc(at - existing.length) : Buffer.alloc(0);
+            fs.appendFileSync(entry.path, gap.length ? Buffer.concat([gap, buffer]) : buffer);
+          } else {
+            const tail = at + buffer.length < existing.length
+              ? existing.slice(at + buffer.length) : Buffer.alloc(0);
+            fs.writeFileSync(entry.path, Buffer.concat([existing.slice(0, at), buffer, tail]));
+          }
+          if (typeof position !== 'number') entry.position = at + buffer.length;
           return buffer.length;
         };
         fs.readSync = function(fd, buffer, offset, length, position) {
