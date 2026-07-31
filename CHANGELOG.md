@@ -258,6 +258,13 @@ carry breaking changes.
   in the engine the whole time.
 
 ### Fixed
+- Node layer: a stream decodes a string chunk before `_write` sees it — `write(text, 'hex')` is
+  the bytes those characters spell, not the characters — and `setDefaultEncoding` now applies.
+- Node layer: `readable.read(size)` returns exactly that many bytes and keeps the rest. It
+  returned everything, so a second read saw `null` and read as end-of-stream — how a framed
+  protocol breaks.
+- Node layer: `crypto.timingSafeEqual` carries `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH`, and
+  `util.promisify` honours a function's own `util.promisify.custom`.
 - Node layer: `fs.readSync`/`fs.read` accept node's options-object form
   (`{ offset, length, position }`), which read nothing at all before.
 - Node layer: `fs.mkdirSync(path, { recursive: true })` returns the first path it created, as

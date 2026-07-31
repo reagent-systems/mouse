@@ -7009,6 +7009,11 @@ final class NodeEngine: @unchecked Sendable {
             Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
           },
           promisify: function(fn) {
+            // A function may carry its OWN promise version under util.promisify.custom, and node
+            // hands that back untouched — the shape libraries use when the callback form is not
+            // a plain (error, value).
+            const custom = fn && fn[Symbol.for('nodejs.util.promisify.custom')];
+            if (typeof custom === 'function') return custom;
             return function(...args) {
               return new Promise((resolve, reject) => {
                 fn.call(this, ...args, (error, value) => error ? reject(error) : resolve(value));
@@ -9081,6 +9086,16 @@ final class NodeEngine: @unchecked Sendable {
             const joined = Buffer.concat(this._buf.map(function(chunk) {
               return typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk);
             }));
+            // `read(n)` asks for exactly n bytes and leaves the rest — a framed protocol reads
+            // its header that way and then its body. Handing back everything made the second
+            // read return null, which reads as "the stream ended".
+            const wanted = typeof size === 'number' && size > 0 ? size : joined.length;
+            if (wanted < joined.length) {
+              const taken = joined.slice(0, wanted);
+              this._buf = [joined.slice(wanted)];
+              return this._readableEncoding && this._readableEncoding !== 'buffer'
+                ? taken.toString(this._readableEncoding) : taken;
+            }
             this._buf = [];
             this._maybeEnd();
             if (this._readableEncoding && this._readableEncoding !== 'buffer') {
@@ -9319,7 +9334,15 @@ final class NodeEngine: @unchecked Sendable {
           write(chunk, encoding, callback) {
             if (typeof encoding === 'function') { callback = encoding; encoding = null; }
             if (this._writableEnded) { this.emit('error', new Error('write after end')); return false; }
-            this._wbuf.push([chunk, encoding || 'utf8', callback]);
+            // A string is DECODED here, by the encoding given or the stream's default, and
+            // `_write` is then told 'buffer' — node's `decodeStrings` behaviour, and the reason
+            // `write(text, 'hex')` means bytes rather than the characters "68690a". Passing the
+            // string through with its encoding name made every non-utf8 write wrong.
+            if (typeof chunk === 'string' && !this._writableObjectMode && this._decodeStrings !== false) {
+              chunk = Buffer.from(chunk, encoding || this._defaultEncoding || 'utf8');
+              encoding = 'buffer';
+            }
+            this._wbuf.push([chunk, encoding || (this._writableObjectMode ? null : 'utf8'), callback]);
             // Measured BEFORE flushing, because _flushWrites shifts the entry out as soon as it
             // hands it to _write — the write is still in flight at that point, so measuring after
             // reports an empty buffer and never signals backpressure.
@@ -14226,7 +14249,10 @@ final class NodeEngine: @unchecked Sendable {
             return result;
           },
           timingSafeEqual: function(a, b) {
-            if (a.length !== b.length) throw new RangeError('Input buffers must have the same byte length');
+            if (a.length !== b.length) {
+              throw Object.assign(new RangeError('Input buffers must have the same byte length'),
+                                  { code: 'ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH' });
+            }
             let diff = 0;
             for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
             return diff === 0;
