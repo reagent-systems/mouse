@@ -654,6 +654,9 @@ final class NodeEngine: @unchecked Sendable {
             }
             var thrown: JSValue? = nil
             guest.exceptionHandler = { _, exception in thrown = exception }
+            // Bind first as well as after: a key added to the sandbox BETWEEN runs should be
+            // visible to the next one, and binding only afterwards made it visible one run late.
+            guest.objectForKeyedSubscript("__vmSyncBack")?.call(withArguments: [])
             let result = guest.evaluateScript(code, withSourceURL: URL(string: "mouse-vm://" + (filename.hasPrefix("/") ? filename : "/" + filename)))
             // Globals CREATED inside the run are new properties on the guest global; node shows
             // them on the sandbox, so they are copied over and given accessors from now on.
@@ -10698,7 +10701,52 @@ final class NodeEngine: @unchecked Sendable {
             if (!port._queue || !port._queue.length) return undefined;
             return { message: port._queue.shift() };
           },
-          moveMessagePortToContext: function(){ throw refuseWorker('moveMessagePortToContext', 'contexts here are separate engines with no shared memory'); },
+          // The refusal here read "contexts are separate engines with no shared memory", which
+          // was true when a vm context WAS another engine. It is not any more: a context is a
+          // second JSContext in this engine's virtual machine, so values cross freely and a
+          // port can simply be given a face inside it. The reason expired when vm contexts
+          // became real; nothing about this was ever impossible.
+          moveMessagePortToContext: function(port, context) {
+            if (!port || typeof port.postMessage !== 'function') {
+              const error = new TypeError('The "port" argument must be a MessagePort instance');
+              error.code = 'ERR_INVALID_ARG_TYPE';
+              throw error;
+            }
+            // Hand the real port to the context, then build its counterpart there. node returns
+            // the WEB-shaped port — postMessage and onmessage, no EventEmitter surface.
+            context.__mouseMovedPort = port;
+            const moved = globalThis.__vmRunIn(context, `(function(){
+              const source = __mouseMovedPort;
+              // A web-shaped port stays CLOSED until started: assigning onmessage is not
+              // enough, and messages that arrive first wait rather than being dropped. Node
+              // behaves this way and a plausible guess (deliver as soon as a handler exists)
+              // does not — measured, not assumed.
+              let started = false;
+              const waiting = [];
+              const port = {
+                onmessage: null,
+                onmessageerror: null,
+                postMessage: function(message) { source.postMessage(message); },
+                close: function() { source.close(); },
+                start: function() {
+                  started = true;
+                  while (waiting.length) {
+                    const message = waiting.shift();
+                    if (typeof port.onmessage === 'function') port.onmessage({ data: message });
+                  }
+                },
+                ref: function() {}, unref: function() {},
+                hasRef: function() { return false; },
+              };
+              source.on('message', function(message) {
+                if (!started) { waiting.push(message); return; }
+                if (typeof port.onmessage === 'function') port.onmessage({ data: message });
+              });
+              return port;
+            })()`);
+            delete context.__mouseMovedPort;
+            return moved;
+          },
           markAsUntransferable: function(){},
           isMarkedAsUntransferable: function(){ return false; },
           setEnvironmentData: function(key, value) {
@@ -10816,6 +10864,17 @@ final class NodeEngine: @unchecked Sendable {
           }
           return result;
         }
+        // worker_threads needs to build an object INSIDE a context (moveMessagePortToContext),
+        // and the two live in separate factories.
+        globalThis.__vmRunIn = function(contextObject, code) {
+          const handle = handles.get(contextObject);
+          if (handle === undefined) {
+            const error = new TypeError('The "contextifiedObject" argument must be a vm.Context');
+            error.code = 'ERR_INVALID_ARG_TYPE';
+            throw error;
+          }
+          return run(handle, code, { filename: 'moveMessagePortToContext' });
+        };
         function createContext(sandbox) {
           const target = sandbox === undefined || sandbox === null ? {} : sandbox;
           if (handles.has(target)) return target;

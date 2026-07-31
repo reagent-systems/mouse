@@ -8,6 +8,10 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: `worker_threads.moveMessagePortToContext()` works — a port handed into a `vm`
+  context posts to its peer and receives through `onmessage` once started, with node's
+  web-shaped port and node's `ERR_INVALID_ARG_TYPE` for a non-context.
+
 - Node layer: the rest of the fetch `Request` surface (`mode`, `credentials`, `cache`,
   `referrer`, `referrerPolicy`, `integrity`, `keepalive`, `destination`, `duplex` and the
   navigation flags), and `net.Socket`'s `bufferSize`, `localFamily`, `resetAndDestroy` and
