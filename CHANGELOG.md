@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **HPACK** (RFC 7541) — prefix integers, literals with and without Huffman, all
+  five field representations, and the dynamic table with size-based eviction. The Huffman and
+  static tables are transcribed from the RFC's appendices, and it is verified against the RFC's
+  own worked examples, both series of three messages, in both spellings. This is the half of
+  HTTP/2 that is hard; the framing follows.
 - Node layer: **a stack trace out of a bundle names the author's file and line**. Any loaded
   file's `//# sourceMappingURL` is honoured — inline `data:` URI or a `.map` beside it — which
   node does only under `--enable-source-maps`; here it is the default, because a trace into line

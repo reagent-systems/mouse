@@ -6352,6 +6352,236 @@ final class NodeEngine: @unchecked Sendable {
       // expects to find. It is what stands between this engine and every napi-rs package's
       // portable build (rolldown, oxc, lightningcss all ship one), and it is ordinary work:
       // the calls are pointers into the instance's memory, and the file ones are our own fs.
+      // ---- HPACK (RFC 7541): the header compression HTTP/2 speaks ----
+      // Both tables are the RFC's own, transcribed from its appendices rather than typed out:
+      // 257 Huffman codes (Appendix B) as "hex,bits" pairs, and the 61-entry static table
+      // (Appendix A) as name-tab-value. A transcription can be checked; a retyping cannot.
+      const HPACK_HUFFMAN_TABLE = '1ff8,13 7fffd8,23 fffffe2,28 fffffe3,28 fffffe4,28 fffffe5,28 fffffe6,28 fffffe7,28 fffffe8,28 ffffea,24 3ffffffc,30 fffffe9,28 fffffea,28 3ffffffd,30 fffffeb,28 fffffec,28 fffffed,28 fffffee,28 fffffef,28 ffffff0,28 ffffff1,28 ffffff2,28 3ffffffe,30 ffffff3,28 ffffff4,28 ffffff5,28 ffffff6,28 ffffff7,28 ffffff8,28 ffffff9,28 ffffffa,28 ffffffb,28 14,6 3f8,10 3f9,10 ffa,12 1ff9,13 15,6 f8,8 7fa,11 3fa,10 3fb,10 f9,8 7fb,11 fa,8 16,6 17,6 18,6 0,5 1,5 2,5 19,6 1a,6 1b,6 1c,6 1d,6 1e,6 1f,6 5c,7 fb,8 7ffc,15 20,6 ffb,12 3fc,10 1ffa,13 21,6 5d,7 5e,7 5f,7 60,7 61,7 62,7 63,7 64,7 65,7 66,7 67,7 68,7 69,7 6a,7 6b,7 6c,7 6d,7 6e,7 6f,7 70,7 71,7 72,7 fc,8 73,7 fd,8 1ffb,13 7fff0,19 1ffc,13 3ffc,14 22,6 7ffd,15 3,5 23,6 4,5 24,6 5,5 25,6 26,6 27,6 6,5 74,7 75,7 28,6 29,6 2a,6 7,5 2b,6 76,7 2c,6 8,5 9,5 2d,6 77,7 78,7 79,7 7a,7 7b,7 7ffe,15 7fc,11 3ffd,14 1ffd,13 ffffffc,28 fffe6,20 3fffd2,22 fffe7,20 fffe8,20 3fffd3,22 3fffd4,22 3fffd5,22 7fffd9,23 3fffd6,22 7fffda,23 7fffdb,23 7fffdc,23 7fffdd,23 7fffde,23 ffffeb,24 7fffdf,23 ffffec,24 ffffed,24 3fffd7,22 7fffe0,23 ffffee,24 7fffe1,23 7fffe2,23 7fffe3,23 7fffe4,23 1fffdc,21 3fffd8,22 7fffe5,23 3fffd9,22 7fffe6,23 7fffe7,23 ffffef,24 3fffda,22 1fffdd,21 fffe9,20 3fffdb,22 3fffdc,22 7fffe8,23 7fffe9,23 1fffde,21 7fffea,23 3fffdd,22 3fffde,22 fffff0,24 1fffdf,21 3fffdf,22 7fffeb,23 7fffec,23 1fffe0,21 1fffe1,21 3fffe0,22 1fffe2,21 7fffed,23 3fffe1,22 7fffee,23 7fffef,23 fffea,20 3fffe2,22 3fffe3,22 3fffe4,22 7ffff0,23 3fffe5,22 3fffe6,22 7ffff1,23 3ffffe0,26 3ffffe1,26 fffeb,20 7fff1,19 3fffe7,22 7ffff2,23 3fffe8,22 1ffffec,25 3ffffe2,26 3ffffe3,26 3ffffe4,26 7ffffde,27 7ffffdf,27 3ffffe5,26 fffff1,24 1ffffed,25 7fff2,19 1fffe3,21 3ffffe6,26 7ffffe0,27 7ffffe1,27 3ffffe7,26 7ffffe2,27 fffff2,24 1fffe4,21 1fffe5,21 3ffffe8,26 3ffffe9,26 ffffffd,28 7ffffe3,27 7ffffe4,27 7ffffe5,27 fffec,20 fffff3,24 fffed,20 1fffe6,21 3fffe9,22 1fffe7,21 1fffe8,21 7ffff3,23 3fffea,22 3fffeb,22 1ffffee,25 1ffffef,25 fffff4,24 fffff5,24 3ffffea,26 7ffff4,23 3ffffeb,26 7ffffe6,27 3ffffec,26 3ffffed,26 7ffffe7,27 7ffffe8,27 7ffffe9,27 7ffffea,27 7ffffeb,27 ffffffe,28 7ffffec,27 7ffffed,27 7ffffee,27 7ffffef,27 7fffff0,27 3ffffee,26 3fffffff,30';
+      const HPACK_STATIC_TABLE = ':authority	|:method	GET|:method	POST|:path	/|:path	/index.html|:scheme	http|:scheme	https|:status	200|:status	204|:status	206|:status	304|:status	400|:status	404|:status	500|accept-charset	|accept-encoding	gzip, deflate|accept-language	|accept-ranges	|accept	|access-control-allow-origin	|age	|allow	|authorization	|cache-control	|content-disposition	|content-encoding	|content-language	|content-length	|content-location	|content-range	|content-type	|cookie	|date	|etag	|expect	|expires	|from	|host	|if-match	|if-modified-since	|if-none-match	|if-range	|if-unmodified-since	|last-modified	|link	|location	|max-forwards	|proxy-authenticate	|proxy-authorization	|range	|referer	|refresh	|retry-after	|server	|set-cookie	|strict-transport-security	|transfer-encoding	|user-agent	|vary	|via	|www-authenticate';
+      const hpack = (function() {
+        const codes = HPACK_HUFFMAN_TABLE.split(' ').map(function(pair) {
+          const parts = pair.split(',');
+          return [parseInt(parts[0], 16), Number(parts[1])];
+        });
+        const staticTable = [null].concat(HPACK_STATIC_TABLE.split('|').map(function(entry) {
+          const parts = entry.split('\t');
+          return [parts[0], parts[1] === undefined ? '' : parts[1]];
+        }));
+
+        // A decoding TREE, built once: walking bit by bit is what makes a canonical Huffman
+        // code decodable without knowing where a symbol ends.
+        let decodeTree = null;
+        function buildTree() {
+          const root = [null, null];
+          for (let symbol = 0; symbol < codes.length; symbol += 1) {
+            const code = codes[symbol][0], length = codes[symbol][1];
+            let node = root;
+            for (let bit = length - 1; bit >= 0; bit -= 1) {
+              const side = (code >>> bit) & 1;
+              if (!node[side]) node[side] = [null, null];
+              node = node[side];
+            }
+            node.symbol = symbol;
+          }
+          return root;
+        }
+
+        function huffmanEncode(text) {
+          const source = Buffer.from(text, 'utf8');
+          const out = [];
+          let current = 0, bits = 0;
+          for (let index = 0; index < source.length; index += 1) {
+            const entry = codes[source[index]];
+            current = (current * Math.pow(2, entry[1])) + entry[0];
+            bits += entry[1];
+            while (bits >= 8) {
+              bits -= 8;
+              out.push(Math.floor(current / Math.pow(2, bits)) & 0xff);
+              current = current % Math.pow(2, bits);
+            }
+          }
+          // The remainder is padded with ONES — the prefix of EOS, which is what tells a
+          // decoder the padding is padding and not another symbol.
+          if (bits > 0) out.push(((current * Math.pow(2, 8 - bits)) | ((1 << (8 - bits)) - 1)) & 0xff);
+          return Buffer.from(out);
+        }
+
+        function huffmanDecode(bytes) {
+          if (!decodeTree) decodeTree = buildTree();
+          const out = [];
+          let node = decodeTree;
+          for (let index = 0; index < bytes.length; index += 1) {
+            for (let bit = 7; bit >= 0; bit -= 1) {
+              node = node[(bytes[index] >>> bit) & 1];
+              if (!node) throw new Error('HPACK: invalid Huffman code');
+              if (node.symbol !== undefined) {
+                if (node.symbol === 256) throw new Error('HPACK: EOS in a string literal');
+                out.push(node.symbol);
+                node = decodeTree;
+              }
+            }
+          }
+          return Buffer.from(out).toString('utf8');
+        }
+
+        /// The prefix integer: N bits in the first byte, then continuation bytes of 7 bits.
+        function encodeInteger(value, prefixBits, firstByte) {
+          const max = (1 << prefixBits) - 1;
+          if (value < max) return [firstByte | value];
+          const out = [firstByte | max];
+          let rest = value - max;
+          while (rest >= 128) { out.push((rest % 128) + 128); rest = Math.floor(rest / 128); }
+          out.push(rest);
+          return out;
+        }
+        function decodeInteger(bytes, offset, prefixBits) {
+          const max = (1 << prefixBits) - 1;
+          let value = bytes[offset] & max;
+          offset += 1;
+          if (value === max) {
+            let shift = 0, byte;
+            do {
+              byte = bytes[offset++];
+              value += (byte & 127) * Math.pow(2, shift);
+              shift += 7;
+            } while (byte & 128);
+          }
+          return { value: value, offset: offset };
+        }
+
+        function encodeString(text, useHuffman) {
+          const raw = Buffer.from(text, 'utf8');
+          const packed = useHuffman ? huffmanEncode(text) : null;
+          // Huffman when it is NOT LONGER, not only when strictly shorter — the RFC's own
+          // examples encode a three-byte value that Huffman leaves at three bytes, and an
+          // encoder that requires an improvement disagrees with them.
+          if (packed && packed.length <= raw.length) {
+            return Buffer.concat([Buffer.from(encodeInteger(packed.length, 7, 0x80)), packed]);
+          }
+          return Buffer.concat([Buffer.from(encodeInteger(raw.length, 7, 0)), raw]);
+        }
+
+        /// A table of its own per connection and per direction: the peer's dynamic table is
+        /// built by REPLAYING what it sent, so an encoder and a decoder must never share one.
+        function Table(maxSize) {
+          this.entries = [];
+          this.size = 0;
+          this.maxSize = maxSize === undefined ? 4096 : maxSize;
+        }
+        Table.prototype.add = function(name, value) {
+          const cost = name.length + value.length + 32;
+          this.entries.unshift([name, value, cost]);
+          this.size += cost;
+          this.evict();
+        };
+        Table.prototype.evict = function() {
+          while (this.size > this.maxSize && this.entries.length) {
+            this.size -= this.entries.pop()[2];
+          }
+        };
+        Table.prototype.get = function(index) {
+          if (index < staticTable.length) return staticTable[index];
+          const entry = this.entries[index - staticTable.length];
+          if (!entry) throw new Error('HPACK: index ' + index + ' is out of range');
+          return entry;
+        };
+        Table.prototype.find = function(name, value) {
+          for (let index = 1; index < staticTable.length; index += 1) {
+            if (staticTable[index][0] === name && staticTable[index][1] === value) {
+              return { index: index, full: true };
+            }
+          }
+          for (let index = 0; index < this.entries.length; index += 1) {
+            if (this.entries[index][0] === name && this.entries[index][1] === value) {
+              return { index: index + staticTable.length, full: true };
+            }
+          }
+          for (let index = 1; index < staticTable.length; index += 1) {
+            if (staticTable[index][0] === name) return { index: index, full: false };
+          }
+          for (let index = 0; index < this.entries.length; index += 1) {
+            if (this.entries[index][0] === name) return { index: index + staticTable.length, full: false };
+          }
+          return null;
+        };
+
+        function Encoder(maxSize) { this.table = new Table(maxSize); }
+        Encoder.prototype.encode = function(headers, options) {
+          const useHuffman = !options || options.huffman !== false;
+          const neverIndex = (options && options.neverIndex) || [];
+          const pieces = [];
+          for (const pair of headers) {
+            const name = String(pair[0]).toLowerCase(), value = String(pair[1]);
+            if (neverIndex.indexOf(name) >= 0) {
+              pieces.push(Buffer.from(encodeInteger(0, 4, 0x10)));
+              pieces.push(encodeString(name, useHuffman));
+              pieces.push(encodeString(value, useHuffman));
+              continue;
+            }
+            const found = this.table.find(name, value);
+            if (found && found.full) {
+              pieces.push(Buffer.from(encodeInteger(found.index, 7, 0x80)));
+              continue;
+            }
+            if (found) {
+              pieces.push(Buffer.from(encodeInteger(found.index, 6, 0x40)));
+            } else {
+              pieces.push(Buffer.from(encodeInteger(0, 6, 0x40)));
+              pieces.push(encodeString(name, useHuffman));
+            }
+            pieces.push(encodeString(value, useHuffman));
+            this.table.add(name, value);
+          }
+          return Buffer.concat(pieces);
+        };
+
+        function Decoder(maxSize) { this.table = new Table(maxSize); }
+        Decoder.prototype.decode = function(bytes) {
+          const headers = [];
+          let offset = 0;
+          const readString = function(table) {
+            const huffman = (bytes[offset] & 0x80) !== 0;
+            const header = decodeInteger(bytes, offset, 7);
+            offset = header.offset;
+            const slice = bytes.slice(offset, offset + header.value);
+            offset += header.value;
+            return huffman ? huffmanDecode(slice) : slice.toString('utf8');
+          };
+          while (offset < bytes.length) {
+            const first = bytes[offset];
+            if (first & 0x80) {                                  // indexed
+              const read = decodeInteger(bytes, offset, 7);
+              offset = read.offset;
+              const entry = this.table.get(read.value);
+              headers.push([entry[0], entry[1]]);
+              continue;
+            }
+            if ((first & 0xe0) === 0x20) {                        // dynamic table size update
+              const read = decodeInteger(bytes, offset, 5);
+              offset = read.offset;
+              this.table.maxSize = read.value;
+              this.table.evict();
+              continue;
+            }
+            const indexed = (first & 0x40) !== 0;                 // incremental indexing
+            const prefix = indexed ? 6 : 4;
+            const read = decodeInteger(bytes, offset, prefix);
+            offset = read.offset;
+            let name;
+            if (read.value === 0) { name = readString(this.table); }
+            else { name = this.table.get(read.value)[0]; }
+            const value = readString(this.table);
+            headers.push([name, value]);
+            if (indexed) this.table.add(name, value);
+          }
+          return headers;
+        };
+
+        return { Encoder: Encoder, Decoder: Decoder, huffmanEncode: huffmanEncode,
+                 huffmanDecode: huffmanDecode, staticTable: staticTable };
+      })();
+      globalThis.__hpack = hpack;
+
       coreFactories.wasi = function() {
         const fs = coreRequire('fs');
         const pathModule = coreRequire('path');
