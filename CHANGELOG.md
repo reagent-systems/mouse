@@ -8,6 +8,12 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **`http2.createServer` is real** — cleartext h2c on the engine's own TCP sockets,
+  with frame reading and writing, the connection preface, SETTINGS, HEADERS with CONTINUATION,
+  DATA with flow-control credit, PING, GOAWAY and RST_STREAM, over the HPACK from the previous
+  boundary. Verified against **real node's http2 client**: headers and bodies both ways, a 404,
+  three streams multiplexed on one connection, a 40 KB body across frames, and a PING answered.
+  `http2.connect` (the client half) and `createSecureServer` (which needs ALPN over TLS) say so.
 - Node layer: **HPACK** (RFC 7541) — prefix integers, literals with and without Huffman, all
   five field representations, and the dynamic table with size-based eviction. The Huffman and
   static tables are transcribed from the RFC's appendices, and it is verified against the RFC's

@@ -12251,6 +12251,229 @@ final class NodeEngine: @unchecked Sendable {
       // http2: libraries import it for the constants and gate actual use behind feature
       // checks — the constants are real, sessions say what's missing.
       coreFactories.http2 = function() {
+        const net = coreRequire('net');
+        const { EventEmitter } = coreRequire('events');
+        const hpack = globalThis.__hpack;
+
+        const TYPE = { DATA: 0, HEADERS: 1, PRIORITY: 2, RST_STREAM: 3, SETTINGS: 4,
+                       PUSH_PROMISE: 5, PING: 6, GOAWAY: 7, WINDOW_UPDATE: 8, CONTINUATION: 9 };
+        const FLAG = { END_STREAM: 0x1, ACK: 0x1, END_HEADERS: 0x4, PADDED: 0x8, PRIORITY: 0x20 };
+        // The connection preface a client sends before anything else: bytes chosen to make an
+        // HTTP/1.1 server fail immediately rather than misread what follows.
+        const PREFACE = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n', 'latin1');
+
+        function frame(type, flags, streamId, payload) {
+          const body = payload || Buffer.alloc(0);
+          const header = Buffer.alloc(9);
+          header.writeUIntBE(body.length, 0, 3);
+          header[3] = type;
+          header[4] = flags;
+          header.writeUInt32BE(streamId >>> 0, 5);
+          return Buffer.concat([header, body]);
+        }
+
+        /// A session over one socket: the frame reader, the two HPACK tables, and the streams.
+        function ServerSession(socket, server) {
+          EventEmitter.call(this);
+          this.socket = socket;
+          this.server = server;
+          this.decoder = new hpack.Decoder(4096);
+          this.encoder = new hpack.Encoder(4096);
+          this.streams = new Map();
+          this.buffer = Buffer.alloc(0);
+          this.sawPreface = false;
+          // A header block can be split across CONTINUATION frames, and nothing else may come
+          // between them — so the pieces are held until END_HEADERS says the block is whole.
+          this.pendingHeaders = null;
+          const self = this;
+          socket.on('data', function(chunk) { self._receive(chunk); });
+          socket.on('error', function(error) { self.emit('error', error); });
+          socket.on('close', function() { self.emit('close'); });
+          // Our own SETTINGS go out immediately; the client's arrive when they arrive.
+          socket.write(frame(TYPE.SETTINGS, 0, 0, Buffer.alloc(0)));
+        }
+        ServerSession.prototype = Object.create(EventEmitter.prototype);
+        ServerSession.prototype.constructor = ServerSession;
+
+        ServerSession.prototype._receive = function(chunk) {
+          this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
+          if (!this.sawPreface) {
+            if (this.buffer.length < PREFACE.length) return;
+            if (!this.buffer.slice(0, PREFACE.length).equals(PREFACE)) {
+              this.socket.destroy();
+              return;
+            }
+            this.sawPreface = true;
+            this.buffer = this.buffer.slice(PREFACE.length);
+          }
+          while (this.buffer.length >= 9) {
+            const length = this.buffer.readUIntBE(0, 3);
+            if (this.buffer.length < 9 + length) return;
+            const type = this.buffer[3], flags = this.buffer[4];
+            const streamId = this.buffer.readUInt32BE(5) & 0x7fffffff;
+            const payload = this.buffer.slice(9, 9 + length);
+            this.buffer = this.buffer.slice(9 + length);
+            try { this._frame(type, flags, streamId, payload); }
+            catch (error) { this.emit('error', error); this.socket.destroy(); return; }
+          }
+        };
+
+        ServerSession.prototype._frame = function(type, flags, streamId, payload) {
+          const self = this;
+          if (type === TYPE.SETTINGS) {
+            if (!(flags & FLAG.ACK)) this.socket.write(frame(TYPE.SETTINGS, FLAG.ACK, 0));
+            return;
+          }
+          if (type === TYPE.PING) {
+            if (!(flags & FLAG.ACK)) this.socket.write(frame(TYPE.PING, FLAG.ACK, 0, payload));
+            return;
+          }
+          if (type === TYPE.WINDOW_UPDATE || type === TYPE.PRIORITY) return;
+          if (type === TYPE.GOAWAY) { this.socket.end(); return; }
+          if (type === TYPE.RST_STREAM) {
+            const stream = this.streams.get(streamId);
+            if (stream) { stream.emit('aborted'); this.streams.delete(streamId); }
+            return;
+          }
+          if (type === TYPE.HEADERS || type === TYPE.CONTINUATION) {
+            let block = payload;
+            if (type === TYPE.HEADERS) {
+              let offset = 0, end = payload.length;
+              if (flags & FLAG.PADDED) { end -= payload[0]; offset = 1; }
+              if (flags & FLAG.PRIORITY) offset += 5;
+              block = payload.slice(offset, end);
+              this.pendingHeaders = { streamId: streamId, pieces: [block],
+                                      endStream: !!(flags & FLAG.END_STREAM) };
+            } else if (this.pendingHeaders) {
+              this.pendingHeaders.pieces.push(block);
+            }
+            if (!(flags & FLAG.END_HEADERS)) return;
+            const pending = this.pendingHeaders;
+            this.pendingHeaders = null;
+            // ONE decoder per connection, fed every block in order: the dynamic table is a
+            // shared history, so skipping or reordering a block corrupts everything after it.
+            const list = this.decoder.decode(Buffer.concat(pending.pieces));
+            const headers = {};
+            for (const pair of list) {
+              const name = pair[0];
+              if (headers[name] === undefined) headers[name] = pair[1];
+              else if (Array.isArray(headers[name])) headers[name].push(pair[1]);
+              else headers[name] = [headers[name], pair[1]];
+            }
+            const stream = new ServerStream(this, pending.streamId);
+            this.streams.set(pending.streamId, stream);
+            if (pending.endStream) { stream._endReceived(); }
+            this.emit('stream', stream, headers, flags);
+            if (this.server) this.server.emit('stream', stream, headers, flags);
+            return;
+          }
+          if (type === TYPE.DATA) {
+            const stream = this.streams.get(streamId);
+            let body = payload;
+            if (flags & FLAG.PADDED) body = payload.slice(1, payload.length - payload[0]);
+            if (stream && body.length) stream.emit('data', body);
+            // The window is credited back immediately: this end does not buffer, so holding
+            // the sender back would only stall a transfer nobody is waiting on.
+            if (body.length) {
+              const credit = Buffer.alloc(4);
+              credit.writeUInt32BE(body.length);
+              this.socket.write(frame(TYPE.WINDOW_UPDATE, 0, 0, credit));
+              if (stream) this.socket.write(frame(TYPE.WINDOW_UPDATE, 0, streamId, credit));
+            }
+            if (stream && (flags & FLAG.END_STREAM)) stream._endReceived();
+            return;
+          }
+        };
+
+        ServerSession.prototype.close = function(callback) {
+          const payload = Buffer.alloc(8);
+          payload.writeUInt32BE(0, 0);
+          payload.writeUInt32BE(0, 4);
+          this.socket.write(frame(TYPE.GOAWAY, 0, 0, payload));
+          this.socket.end();
+          if (callback) callback();
+        };
+
+        function ServerStream(session, id) {
+          EventEmitter.call(this);
+          this.session = session;
+          this.id = id;
+          this.headersSent = false;
+          this.closed = false;
+        }
+        ServerStream.prototype = Object.create(EventEmitter.prototype);
+        ServerStream.prototype.constructor = ServerStream;
+        ServerStream.prototype._endReceived = function() {
+          const self = this;
+          process.nextTick(function() { self.emit('end'); });
+        };
+        ServerStream.prototype.respond = function(headers, options) {
+          const list = [];
+          const status = (headers && headers[':status']) || 200;
+          list.push([':status', String(status)]);
+          for (const name of Object.keys(headers || {})) {
+            if (name === ':status') continue;
+            const value = headers[name];
+            if (Array.isArray(value)) { for (const item of value) list.push([name.toLowerCase(), String(item)]); }
+            else list.push([name.toLowerCase(), String(value)]);
+          }
+          const block = this.session.encoder.encode(list);
+          const endStream = !!(options && options.endStream);
+          this.session.socket.write(frame(TYPE.HEADERS, FLAG.END_HEADERS | (endStream ? FLAG.END_STREAM : 0),
+                                          this.id, block));
+          this.headersSent = true;
+          if (endStream) this.closed = true;
+        };
+        ServerStream.prototype.write = function(chunk, encoding, callback) {
+          if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+          if (!this.headersSent) this.respond({ ':status': 200 });
+          const body = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8');
+          // Frames are capped at the peer's max frame size; 16384 is the value every
+          // implementation must accept, so a body is cut to it rather than negotiated up.
+          for (let offset = 0; offset < body.length; offset += 16384) {
+            this.session.socket.write(frame(TYPE.DATA, 0, this.id, body.slice(offset, offset + 16384)));
+          }
+          if (callback) process.nextTick(callback);
+          return true;
+        };
+        ServerStream.prototype.end = function(chunk, encoding, callback) {
+          if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+          if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+          if (!this.headersSent) this.respond({ ':status': 200 });
+          if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+          this.session.socket.write(frame(TYPE.DATA, FLAG.END_STREAM, this.id, Buffer.alloc(0)));
+          this.closed = true;
+          const self = this;
+          process.nextTick(function() { self.emit('close'); if (callback) callback(); });
+          return this;
+        };
+        ServerStream.prototype.close = function() { this.closed = true; };
+
+        function Http2Server(options, handler) {
+          EventEmitter.call(this);
+          const self = this;
+          this.sessions = new Set();
+          this._server = net.createServer(function(socket) {
+            const session = new ServerSession(socket, self);
+            self.sessions.add(session);
+            session.on('close', function() { self.sessions.delete(session); });
+            self.emit('session', session);
+          });
+          if (typeof handler === 'function') this.on('stream', handler);
+        }
+        Http2Server.prototype = Object.create(EventEmitter.prototype);
+        Http2Server.prototype.constructor = Http2Server;
+        Http2Server.prototype.listen = function() {
+          this._server.listen.apply(this._server, arguments);
+          return this;
+        };
+        Http2Server.prototype.address = function() { return this._server.address(); };
+        Http2Server.prototype.close = function(callback) {
+          for (const session of this.sessions) session.socket.destroy();
+          this._server.close(callback);
+          return this;
+        };
+
         return {
           constants: {
             HTTP2_HEADER_METHOD: ':method', HTTP2_HEADER_PATH: ':path',
@@ -12259,16 +12482,18 @@ final class NodeEngine: @unchecked Sendable {
             HTTP2_HEADER_CONTENT_LENGTH: 'content-length',
             NGHTTP2_CANCEL: 8, NGHTTP2_NO_ERROR: 0,
           },
-          // Both of these used to blame missing HTTP support. HTTP/1.1 is real in both
-          // directions now, so the truth is narrower and specific to HTTP/2: it is a different
-          // protocol — binary framing, HPACK header compression, stream multiplexing — and that
-          // is an implementation, not a shim over what we have.
-          connect: function() {
-            throw Object.assign(new Error('http2.connect is not available: HTTP/2 is a different protocol (binary framing, HPACK, multiplexed streams), not a mode of HTTP/1.1 — which is real here in both directions'),
+          createServer: function(options, handler) {
+            if (typeof options === 'function') { handler = options; options = {}; }
+            return new Http2Server(options || {}, handler);
+          },
+          // TLS is the wall, not the protocol: h2 over TLS needs ALPN on a socket this device
+          // will not give us. Cleartext h2c is real above.
+          createSecureServer: function() {
+            throw Object.assign(new Error('http2.createSecureServer is not available: h2 over TLS needs ALPN negotiation on a raw socket, which this platform does not expose. http2.createServer (cleartext h2c) is real'),
                                 { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
           },
-          createServer: function() {
-            throw Object.assign(new Error('http2.createServer is not available: HTTP/2 needs binary framing and HPACK of its own; http.createServer is real, and h2 also requires ALPN over TLS we cannot negotiate on a raw socket'),
+          connect: function() {
+            throw Object.assign(new Error('http2.connect is not available: the client half of HTTP/2 is not written here. The SERVER half is — http2.createServer speaks cleartext h2c, framing and HPACK and all, and real node\'s client talks to it'),
                                 { code: 'ERR_METHOD_NOT_IMPLEMENTED' });
           },
         };
