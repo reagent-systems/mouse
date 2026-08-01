@@ -26,6 +26,7 @@
 		43DE04D20436A9255595520C /* GitHubAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7281C456E2B06017F80854A /* GitHubAuth.swift */; };
 		4AE107D17AAB32363E162AA3 /* NodeWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */; };
 		4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A88D15C6B606882BE9F472E /* PackageManager.swift */; };
+		516851F9284F04C69F6B3DA1 /* Runtimes.json in Resources */ = {isa = PBXBuildFile; fileRef = C698F23621B02ACFD773CEFC /* Runtimes.json */; };
 		5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 525AB48D09A783EF07137189 /* TerminalScreen.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
 		5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAE14386F75AAF0B835E324C /* GitHubPush.swift */; };
@@ -75,6 +76,7 @@
 		B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWidth.swift; sourceTree = "<group>"; };
 		BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		C5808E2C3F3EE351EB16E5DD /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
+		C698F23621B02ACFD773CEFC /* Runtimes.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Runtimes.json; sourceTree = "<group>"; };
 		C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeEngine.swift; sourceTree = "<group>"; };
 		CAE14386F75AAF0B835E324C /* GitHubPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubPush.swift; sourceTree = "<group>"; };
 		E2B92464EFB49888F46248A5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -147,6 +149,7 @@
 		FE32CC22FAA5C8462BC2A46A = {
 			isa = PBXGroup;
 			children = (
+				C698F23621B02ACFD773CEFC /* Runtimes.json */,
 				3F51774E2273014186C920CC /* Mouse */,
 				B3C547A114017E11349DB65E /* Products */,
 			);
@@ -210,6 +213,7 @@
 			files = (
 				7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */,
 				DC525882F3784C97FF273D57 /* IBMPlexMono-Bold.ttf in Resources */,
+				516851F9284F04C69F6B3DA1 /* Runtimes.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

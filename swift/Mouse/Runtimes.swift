@@ -95,7 +95,7 @@ enum RuntimeCatalog {
 enum RuntimeStore {
     /// On disk the store is `MouseRuntimes/usr/lib/<name>`, and the shell mounts the whole `usr`
     /// directory at `/usr`. The extra two levels are not decoration: an interpreter that
-    /// canonicalizes its load paths (Ruby's realpath) walks `/usr`, then `/usr/lib`, then
+    /// canonicalizes its load paths (realpath) walks `/usr`, then `/usr/lib`, then
     /// `/usr/lib/<name>` component by component, and a component that exists only as a
     /// mount-table prefix answers ENOENT. With the layout mirrored on disk, every ancestor a
     /// runtime names is a real directory.

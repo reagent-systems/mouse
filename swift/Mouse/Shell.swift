@@ -1255,8 +1255,9 @@ final class MouseShell {
         default:
             // Language runtimes dispatch from the catalog, not from case labels — `python` here
             // is data, and language N+1 is a catalog entry, not a Swift edit. The catalog knows
-            // an UNINSTALLED runtime's commands too, so `ruby` before `pkg install ruby` answers
-            // "not installed" (inside runtimeCmd) rather than lying with "command not found".
+            // an UNINSTALLED runtime's commands too, so its command before `pkg install <name>`
+            // answers "not installed" (inside runtimeCmd) rather than lying with "command not
+            // found".
             if let entry = RuntimeCatalog.entry(command: name) {
                 return await runtimeCmd(entry, args, stdin: stdin, context: context, interactive: interactive)
             }
