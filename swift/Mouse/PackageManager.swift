@@ -320,9 +320,28 @@ enum PackageManager {
         /// Highest version satisfying the range (the npm rule). "latest"-style dist-tags
         /// resolve through `dist-tags` first.
         func resolve(name: String, requirement: String) async throws -> ResolvedPackage {
+            // An ALIAS: `"local-name": "npm:real-name@range"` installs one package under a
+            // different directory name, and a tree may depend on two versions of the same
+            // package that way. Taking the alias to the registry asks for a package nobody
+            // published — n8n's tree does exactly this, and the 404 failed the whole install.
+            var name = name
+            var requirement = requirement.trimmingCharacters(in: .whitespaces)
+            if requirement.hasPrefix("npm:") {
+                let spec = String(requirement.dropFirst(4))
+                // The version separator is the LAST '@' that is not the scope's leading one,
+                // so `npm:@scope/pkg@^1` splits after the package name, not inside the scope.
+                let searchStart = spec.hasPrefix("@") ? spec.index(after: spec.startIndex) : spec.startIndex
+                if let at = spec[searchStart...].lastIndex(of: "@") {
+                    name = String(spec[spec.startIndex..<at])
+                    requirement = String(spec[spec.index(after: at)...])
+                } else {
+                    name = spec
+                    requirement = "*"
+                }
+                if requirement.isEmpty { requirement = "*" }
+            }
             let packument = try await packument(for: name)
             let versions = packument["versions"] as? [String: Any] ?? [:]
-            var requirement = requirement.trimmingCharacters(in: .whitespaces)
             if requirement.isEmpty { requirement = "*" }
             if let tags = packument["dist-tags"] as? [String: String], let tagged = tags[requirement] {
                 requirement = tagged
@@ -433,7 +452,10 @@ enum PackageManager {
                 path = "node_modules/\(name)"
             }
             seen.insert(path)
-            placements.append(Placement(package: package, path: path, installedAs: wasmSubstitutes[name] == nil ? nil : name))
+            // "requested as X, is really Y" covers both cases now: a wasm substitute standing in
+            // for a native package, and an npm: alias installing one package under another name.
+            placements.append(Placement(package: package, path: path,
+                                        installedAs: package.name == name ? nil : name))
             for (depName, depRequirement) in package.dependencies.sorted(by: { $0.key < $1.key }) {
                 queue.append((depName, depRequirement, path))
             }

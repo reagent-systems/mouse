@@ -201,6 +201,12 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Package manager: **npm `npm:` aliases** — a dependency declared as
+  `"local-name": "npm:real-name@range"` was carried to the registry under the alias, which
+  nobody published, so the whole install failed on a 404. The alias is parsed now: the real
+  package is fetched and installed under the requested name, so a tree can hold two majors of
+  one package side by side. Found by `npx n8n` on the simulator, which died on
+  `package not found: zod-from-json-schema-v3`.
 - Node layer: `monitorEventLoopDelay` reported a mean of 0 no matter what the loop was doing,
   and `eventLoopUtilization` did not exist. The loop now counts the time it spends asleep
   against the time it spends running callbacks, and the delay monitor samples real lateness.
