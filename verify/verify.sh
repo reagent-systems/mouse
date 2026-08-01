@@ -19,6 +19,8 @@ sources_for() {
   case "$1" in
     shell)     echo "$SHELL_SET" ;;
     tty|termtest) echo "$TERM_SET" ;;
+    # termsays drives the TerminalSession itself, so it needs the shell as well as the screen.
+    termsays)  echo "$SHELL_SET $M/Terminal.swift $M/Workspace.swift $M/CarouselDeck.swift" ;;
     *)         echo "$NODE_SET" ;;
   esac
 }

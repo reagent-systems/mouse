@@ -1,240 +1,8 @@
 import SwiftUI
 import JavaScriptCore
 
-/// The Terminal container (kind 5): a real terminal in look and feel — prompt, scrollback,
-/// mono — with switchable ENGINES behind one prompt (the top-left chip cycles them):
-///
-///   msh — Mouse's from-scratch POSIX-flavored shell (`Shell.swift`): pipes, redirection,
-///         quoting, variables, globs, history. iOS has no fork/exec, so a native shell is
-///         the honest terminal (the a-Shell model); `git`/`npm` engines arrive per roadmap.
-///   js  — JavaScriptCore REPL (system framework): evaluate JS with a persistent context,
-///         `console.log` captured to scrollback.
-///
-/// Engines that need real processes (ssh; Android's `/system/bin/sh` in the Kotlin app)
-/// join the same switcher rather than living inside msh. Output wraps, scrollback scrolls
-/// vertically, taps focus the prompt — all per the gesture law.
-@MainActor
-@Observable
-final class TerminalSession {
-    struct Line: Identifiable {
-        enum Kind {
-            case command, output, error
-        }
-
-        let id = UUID()
-        let text: String
-        let kind: Kind
-    }
-
-    enum Engine: String, CaseIterable {
-        case msh
-        case js
-    }
-
-    let root: URL
-    private(set) var lines: [Line] = []
-    var engine: Engine = .msh
-    /// True while a command is executing. Streaming commands (ping) hold this for their whole
-    /// run; any keypress at the prompt interrupts — the phone's Ctrl-C.
-    private(set) var isRunning = false
-
-    /// The full-screen program owning the terminal right now (less, top), or nil at the
-    /// prompt. While set, the container renders `screen` instead of the scrollback and every
-    /// keystroke routes to the program — the foreground-process model without fork/exec.
-    private(set) var program: TerminalProgram?
-    /// The grid a program draws into; its output feeds through `parser`.
-    let screen = TerminalScreen()
-    /// Bumped on every program write so SwiftUI redraws the grid (TerminalScreen itself is
-    /// deliberately not observable — it's a Foundation engine).
-    private(set) var screenGeneration = 0
-    @ObservationIgnored private lazy var parser = AnsiParser(screen: screen)
-    /// Last geometry the container measured; programs are born at this size.
-    @ObservationIgnored private var gridRows = 24
-    @ObservationIgnored private var gridColumns = 80
-
-    let shell = MouseShell()
-    @ObservationIgnored private lazy var javascript = JSEngine()
-    @ObservationIgnored private var runningTask: Task<Void, Never>?
-
-    init(root: URL) {
-        self.root = root
-    }
-
-    var prompt: String {
-        switch engine {
-        case .msh: (shell.cwd.isEmpty ? "~" : "~/" + shell.cwd) + " $"
-        case .js: "js>"
-        }
-    }
-
-    /// Cycle to the next engine (the switcher chip's action).
-    func switchEngine() {
-        let all = Engine.allCases
-        engine = all[(all.firstIndex(of: engine)! + 1) % all.count]
-        append("[engine: \(engine.rawValue)]", .output)
-    }
-
-    /// Returns false when the input was refused (a command is already running) so the prompt
-    /// field can keep its text.
-    @discardableResult
-    func run(_ raw: String, workspace: Workspace?, deck: CarouselDeck?) -> Bool {
-        guard !isRunning, program == nil else { return false }
-        let command = raw.trimmingCharacters(in: .whitespaces)
-        append("\(prompt) \(command)", .command)
-        guard !command.isEmpty else { return true }
-        switch engine {
-        case .msh: runShell(command, workspace: workspace, deck: deck)
-        case .js: runJavaScript(command)
-        }
-        return true
-    }
-
-    /// Interrupt a running command (any keypress triggers this). Prints the classic ^C
-    /// immediately; the command's own cancellation cleanup (ping's statistics line) follows
-    /// as it winds down.
-    func interrupt() {
-        if let program {
-            // ^C is a keystroke to a program — it decides what to do (and the host stops it
-            // when it has no SIGINT handler of its own).
-            program.input("\u{3}")
-            return
-        }
-        guard isRunning else { return }
-        append("^C", .command)
-        runningTask?.cancel()
-    }
-
-    // MARK: - Full-screen programs
-
-    /// Adopt a program: size the screen, hand it its IO, and give it the keyboard. Refused
-    /// (in the scrollback, honestly) if one is already running.
-    func launch(_ program: TerminalProgram) {
-        guard self.program == nil else {
-            report("\(program.title): a program is already running")
-            return
-        }
-        screen.resize(rows: gridRows, columns: gridColumns)
-        self.program = program
-        screenGeneration += 1
-        // Terminal query replies (DSR/DA/DECRQM) travel back to the program as keystrokes —
-        // the same path a real tty answers on. A program probing cursor position or feature
-        // support gets its answer and proceeds instead of blocking on stdin.
-        parser.respond = { [weak program] reply in program?.input(reply) }
-        program.start(io: TerminalProgramIO(
-            rows: gridRows,
-            columns: gridColumns,
-            write: { [weak self] text in
-                guard let self else { return }
-                self.parser.feed(text)
-                self.screenGeneration += 1
-            },
-            exit: { [weak self] in self?.programExited() }
-        ))
-    }
-
-    /// A keystroke while a program runs. Returns false when no program has the keyboard.
-    @discardableResult
-    func sendKey(_ text: String) -> Bool {
-        guard let program else { return false }
-        program.input(text)
-        return true
-    }
-
-    /// A special key (arrow, Home/End, F-key…) while a program runs. Encoded HERE because the
-    /// arrows' form depends on DECCKM — a mode the screen owns, not the keyboard layer.
-    @discardableResult
-    func sendSpecialKey(_ key: TerminalKey, _ modifiers: TerminalKey.Modifiers) -> Bool {
-        guard let program else { return false }
-        program.input(key.encoded(modifiers, applicationCursor: screen.applicationCursorKeys))
-        return true
-    }
-
-    /// Pasted text while a program runs. Wrapped in the bracketed-paste markers when the
-    /// program asked for them (`ESC[?2004h`), so a multi-line paste is one block, not a burst
-    /// of Enters. Returns false when no program has the keyboard (the field pastes normally).
-    @discardableResult
-    func sendPaste(_ text: String) -> Bool {
-        guard let program else { return false }
-        if screen.bracketedPaste {
-            program.input("\u{1b}[200~" + text + "\u{1b}[201~")
-        } else {
-            program.input(text)
-        }
-        return true
-    }
-
-    /// The container's measured geometry; resizes the grid and tells the program (SIGWINCH).
-    func setGridSize(rows: Int, columns: Int) {
-        let rows = max(4, rows), columns = max(20, columns)
-        guard rows != gridRows || columns != gridColumns else { return }
-        gridRows = rows
-        gridColumns = columns
-        guard program != nil else { return }
-        screen.resize(rows: rows, columns: columns)
-        screenGeneration += 1
-        program?.resize(rows: rows, columns: columns)
-    }
-
-    private func programExited() {
-        guard program != nil else { return }
-        program = nil
-        parser.respond = nil
-        // A crashed-out program must not strand the terminal on the alt screen.
-        if screen.isAlternate { parser.feed("\u{1b}[?25h\u{1b}[?1049l") }
-        screenGeneration += 1
-    }
-
-    private func runShell(_ command: String, workspace: Workspace?, deck: CarouselDeck?) {
-        let context = MouseShell.Context(
-            root: root,
-            markModified: { workspace?.markModified($0) },
-            openFile: { deck?.openFile($0) },
-            clear: { [weak self] in self?.lines = [] },
-            emit: { [weak self] output in
-                self?.append(output.text, output.isError ? .error : .output)
-            },
-            reloadTree: { workspace?.bumpTreeVersion() },
-            historyChanged: { workspace?.localHistoryChanged() },
-            githubToken: { GitHubAuth.shared.accessToken },
-            githubLogin: {
-                if case .signedIn(let login) = GitHubAuth.shared.phase { return login }
-                return nil
-            },
-            launchProgram: { [weak self] program in self?.launch(program) }
-        )
-        isRunning = true
-        runningTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await self.shell.execute(command, context: context)
-            if let echo = result.echoExpansion {
-                self.append("\(self.prompt) \(echo)", .command)
-            }
-            for output in result.outputs {
-                self.append(output.text, output.isError ? .error : .output)
-            }
-            self.isRunning = false
-        }
-    }
-
-    private func runJavaScript(_ command: String) {
-        for output in javascript.evaluate(command) {
-            append(output.text, output.isError ? .error : .output)
-        }
-    }
-
-    /// Surface something that happened OUTSIDE the prompt (a corner-slot action) in the
-    /// scrollback. The terminal is the app's one honest error surface: a failure belongs in
-    /// text you can read and scroll back to, not encoded in the color of a pill.
-    func report(_ text: String, isError: Bool = true) {
-        append(text, isError ? .error : .output)
-    }
-
-    private func append(_ text: String, _ kind: Line.Kind) {
-        lines.append(Line(text: text, kind: kind))
-        if lines.count > 500 { lines.removeFirst(lines.count - 500) }
-    }
-}
-
+// The terminal's VIEWS. Its logic lives in TerminalSession.swift, which builds without a
+// screen so the suite can drive it.
 struct TerminalContainerView: View {
     let deck: CarouselDeck?
 
@@ -283,7 +51,16 @@ struct TerminalContainerView: View {
                         TerminalPromptField(
                             isFocused: $promptFocused,
                             onCommand: { command in
-                                terminal.run(command, workspace: workspace, deck: deck)
+                                terminal.run(command, hooks: .init(
+                                    markModified: { workspace.markModified($0) },
+                                    openFile: { deck.openFile($0) },
+                                    reloadTree: { workspace.bumpTreeVersion() },
+                                    historyChanged: { workspace.localHistoryChanged() },
+                                    githubToken: { GitHubAuth.shared.accessToken },
+                                    githubLogin: {
+                                        if case .signedIn(let login) = GitHubAuth.shared.phase { return login }
+                                        return nil
+                                    }))
                             },
                             onKey: { key in terminal.sendKey(key) },
                             onSpecialKey: { key, modifiers in terminal.sendSpecialKey(key, modifiers) },
@@ -625,45 +402,6 @@ private final class ProgramKeyTextField: UITextField {
     }
 }
 
-/// The `js` engine: a persistent JavaScriptCore context (state survives between lines, like a
-/// browser console). `console.log` is captured into the scrollback; exceptions print as
-/// errors; a statement's value prints unless it's undefined.
-final class JSEngine {
-    private let context = JSContext()!
-    private var logged: [String] = []
-
-    init() {
-        let log: @convention(block) (String) -> Void = { [weak self] message in
-            self?.logged.append(message)
-        }
-        context.setObject(log, forKeyedSubscript: "__mouseLog" as NSString)
-        context.evaluateScript("""
-            var console = { log: function() {
-                __mouseLog(Array.prototype.map.call(arguments, String).join(' '));
-            }};
-            console.error = console.warn = console.info = console.log;
-        """)
-    }
-
-    func evaluate(_ source: String) -> [(text: String, isError: Bool)] {
-        logged = []
-        var outputs: [(String, Bool)] = []
-        context.exceptionHandler = { _, exception in
-            outputs.append((exception?.toString() ?? "exception", true))
-        }
-        let result = context.evaluateScript(source)
-        context.exceptionHandler = nil
-        outputs.insert(contentsOf: logged.map { ($0, false) }, at: 0)
-        if outputs.allSatisfy({ !$0.1 }), let result, !result.isUndefined {
-            outputs.append((result.toString() ?? "", false))
-        }
-        return outputs.map { (text: $0.0, isError: $0.1) }
-    }
-}
-
-/// The engine switcher: a small capsule in the terminal container's top-LEFT corner showing
-/// the active engine's name; tapping cycles engines. The counterpart of the top-right action
-/// chips, in the same drawn-not-symboled language.
 struct TerminalEngineChip: View {
     let session: TerminalSession
     let cornerRadius: CGFloat

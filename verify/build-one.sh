@@ -7,11 +7,15 @@ T="$(cd "$(dirname "$0")" && pwd)"
 NODE_SET="$M/NodeEngine.swift $M/NodeSockets.swift $M/NodeWatch.swift $M/NodeKeys.swift $M/NodeScrypt.swift $M/NodeBrotli.swift $M/NodeDNS.swift $M/PackageManager.swift"
 TERM_SET="$NODE_SET $M/TerminalScreen.swift $M/TerminalWidth.swift $M/TerminalPrograms.swift"
 SHELL_SET="$M/Shell.swift $M/ShellLanguage.swift $M/GitCore.swift $M/GitRemote.swift $TERM_SET"
+# The terminal SESSION — scrollback, engines, the run/interrupt path — without its SwiftUI views.
+SESSION_SET="$SHELL_SET $M/TerminalSession.swift"
 name="$1"; dir="$T/$name"
 # Pick the source set from what the harness actually REFERENCES, not from its name. Keying on
 # names meant every new terminal or shell harness failed to build until someone remembered to
 # add it here — which is a verification gap wearing the costume of a typo.
-if grep -qE 'Shell\(|ShellLanguage|GitCore|GitRemote' main_probe 2>/dev/null || \
+if grep -qE 'TerminalSession' "$dir/main.swift" 2>/dev/null; then
+  SRC="$SESSION_SET"
+elif grep -qE 'Shell\(|ShellLanguage|GitCore|GitRemote' main_probe 2>/dev/null || \
    grep -qE 'Shell\(|ShellLanguage|GitCore|GitRemote' "$dir/main.swift" 2>/dev/null; then
   SRC="$SHELL_SET"
 elif grep -qE 'TerminalScreen|TerminalWidth|TerminalProgram' "$dir/main.swift" 2>/dev/null; then
