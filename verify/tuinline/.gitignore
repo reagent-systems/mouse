@@ -1,0 +1,3 @@
+# The harness creates project/ itself on every run (app.js rewritten, @clack/prompts
+# installed on first run) — nothing in it is source.
+project/

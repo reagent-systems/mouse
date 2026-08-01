@@ -6274,10 +6274,19 @@ final class NodeEngine: @unchecked Sendable {
             updateLiveness();
             return this;
           },
-          once: function(event, handler){ return this.on(event, handler); },
+          // A real once: self-removing. Aliasing it to on() left every once-handler
+          // permanently subscribed — @clack's block() re-arms `once('keypress')` per key,
+          // so the alias DOUBLED the handler set on every keystroke.
+          once: function(event, handler){
+            const self = this;
+            const wrapped = function() { self.off(event, wrapped); handler.apply(null, arguments); };
+            wrapped.listener = handler;
+            return this.on(event, wrapped);
+          },
           off: function(event, handler){
             const list = listeners[event] || [];
-            const index = list.indexOf(handler);
+            // Match a once-wrapper by its `.listener`, the way node does.
+            const index = list.findIndex(function(h){ return h === handler || h.listener === handler; });
             if (index >= 0) list.splice(index, 1);
             updateLiveness();
             return this;
@@ -6295,7 +6304,6 @@ final class NodeEngine: @unchecked Sendable {
           pause: function(){ paused = true; updateLiveness(); return this; },
           isPaused: function(){ return paused; },
           destroy: function(){ paused = true; stream.emit('close'); return this; },
-          unpipe: function(){ return this; },
           get readableFlowing(){ return !paused; },
           get readable(){ return true; },
           read: function(){
@@ -6317,7 +6325,25 @@ final class NodeEngine: @unchecked Sendable {
               stream.emit('readable');
             }
           },
-          pipe: function(destination){ stream.on('data', c => destination.write(c)); return destination; },
+          // pipe/unpipe with the pairing REMEMBERED: prompt libraries pipe stdin into a
+          // private sink per prompt and unpipe on close. A no-op unpipe leaked one 'data'
+          // listener per completed prompt — and stdin liveness counts 'data' listeners, so
+          // a finished CLI's event loop was held open by prompts that no longer existed.
+          _pipes: [],
+          pipe: function(destination){
+            const handler = function(chunk){ destination.write(chunk); };
+            stream._pipes.push({ destination: destination, handler: handler });
+            stream.on('data', handler);
+            return destination;
+          },
+          unpipe: function(destination){
+            for (let i = stream._pipes.length - 1; i >= 0; i--) {
+              if (destination && stream._pipes[i].destination !== destination) continue;
+              stream.off('data', stream._pipes[i].handler);
+              stream._pipes.splice(i, 1);
+            }
+            return this;
+          },
           // `for await (const chunk of process.stdin)` is how a modern CLI reads piped input, and
           // it THREW here — stdin is hand-rolled rather than a real Readable, so it never gained
           // the iterator the stream classes have. A contract sweep across every stream-like
@@ -9634,10 +9660,65 @@ final class NodeEngine: @unchecked Sendable {
       coreFactories['path/win32'] = function() { return coreRequire('path').win32; };
 
       coreFactories.tty = function() {
+        const { Writable } = coreRequire('stream');
+        // A tty.WriteStream is CONSTRUCTED, never an alias for process.stdout. @clack/core
+        // (create-vite's prompts) builds `new tty.WriteStream(0)`, overrides `_write`, and
+        // pipes stdin into it: readline's echo lands in that private sink, and the overridden
+        // `_write` is the hook from which it reads `rl.line` to track the typed value.
+        // Returning process.stdout here made the hook dead code (stdout's write never
+        // consults `_write`) and sprayed the echo AND the piped keystrokes onto the real
+        // screen — a prompt whose value never updated, under a row of doubled keystroke
+        // fragments. A real Writable dispatches write() through `_write`, overridden or not.
+        function WriteStream(fd) {
+          if (!(this instanceof WriteStream)) return new WriteStream(fd);
+          Writable.call(this);
+          this.fd = fd;
+          if (__isTTY) {
+            this.isTTY = true;
+            this.columns = process.stdout.columns;
+            this.rows = process.stdout.rows;
+          }
+        }
+        WriteStream.prototype = Object.create(Writable.prototype);
+        WriteStream.prototype.constructor = WriteStream;
+        // The default sink is the terminal, as node's is (fd 2 keeps its error routing).
+        WriteStream.prototype._write = function(chunk, encoding, callback) {
+          (this.fd === 2 ? process.stderr : process.stdout).write(chunk);
+          callback();
+        };
+        // The cursor helpers stdout carries, but routed through write() so an overridden
+        // _write sees them too — node's do the same: they are ordinary writes to the fd.
+        WriteStream.prototype.cursorTo = function(x, y, callback) {
+          this.write(y === undefined || y === null ? '\u001b[' + (x + 1) + 'G'
+                                                   : '\u001b[' + (y + 1) + ';' + (x + 1) + 'H');
+          if (typeof y === 'function') y(); else if (typeof callback === 'function') callback();
+          return true;
+        };
+        WriteStream.prototype.moveCursor = function(dx, dy, callback) {
+          let out = '';
+          if (dx < 0) out += '\u001b[' + (-dx) + 'D'; else if (dx > 0) out += '\u001b[' + dx + 'C';
+          if (dy < 0) out += '\u001b[' + (-dy) + 'A'; else if (dy > 0) out += '\u001b[' + dy + 'B';
+          if (out) this.write(out);
+          if (typeof callback === 'function') callback();
+          return true;
+        };
+        WriteStream.prototype.clearLine = function(dir, callback) {
+          this.write(dir < 0 ? '\u001b[1K' : dir > 0 ? '\u001b[0K' : '\u001b[2K');
+          if (typeof callback === 'function') callback();
+          return true;
+        };
+        WriteStream.prototype.clearScreenDown = function(callback) {
+          this.write('\u001b[0J');
+          if (typeof callback === 'function') callback();
+          return true;
+        };
+        WriteStream.prototype.getWindowSize = function() { return [this.columns || 80, this.rows || 24]; };
+        WriteStream.prototype.getColorDepth = function() { return __isTTY ? 8 : 1; };
+        WriteStream.prototype.hasColors = function() { return __isTTY; };
         return {
           isatty: function(fd){ return __isTTY && (fd === 0 || fd === 1 || fd === 2); },
           ReadStream: function(){ return process.stdin; },
-          WriteStream: function(){ return process.stdout; },
+          WriteStream: WriteStream,
         };
       };
 
@@ -15312,7 +15393,13 @@ final class NodeEngine: @unchecked Sendable {
             super();
             this.input = options.input || process.stdin;
             this.output = options.output !== undefined ? options.output : process.stdout;
-            this.terminal = options.terminal !== undefined ? !!options.terminal : !!(this.input && this.input.isTTY);
+            // Auto-detection keys on the PROVIDED output, as node's does — not on input.
+            // Prompt libraries create `createInterface({ input })` interfaces purely for
+            // line assembly (real node: terminal false, no echo); keying on input.isTTY
+            // made those interfaces echo every keystroke onto the live screen, doubled
+            // under whatever frame the library itself was drawing.
+            this.terminal = options.terminal !== undefined ? !!options.terminal
+                                                           : !!(options.output && options.output.isTTY);
             this._prompt = options.prompt !== undefined ? options.prompt : '> ';
             this._line = '';
             this._questionCb = null;
