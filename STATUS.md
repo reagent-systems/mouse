@@ -74,6 +74,30 @@ launches and is driven on the iPhone 16 Pro simulator
   unsigned native code, so this is the platform wall the wasm strategy
   exists for, reached from a new direction. The JS-bundle versions (1.0.128
   and its era) still run. Any claim here about "claude-code" means those.
+- **Interactive TUIs work.** `npx create-vite` walks its whole flow on the
+  phone: text prompt, framework menu, variant menu, install confirmation —
+  every transition painting live, colours intact, selections tracking.
+  Five defects stood between the first attempt and that, each reproduced
+  before it was fixed: `tty.WriteStream` was `process.stdout` rather than a
+  real Writable (so a prompt library's own `_write` hook — where it reads
+  the typed value — was dead code, and the echo sprayed the live frame);
+  readline auto-detected `terminal` from its input instead of its output;
+  stdin `unpipe` was a no-op and `once` aliased `on`, leaking a listener
+  per prompt; readline defaulted `output` to stdout, so a deliberately
+  silent line editor echoed into the frame at transition time; and engine
+  writes crossed to the main actor as independent tasks, which are
+  unordered — under burst input a stale frame could land last. Delivery is
+  now an ordered channel. The last one was in the VIEW: the grid read
+  `screenGeneration` for observation, but each row is a `Text` diffed by
+  value, so a multi-row transition redraw could leave rows SwiftUI judged
+  unchanged. The grid's identity is now the generation — a new generation
+  is a new screen, which is what a terminal frame is.
+- **Ruby runs, and was added without touching Swift.** `pkg install ruby`
+  fetches the official `ruby.wasm` build, hash-checked, and
+  `ruby hello.rb` prints. The catalog is `swift/Runtimes.json`: a language
+  is a JSON entry with its archive, interpreter path, commands and env —
+  `verify/pkgruby` greps `swift/Mouse` for the language's name and fails if
+  it appears.
 - Navigation is the gesture law working as designed: an in-lane horizontal
   drag cycles containers within a ring, an edge drag travels between rings
   **or mints a new one**. The "Swipe?" screen is the onboarding lesson

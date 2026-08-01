@@ -140,6 +140,13 @@ private struct TerminalScreenGrid: View {
                     .frame(height: TerminalCellMetrics.height, alignment: .leading)
             }
         }
+        // The generation identifies the WHOLE grid, not just its observation. Reading it above
+        // re-runs this body, but each row is a `Text` diffed by value, and a transition redraw
+        // (cursor-up over several rows, erase, rewrite) could leave rows SwiftUI judged
+        // unchanged — typing repainted, prompt-to-prompt transitions did not. A terminal
+        // rebuilds its rows every frame anyway, so tying identity to the generation is both
+        // correct and cheap: a new generation is a new screen.
+        .id(terminal.screenGeneration)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
