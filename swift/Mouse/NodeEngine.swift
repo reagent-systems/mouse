@@ -15392,7 +15392,15 @@ final class NodeEngine: @unchecked Sendable {
           constructor(options) {
             super();
             this.input = options.input || process.stdin;
-            this.output = options.output !== undefined ? options.output : process.stdout;
+            // The output is what the CALLER provided — node does not default it to stdout,
+            // and neither may we. create-vite's prompt library builds
+            // `createInterface({ input, terminal: true })` deliberately outputless: a silent
+            // line editor it reads `rl.line` from while rendering its own frames. Real node
+            // writes nothing for such an interface; our stdout default made it echo every
+            // keystroke — and the Enter CR-LF — straight into the live frame region
+            // ("p⟶honeapp" under the prompt on the phone). Every output write below is
+            // guarded, so an undefined output is simply silent, as node's is.
+            this.output = options.output;
             // Auto-detection keys on the PROVIDED output, as node's does — not on input.
             // Prompt libraries create `createInterface({ input })` interfaces purely for
             // line assembly (real node: terminal false, no echo); keying on input.isTTY

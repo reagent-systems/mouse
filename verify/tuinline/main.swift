@@ -11,6 +11,27 @@ setvbuf(stdout, nil, _IONBF, 0)
 // keystroke. The rule now also engages on upward cursor motion (TerminalPrograms.swift), the
 // session exposes the flip observably (`programOnScreen`), and the grid is shadow-fed in
 // transcript mode so the first engaged frame repaints rows that are actually there.
+/// SwiftUI's observation shape, headlessly: register on `screenGeneration`, and on change
+/// re-arm from the main actor (as a view re-subscribes on its next body evaluation). Fires
+/// counted here are display-refresh OPPORTUNITIES — a frame that lands on the grid without
+/// one is a frame the app would never show, which is exactly the class of bug a grid-only
+/// assertion cannot catch.
+@MainActor
+final class ObservationProbe {
+    private let session: TerminalSession
+    private(set) var fires = 0
+    init(_ session: TerminalSession) { self.session = session; arm() }
+    private func arm() {
+        withObservationTracking({ _ = self.session.screenGeneration }, onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.fires += 1
+                self.arm()
+            }
+        })
+    }
+}
+
 @MainActor
 func pump(until ready: () -> Bool, seconds: Double = 30) async -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
@@ -189,7 +210,59 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
                "the typed value did not survive to submit: \(clack.lines.suffix(3).map(\.text))")
     }
 
-    // -- Case 4: the control. A one-shot command stays in the scrollback; the grid stays out
+    // -- Case 4: create-vite itself, the device scenario — a small grid, eight rapid keys,
+    // and the prompt-to-prompt TRANSITION. Its bundled prompt library builds
+    // `createInterface({ input, terminal: true })` with NO output — a silent line editor in
+    // real node — and the readline output-defaulting bug echoed every keystroke (and Enter's
+    // CR-LF) into the live frame region: "p⟶honeapp" under the frame on the phone. Gated
+    // here: typed value in the frame, nothing under the frame, and the Enter transition both
+    // REACHES the grid and FIRES observation — a frame present but never published is one
+    // the app would never display.
+    if !FileManager.default.fileExists(atPath: project.appendingPathComponent("node_modules/create-vite").path) {
+        print("installing create-vite with our own package manager…")
+        do { _ = try await PackageManager.install(requirements: ["create-vite": "^9.1.0"], into: project) }
+        catch {
+            print("  install: \(error)")
+            print("TUI INLINE FAILED — install")
+            exit(1)
+        }
+    }
+    let vite = TerminalSession(root: project)
+    vite.setGridSize(rows: 8, columns: 44)
+    let probe = ObservationProbe(vite)
+    _ = vite.run("npx create-vite")
+    let viteUp = await pump(until: { vite.screen.plainText.contains("Project name") }, seconds: 120)
+    expect(viteUp, "create-vite's prompt never drew")
+    if viteUp {
+        for key in ["p", "h", "o", "n", "e", "a", "p", "p"] { _ = vite.sendKey(key) }
+        let viteTyped = await pump(until: { vite.screen.plainText.contains("phoneapp") }, seconds: 20)
+        expect(viteTyped, "rapid keystrokes lost in create-vite's prompt")
+        // Nothing echoed under the frame — the artifact row the phone showed.
+        let viteRows = (0..<vite.screen.rows).map { vite.screen.text(row: $0) }
+        if let frameEnd = viteRows.lastIndex(where: { $0.hasPrefix("└") }) {
+            for row in (frameEnd + 1)..<viteRows.count {
+                expect(viteRows[row].isEmpty, "keystroke echo under the frame at row \(row): |\(viteRows[row])|")
+            }
+        } else {
+            expect(false, "no frame edge on create-vite's grid")
+        }
+        let firesBeforeEnter = probe.fires
+        _ = vite.sendKey("\r")
+        let transition = await pump(until: { vite.screen.plainText.contains("Select a framework") }, seconds: 20)
+        expect(transition, "the Enter transition never reached the grid")
+        // Give the last hop's re-armed registration a beat, then judge.
+        _ = await pump(until: { probe.fires > firesBeforeEnter }, seconds: 5)
+        expect(probe.fires > firesBeforeEnter,
+               "the transition landed on the grid without a single observation fire — invisible to the app")
+        vite.interrupt()
+        let viteEnded = await pump(until: { vite.program == nil }, seconds: 20)
+        expect(viteEnded, "create-vite did not stop on ^C")
+        expect(vite.run("echo back"), "the prompt refused a command after create-vite")
+        let backAgain = await pump(until: { !vite.isRunning && vite.lines.last?.text == "back" })
+        expect(backAgain, "echo after create-vite did not land in the scrollback")
+    }
+
+    // -- Case 5: the control. A one-shot command stays in the scrollback; the grid stays out
     // of it entirely.
     let (echoSession, echoBase) = makeSession(script: nil, name: "echo")
     defer { try? FileManager.default.removeItem(at: echoBase) }
@@ -205,8 +278,9 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
     if failures == 0 {
         print("TUI INLINE MATCH — cursor-up repaint engages the grid and replaces rows in place,")
         print("  a mid-run keystroke reaches the program, a @clack prompt takes eight rapid")
-        print("  keystrokes into its frame and submits them, exit restores the prompt with the")
-        print("  last frame in history, and `echo hi` stays scrollback-only")
+        print("  keystrokes into its frame and submits them, create-vite's Enter transition")
+        print("  reaches the grid observably with nothing echoed under the frame, exit restores")
+        print("  the prompt with the last frame in history, and `echo hi` stays scrollback-only")
     } else {
         print("TUI INLINE FAILED — \(failures)")
         exit(1)
