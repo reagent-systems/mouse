@@ -1,0 +1,1 @@
+MOVED PORT MATCH — all 5 identical to node, including start() gating

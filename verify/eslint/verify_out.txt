@@ -1,0 +1,7 @@
+ESLINT MATCH — same findings on the same files (0.4s)
+clean.js: 0 errors, 0 warnings
+messy.js: 2 errors, 2 warnings
+  no-unused-vars @2: 'unused' is assigned a value but never used.
+  eqeqeq @3: Expected '===' and instead saw '=='.
+  no-empty @3: Empty block statement.
+  no-undef @3: 'notDefined' is not defined.

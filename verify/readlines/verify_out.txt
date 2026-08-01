@@ -1,0 +1,1 @@
+READLINE MATCH — all 24 behaviours identical to real node: where a line ends (including a \r and \n arriving in separate writes, and a last line with no newline at all), async iteration and breaking out of it, question in both forms and under an AbortSignal, pause and resume, close, and the cursor escapes

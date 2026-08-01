@@ -1,0 +1,5 @@
+clientError code=HPE_INVALID_METHOD hasSocket=true
+default reply: 400 and closed
+refused code=ECONNREFUSED
+server error code=EADDRINUSE
+socket timeout fired

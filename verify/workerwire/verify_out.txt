@@ -1,0 +1,19 @@
+---- ours ----
+port own keys: []
+port spread: {}
+port is a MessagePort: true
+atomics: 42 true
+runtime import: true
+undefined: fn=undefined map=not-a-map keep=yes
+advanced: fn=undefined map=1 keep=yes
+---- real ----
+port own keys: []
+port spread: {}
+port is a MessagePort: true
+atomics: 42 true
+runtime import: true
+undefined: fn=undefined map=not-a-map keep=yes
+advanced: fn=undefined map=1 keep=yes
+
+sharing across engines: refused: DataCloneError A SharedArrayBuffer cannot be shared between workers here: a
+WORKER WIRE MATCH — ports, runtime-compiled imports, atomics and both IPC serialisation modes behave as real node's, and sharing memory across engines refuses

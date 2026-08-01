@@ -1,0 +1,5 @@
+installing vite…
+module served: true
+handshake: {"type":"connected"}
+after the edit: {"type":"update","updates":[{"type":"js-update","timestamp":1785543271120,"path":"/src/main.ts","acceptedPath":"/src/main.ts","explicitImportRequired":false,"isWithinCircularImport":false,"ssrInvalidates":[]}]}
+HMR MATCH — vite's watcher saw the edit and pushed it down a real WebSocket to a client outside the app: {"type":"update","updates":[{"type":"js-update","timestamp":1785543271120,"path":"/src/mai

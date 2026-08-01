@@ -1,0 +1,6 @@
+installing vite + react…
+Greeting.tsx: 3898 bytes, jsx compiled: true, types erased: true, hook kept: true, automatic runtime: true, fast refresh: true
+first line: import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/Greeting.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=c0e35b69"; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+main.tsx: 1320 bytes, compiled: true
+bare imports rewritten: true
+REACT DEV MATCH — vite served .tsx with types erased, JSX compiled to React's automatic runtime, Fast Refresh wired in and `react` itself pre-bundled: the WebAssembly esbuild doing a dev server's real work on the device

@@ -1,0 +1,38 @@
+to   "/a/b.js" -> file:///a/b.js | URL=true
+back "/a/b.js" -> "/a/b.js" | roundtrip=true
+to   "/a/b c.js" -> file:///a/b%20c.js | URL=true
+back "/a/b c.js" -> "/a/b c.js" | roundtrip=true
+to   "/a/b#c.js" -> file:///a/b%23c.js | URL=true
+back "/a/b#c.js" -> "/a/b#c.js" | roundtrip=true
+to   "/a/b?c.js" -> file:///a/b%3Fc.js | URL=true
+back "/a/b?c.js" -> "/a/b?c.js" | roundtrip=true
+to   "/a/%.js" -> file:///a/%25.js | URL=true
+back "/a/%.js" -> "/a/%.js" | roundtrip=true
+to   "/dir/" -> file:///dir/ | URL=true
+back "/dir/" -> "/dir/" | roundtrip=true
+to   "/" -> file:/// | URL=true
+back "/" -> "/" | roundtrip=true
+to   "/a/b&c=d.js" -> file:///a/b&c=d.js | URL=true
+back "/a/b&c=d.js" -> "/a/b&c=d.js" | roundtrip=true
+to   "/a/b'c.js" -> file:///a/b'c.js | URL=true
+back "/a/b'c.js" -> "/a/b'c.js" | roundtrip=true
+to   "/a/ünïcode.js" -> file:///a/%C3%BCn%C3%AFcode.js | URL=true
+back "/a/ünïcode.js" -> "/a/ünïcode.js" | roundtrip=true
+to   "/a/b\tc.js" -> file:///a/b%09c.js | URL=true
+back "/a/b\tc.js" -> "/a/b\tc.js" | roundtrip=true
+to   "/a/plus+.js" -> file:///a/plus+.js | URL=true
+back "/a/plus+.js" -> "/a/plus+.js" | roundtrip=true
+to   "/a/b%20already.js" -> file:///a/b%2520already.js | URL=true
+back "/a/b%20already.js" -> "/a/b%20already.js" | roundtrip=true
+to   "/deep/nested/path/to/mod.mjs" -> file:///deep/nested/path/to/mod.mjs | URL=true
+back "/deep/nested/path/to/mod.mjs" -> "/deep/nested/path/to/mod.mjs" | roundtrip=true
+to   "/a/[br].js" -> file:///a/%5Bbr%5D.js | URL=true
+back "/a/[br].js" -> "/a/[br].js" | roundtrip=true
+to   "/a/b;c.js" -> file:///a/b;c.js | URL=true
+back "/a/b;c.js" -> "/a/b;c.js" | roundtrip=true
+cachebust file:///cfg/eslint.config.mjs?mtime=12345
+cachebust encoded file:///a/b%20c.js?mtime=7
+accepts URL object /a/b c.js
+accepts localhost /a/b.js
+reject https://example.com/a -> ERR_INVALID_URL_SCHEME
+reject file://otherhost/a -> ERR_INVALID_FILE_URL_HOST

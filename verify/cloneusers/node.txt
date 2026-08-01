@@ -1,0 +1,15 @@
+structuredClone map: true
+structuredClone set: true
+structuredClone date: true
+structuredClone undefined: true
+structuredClone bigint: true
+structuredClone deep: true
+structuredClone cycle: true
+structuredClone is a copy: true
+environmentData map: true
+environmentData is a copy: true
+workerData map: true
+workerData date: true
+workerData set: true
+env reaches worker: true
+postMessage map back: true

@@ -1,0 +1,8 @@
+---- ours ----
+{"ready":true,"forked":true,"connected":true} | {"result":42,"of":21} | {"result":84,"of":42} | {"bye":true} | exit:0 | plain: send is undefined
+channel present: true connected: false
+---- real ----
+{"ready":true,"forked":true,"connected":true} | {"result":42,"of":21} | {"result":84,"of":42} | {"bye":true} | exit:0 | plain: send is undefined
+channel present: true connected: false
+
+FORK MATCH — a real message channel, and spawn correctly has none

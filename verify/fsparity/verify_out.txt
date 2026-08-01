@@ -1,0 +1,14 @@
+  ok   read missing: sync=ENOENT cb=ENOENT promise=ENOENT
+  ok   read a directory: sync=EISDIR cb=EISDIR promise=EISDIR
+  ok   mkdir existing: sync=EEXIST cb=EEXIST promise=EEXIST
+  ok   mkdir missing parent: sync=ENOENT cb=ENOENT promise=ENOENT
+  ok   rm a directory without recursive: sync=ERR_FS_EISDIR cb=ERR_FS_EISDIR promise=ERR_FS_EISDIR
+  ok   rm missing without force: sync=ENOENT cb=ENOENT promise=ENOENT
+  ok   rmdir non-empty: sync=ENOTEMPTY cb=ENOTEMPTY promise=ENOTEMPTY
+  ok   readdir a file: sync=ENOTDIR cb=ENOTDIR promise=ENOTDIR
+  ok   rename missing source: sync=ENOENT cb=ENOENT promise=ENOENT
+  ok   write into a missing directory: sync=ENOENT cb=ENOENT promise=ENOENT
+  ok   copy missing source: sync=ENOENT cb=ENOENT promise=ENOENT
+  ok   stat missing: sync=ENOENT cb=ENOENT promise=ENOENT
+
+FS PARITY MATCHES — all 12

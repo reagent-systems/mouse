@@ -1,0 +1,1 @@
+STREAM INTROSPECTION MATCH — all 8 getters behave as node

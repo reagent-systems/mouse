@@ -1,0 +1,15 @@
+ok: export-declarations
+ok: export-default-forms
+ok: named-and-renamed
+ok: re-exports
+ok: import-forms
+ok: hoisting-and-cycles
+ok: dynamic-and-meta
+ok: json-and-top-level-await
+pinned divergence: live-bindings — behaves as recorded, and node still differs
+ok: string-names-and-tdz
+ok: default-through-a-cycle
+ok: destructured-exports
+ok: cyclic-function-bindings
+ok: code-in-strings
+ESM GRAMMAR MATCH — 13 module shapes behave as real node's, 1 pinned divergence (named imports are a snapshot; the namespace form is live)

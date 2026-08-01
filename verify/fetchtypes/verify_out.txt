@@ -1,0 +1,1 @@
+FETCH TYPE MATCH — all 34 behaviours identical to real node: header names folding case and iterating sorted, set-cookie's own rules, Response defaults and status guards, the statics, Request methods and bodies, Blob and FormData, and a body that may be read exactly once unless it is cloned

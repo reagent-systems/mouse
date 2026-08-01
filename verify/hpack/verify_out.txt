@@ -1,0 +1,31 @@
+C.3.1. encode -> matches the RFC
+C.3.1. decode -> matches the RFC
+C.3.2. encode -> matches the RFC
+C.3.2. decode -> matches the RFC
+C.3.3. encode -> matches the RFC
+C.3.3. decode -> matches the RFC
+C.5.1. encode -> matches the RFC
+C.5.1. decode -> matches the RFC
+C.5.2. encode -> matches the RFC
+C.5.2. decode -> matches the RFC
+C.5.3. encode -> matches the RFC
+C.5.3. decode -> matches the RFC
+C.4.1. encode -> matches the RFC
+C.4.1. decode -> matches the RFC
+C.4.2. encode -> matches the RFC
+C.4.2. decode -> matches the RFC
+C.4.3. encode -> matches the RFC
+C.4.3. decode -> matches the RFC
+C.6.1. encode -> matches the RFC
+C.6.1. decode -> matches the RFC
+C.6.2. encode -> matches the RFC
+C.6.2. decode -> matches the RFC
+C.6.3. encode -> matches the RFC
+C.6.3. decode -> matches the RFC
+huffman round trip -> true
+huffman of the RFC example -> true
+huffman decodes what it wrote for every byte -> true
+incompressible stays raw -> true
+eviction -> true
+
+HPACK MATCH — 29 checks against RFC 7541's own vectors: every example encodes to the bytes the RFC prints and decodes back to the headers it names, across two connections' worth of dynamic-table history

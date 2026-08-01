@@ -1,0 +1,14 @@
+bigint type: bigint
+bigint positive: true
+own property: bigint
+unbound works: true
+never backwards: true
+sub-millisecond: true
+array shape: true
+nanos in range: true
+diff never negative: true
+perf number: true
+perf never backwards: true
+perf fractional: true
+perf timeOrigin wall: true
+clocks agree: true (sink true)

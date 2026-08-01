@@ -1,0 +1,18 @@
+readFileSync missing: ENOENT open
+readFileSync on a directory: EISDIR read
+statSync missing: ENOENT stat
+mkdirSync existing: EEXIST mkdir
+mkdirSync missing parent: ENOENT mkdir
+unlinkSync missing: ENOENT unlink
+rmdirSync a file: ENOTDIR rmdir
+readdirSync a file: ENOTDIR scandir
+renameSync missing source: ENOENT rename
+openSync missing, read mode: ENOENT open
+writeFileSync into a missing dir: ENOENT open
+accessSync missing: ENOENT access
+copyFileSync missing source: ENOENT copyfile
+JSON.parse bad input: (no code) -
+connect refused: ECONNREFUSED connect
+lookup bogus host: ENOTFOUND getaddrinfo
+readFile callback missing: ENOENT open
+promises readFile missing: ENOENT open

@@ -1,0 +1,14 @@
+---- node ----
+piped to stdout
+stdout is a Writable: true true true
+close() finished with an idle keep-alive client: true
+has closeIdleConnections: true
+done
+---- ours ----
+piped to stdout
+stdout is a Writable: true true true
+close() finished with an idle keep-alive client: true
+has closeIdleConnections: true
+done
+
+MATCH

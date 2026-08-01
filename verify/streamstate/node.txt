@@ -1,0 +1,14 @@
+readable fresh: |0|false|false|true
+after push: |3|false|false|true
+after resume+drain: true|0|false|false|true
+after EOF: true|0|true|true|false
+destroyed readable: |0|false|true|false
+writable fresh: 0|false|false|0|false|true|false
+write returned: false
+during slow write: 5|false|false|0|false|true|true
+after write completes: 0|false|false|0|false|true|false
+corked: 0|false|false|1|false|true|false
+after end: 0|true|true|0|true|false|false
+destroyed writable: 0|false|false|0|true|false|false
+passthrough after write: |1|false|false|true / 0|false|false|0|false|true|false
+passthrough after end: 0|true|true|0|false|false|false

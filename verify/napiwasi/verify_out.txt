@@ -1,0 +1,3 @@
+oxc-parser: wasi build installed=true, loader reached it=true
+rolldown: wasi build installed=true, loader reached it=true
+NAPI WASI MATCH — both packages' WebAssembly builds install and their loaders reach them; what stops both is wasm threads, which JavaScriptCore does not enable

@@ -1,0 +1,1 @@
+ALT SCREEN MATCH — the normal screen and its columns come back, as a real terminal's do

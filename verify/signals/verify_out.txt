@@ -1,0 +1,12 @@
+  ok   AbortSignal.timeout fires: aborted
+  ok   AbortSignal.any fires: aborted
+  ok   timers.setTimeout signal: aborted
+  ok   events.on signal: aborted
+  ok   fs.readFile signal: aborted
+  ok   fs.promises.readFile signal: aborted
+  ok   fs.watch signal closes it: closed
+  ok   stream.finished signal: aborted
+  ok   stream/promises pipeline signal: aborted
+  ok   readline signal closes: closed
+
+SIGNALS MATCH — all 10 abort as node's do

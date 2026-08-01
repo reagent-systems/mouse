@@ -1,0 +1,7 @@
+  ok   spawnSync encoding gives string: true
+  ok   http signal aborts: aborted
+  ok   http timeout option: timeout fired
+  ok   http setTimeout method: setTimeout fired
+  ok   readline crlfDelay: ["a","b"]
+
+OPTIONS MATCH — all 5 honoured

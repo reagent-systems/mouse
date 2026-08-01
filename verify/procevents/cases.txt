@@ -1,0 +1,6 @@
+process.on('warning',w=>console.log('w:'+w.name+':'+w.message));process.emitWarning('careful')
+process.on('warning',w=>console.log('w:'+w.name));process.emitWarning('x','CustomWarning')
+process.on('warning',w=>console.log('w:'+w.name+':'+w.code));process.emitWarning('x',{type:'T',code:'C1'})
+process.on('warning',w=>console.log('w:'+(w instanceof Error)));process.emitWarning(new Error('e'))
+process.emitWarning('nobody listening')
+process.on('uncaughtExceptionMonitor',e=>console.log('mon:'+e.message));process.on('uncaughtException',()=>console.log('handled'));throw new Error('boom')

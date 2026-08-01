@@ -1,0 +1,13 @@
+http://h:8080/a/b?q=1#f -> {"protocol":"http:","host":"h:8080","hostname":"h","port":"8080","pathname":"/a/b","search":"?q=1","hash":"#f","path":"/a/b?q=1"}
+https://u:p@h/x -> {"protocol":"https:","host":"h","hostname":"h","port":null,"pathname":"/x","search":null,"hash":null,"path":"/x"}
+http://h -> {"protocol":"http:","host":"h","hostname":"h","port":null,"pathname":"/","search":null,"hash":null,"path":"/"}
+//h/p -> {"protocol":null,"host":null,"hostname":null,"port":null,"pathname":"//h/p","search":null,"hash":null,"path":"//h/p"}
+/just/a/path -> {"protocol":null,"host":null,"hostname":null,"port":null,"pathname":"/just/a/path","search":null,"hash":null,"path":"/just/a/path"}
+mailto:a@b.com -> {"protocol":"mailto:","host":"b.com","hostname":"b.com","port":null,"pathname":null,"search":null,"hash":null,"path":null}
+http://h:80/ -> {"protocol":"http:","host":"h:80","hostname":"h","port":"80","pathname":"/","search":null,"hash":null,"path":"/"}
+ws://h:81/s?a=1 -> {"protocol":"ws:","host":"h:81","hostname":"h","port":"81","pathname":"/s","search":"?a=1","hash":null,"path":"/s?a=1"}
+http://[::1]:9/v6 -> {"protocol":"http:","host":"[::1]:9","hostname":"::1","port":"9","pathname":"/v6","search":null,"hash":null,"path":"/v6"}
+file:///tmp/x -> {"protocol":"file:","host":"","hostname":"","port":null,"pathname":"/tmp/x","search":null,"hash":null,"path":"/tmp/x"}
+http://h/p?a=1&b=2 -> {"protocol":"http:","host":"h","hostname":"h","port":null,"pathname":"/p","search":"?a=1&b=2","hash":null,"path":"/p?a=1&b=2"}
+http://h/#only-hash -> {"protocol":"http:","host":"h","hostname":"h","port":null,"pathname":"/","search":null,"hash":"#only-hash","path":"/"}
+http://h/p#f?not-query -> {"protocol":"http:","host":"h","hostname":"h","port":null,"pathname":"/p","search":null,"hash":"#f?not-query","path":"/p"}

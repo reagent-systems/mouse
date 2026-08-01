@@ -1,0 +1,16 @@
+---- ours ----
+require package -> ERR_DLOPEN_FAILED
+require .node directly -> ERR_DLOPEN_FAILED
+require without extension -> ERR_DLOPEN_FAILED
+require.resolve finds it -> true
+a genuinely missing module -> MODULE_NOT_FOUND
+process.dlopen -> ERR_DLOPEN_FAILED
+---- real ----
+require package -> ERR_DLOPEN_FAILED
+require .node directly -> ERR_DLOPEN_FAILED
+require without extension -> ERR_DLOPEN_FAILED
+require.resolve finds it -> true
+a genuinely missing module -> MODULE_NOT_FOUND
+process.dlopen -> ERR_DLOPEN_FAILED
+
+NATIVE ADDON MATCH — every outcome carries the code real node carries, and the refusal names the file

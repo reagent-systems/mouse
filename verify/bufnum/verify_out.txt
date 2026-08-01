@@ -1,0 +1,1 @@
+BUFFER NUMERICS MATCH — 31 lines identical to real node

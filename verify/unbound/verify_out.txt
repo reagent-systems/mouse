@@ -1,0 +1,4 @@
+unbound calls broken: 0 of 29
+static suspects: none
+
+UNBOUND MATCH — every core function people destructure works alone, and no core module reaches through `this` before it nests

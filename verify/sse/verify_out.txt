@@ -1,0 +1,6 @@
+---- ours ----
+arrivals: 3
+spread over time: true
+texts: data: chunk0|data: chunk1|data: chunk2
+
+SSE MATCH — three chunks arrived separately, as they were sent

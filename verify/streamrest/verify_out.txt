@@ -1,0 +1,10 @@
+  ok   methods present: |
+  ok   readable getters: 99|0|false||false|
+  ok   writable getters: 77|0|false|false|false|false
+  ok   readableEncoding after setEncoding: hex
+  ok   unpipe stops delivery: ["before"]
+  ok   unpipe all: ["a:one","b:one"]
+  ok   unpipe event: fired
+  ok   writableLength grows: 5
+
+STREAM SURFACE MATCHES — all 8

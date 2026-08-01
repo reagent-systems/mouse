@@ -1,0 +1,9 @@
+local brotli matches node:
+round trip: true
+smaller than input: true
+corrupt input errors: true
+stream round trip: true
+stream output decodes one-shot: true
+node decompressed OUR brotli stream
+our engine decompressed NODE's brotli stream
+BROTLI MATCH — interoperable both directions

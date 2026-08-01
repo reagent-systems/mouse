@@ -1,0 +1,18 @@
+isContext: true false
+read across: 1
+call across: 42
+write lands on sandbox: 42
+live read after outside write: 10
+inside write visible outside: 99
+own builtins: object,object,function
+this is global: true
+returns objects: 7
+returns functions: function
+throw propagates: in-vm
+syntax error: SyntaxError
+runInNewContext: 4
+separate contexts: undefined
+Script reuse: 198,8
+runInThisContext: 2
+compileFunction: 5
+nested objects cross: {"n":[1,{"m":2}]}

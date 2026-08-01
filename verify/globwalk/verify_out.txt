@@ -1,0 +1,9 @@
+GLOB WALK MATCH — every pattern returned node's exact file list
+*.js -> ["a.js"]
+**/*.js -> ["a.js","lib/f.js","src/c.js","src/deep/e.js"]
+src/*.js -> ["src/c.js"]
+**/*.ts -> ["b.ts","src/d.ts"]
+* -> ["a.js","b.ts","lib","src"]
+src/** -> ["src","src/c.js","src/d.ts","src/deep","src/deep/e.js"]
+**/deep/*.js -> ["src/deep/e.js"]
+async -> ["a.js","lib/f.js","src/c.js","src/deep/e.js"]

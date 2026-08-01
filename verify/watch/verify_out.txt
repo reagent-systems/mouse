@@ -1,0 +1,5 @@
+watch directory: same paths in the same order as real node (3 events)
+watch file: identical event stream to real node (1 events)
+watch surface: match
+watch recursive: match
+PHASE G WATCH: ALL PASS

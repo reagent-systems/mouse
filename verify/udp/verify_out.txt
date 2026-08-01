@@ -1,0 +1,13 @@
+ours multicast: joined 239.255.42.99
+received: hello group@port
+done
+real multicast: joined 239.255.42.99
+received: hello group@port
+done
+
+ours as client: client saw: echo:first | echo:second
+real server saw: bound family IPv4 port is number: true
+server saw: first@5+port | second@6+port | stop@4+port
+real client saw: client saw: echo:first | echo:second
+
+UDP MATCH — datagrams both ways with real node, and multicast joins, sends and receives

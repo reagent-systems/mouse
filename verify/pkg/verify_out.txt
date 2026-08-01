@@ -1,0 +1,7 @@
+semver: all pass
+resolution left-pad: 1 packages match pnpm
+resolution mkdirp: 1 packages match pnpm
+resolution debug: 2 packages match pnpm
+resolution chalk: 6 packages match pnpm
+resolution glob: 11 packages match pnpm
+PHASE F: ALL PASS

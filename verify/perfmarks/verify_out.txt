@@ -1,0 +1,1 @@
+PERFORMANCE MATCH — all 23 behaviours identical to real node: what a mark and a measure ARE, the entry buffers and clearing them by name, measure from options and between marks, ordering, toJSON, and PerformanceObserver before and after disconnect. No raw time is compared; the relationships are

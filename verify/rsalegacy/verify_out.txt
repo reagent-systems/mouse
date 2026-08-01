@@ -1,0 +1,8 @@
+local match (node's OpenSSL-internal error code pinned to ours):
+round trip: the private key seals it
+block is modulus-sized: true
+public/private direction: the private key seals it
+garbage refused: ERR_CRYPTO_OPERATION_FAILED
+node opened OUR sealed block
+our engine opened NODE's sealed block
+RSA LEGACY MATCH — both engines open each other's blocks

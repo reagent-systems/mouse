@@ -1,0 +1,21 @@
+---- what node's client saw ----
+status 201
+headers first,second,application/json
+body {"method":"GET","scheme":"http","custom":"sent"}
+echo echo:a request body | x-echoed=14
+missing 404 not found
+multiplexed 201,200,201
+big 40000 true
+ping answered
+
+---- what our client saw ----
+status 201
+headers first,application/json
+body {"method":"GET","scheme":"http","authority":"127.0.0.1:5413","custom":"sent"}
+echo echo:from our client | x-echoed=15
+missing 404 nope
+multiplexed 201,200,201
+big 40000 true
+ping answered
+
+HTTP/2 MATCH — both halves against real node: its client made 8 exchanges with this engine's server, and this engine's client made 8 with its server — headers, bodies both ways, 404, three streams multiplexed on one connection, 40 KB across frames, and PING

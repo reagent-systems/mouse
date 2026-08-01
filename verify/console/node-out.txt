@@ -1,0 +1,34 @@
+log line
+info line
+debug line
+{ a: { b: { c: 1 } } }
+{ a: [Object] }
+group A
+  inside A
+  group B
+    inside B
+  back in A
+outside
+default: 1
+default: 2
+tag: 1
+default: 1
+┌─────────┬───┬─────┐
+│ (index) │ a │ b   │
+├─────────┼───┼─────┤
+│ 0       │ 1 │ 'x' │
+│ 1       │ 2 │ 'y' │
+└─────────┴───┴─────┘
+┌─────────┬─────┐
+│ (index) │ col │
+├─────────┼─────┤
+│ row     │ 1   │
+└─────────┴─────┘
+┌─────────┬────────┐
+│ (index) │ Values │
+├─────────┼────────┤
+│ 0       │ 1      │
+│ 1       │ 2      │
+└─────────┴────────┘
+has methods: all present
+t: 0.003ms

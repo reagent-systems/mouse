@@ -1,0 +1,12 @@
+3 <- process.exitCode=3
+3 <- process.exitCode=3; process.exit()
+0 <- process.exitCode=3; process.exit(0)
+0 <- process.exitCode=0
+0 <- process.exitCode=null
+7 <- setTimeout(()=>{process.exitCode=7},10)
+0 <- process.exitCode=3; process.exitCode=undefined
+4 <- process.exitCode='4'
+5 <- process.exit(5)
+9 <- process.exitCode=2; setTimeout(()=>{process.exitCode=9},5)
+6 <- process.on('exit',()=>{});process.exitCode=6
+8 <- process.exitCode=1; Promise.resolve().then(()=>{process.exitCode=8})

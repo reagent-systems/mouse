@@ -1,0 +1,32 @@
+  ok   isEncoding: [true,true,true,true,true,true,true,true,true,true,true]
+  ok   roundtrip utf8: 68c3a96c6c6fe282ac -> "héllo€"
+  ok   roundtrip utf-8: 68c3a96c6c6fe282ac -> "héllo€"
+  ok   roundtrip utf16le: 6800e9006c006c006f00ac20 -> "héllo€"
+  ok   roundtrip ucs2: 6800e9006c006c006f00ac20 -> "héllo€"
+  ok   roundtrip ucs-2: 6800e9006c006c006f00ac20 -> "héllo€"
+  ok   roundtrip latin1: 68e96c6c6fac -> "héllo¬"
+  ok   roundtrip binary: 68e96c6c6fac -> "héllo¬"
+  ok   roundtrip ascii: 68e96c6c6fac -> "hillo,"
+  ok   roundtrip hex: deadbeef -> "deadbeef"
+  ok   roundtrip base64: 68656c6c6f -> "aGVsbG8="
+  ok   roundtrip base64url: 68656c6c6f -> "aGVsbG8"
+  ok   base64 vs base64url: +/++/w== | -_--_w
+  ok   base64url decodes -_: fbffbf
+  ok   base64 decodes +/: fbffbf
+  ok   utf16le of a surrogate pair: 34d81edd
+  ok   utf16le back: 𝄞
+  ok   latin1 high bytes: 255,128
+  ok   ascii high bytes: 127,0
+  ok   toString hex range: 0203
+  ok   fs write+read utf8: 4139 -> A9
+  ok   fs write+read latin1: 4139 -> A9
+  ok   fs write+read hex: a9 -> a9
+  ok   fs write+read base64: 03 -> Aw==
+  ok   StringDecoder split utf8: ""+"€"
+  ok   StringDecoder utf16le split: ""+"𝄞"
+  ok   stream setEncoding utf8: "é"
+  ok   stream setEncoding latin1: "Ã©"
+  ok   stream setEncoding hex: "c3a9"
+  ok   stream setEncoding base64: "w6k="
+
+ENCODINGS MATCH — all 30

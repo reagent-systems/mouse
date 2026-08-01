@@ -1,0 +1,11 @@
+installing webpack with our own package manager…
+---- ours ----
+errors: 0 warnings: 0
+assets: bundle.js
+modules bundled: 3
+---- real ----
+errors: 0 warnings: 0
+assets: bundle.js
+modules bundled: 3
+
+WEBPACK MATCH — our engine emitted a byte-identical minified bundle, and it runs: sum: 10

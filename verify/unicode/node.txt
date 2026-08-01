@@ -1,0 +1,25 @@
+ascii len=5 points=5 bytes=5 bufLen=5 roundtrip=true
+cjk len=7 points=7 bytes=21 bufLen=21 roundtrip=true
+emoji len=4 points=2 bytes=8 bufLen=8 roundtrip=true
+zwj len=8 points=5 bytes=18 bufLen=18 roundtrip=true
+combining len=2 points=2 bytes=3 bufLen=3 roundtrip=true
+astral len=10 points=5 bytes=20 bufLen=20 roundtrip=true
+mixed len=5 points=4 bytes=9 bufLen=9 roundtrip=true
+rtl len=5 points=5 bytes=10 bufLen=10 roundtrip=true
+io ascii same=true size=5 listed=true
+io cjk same=true size=21 listed=true
+io emoji same=true size=8 listed=false
+io zwj same=true size=18 listed=true
+io combining same=true size=3 listed=true
+io astral same=true size=20 listed=false
+io mixed same=true size=9 listed=false
+io rtl same=true size=10 listed=true
+split decode: "�|�🚀"
+StringDecoder holds: "🎉🚀"
+latin1 lossy: "å"
+ascii lossy: "<\t"
+base64 rt: true
+hex rt: true
+basename: 日本🎉.txt
+pathToFileURL: file:///a/%E6%97%A5%E6%9C%AC%F0%9F%8E%89.txt
+JSON rt: true

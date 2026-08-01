@@ -1,0 +1,11 @@
+  ok   read stream: open,ready,data,end,close
+  ok   write stream: open,ready,finish,close
+  ok   read stream missing file: error,close
+  ok   gzip stream: finish,data,data,end,close
+  ok   client socket: connect,ready,data,end,close
+  ok   server lifecycle: listening,connection,close
+  ok   http client request: socket,response,res-end,close
+  ok   http server side: request,res-finish,req-end
+  ok   writable end twice: finish,close
+
+EVENT SEQUENCES MATCH — all 9

@@ -1,0 +1,10 @@
+---- ours ----
+typed env values -> exit=0 message={"env":{"prod":"false","port":"5173"}} said=nothing
+path through a file -> exit=0 message={"env":{"prod":"true","port":"1"}} said=nothing
+missing module -> exit=1 message=null said=cannot-find-module
+---- real ----
+typed env values -> exit=0 message={"env":{"prod":"false","port":"5173"}} said=nothing
+path through a file -> exit=0 message={"env":{"prod":"true","port":"1"}} said=nothing
+missing module -> exit=1 message=null said=cannot-find-module
+
+CHILD SPAWN MATCH — typed env values arrive as node's strings, a path through a file resolves, and a missing module says so instead of starting a child that does nothing

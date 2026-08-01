@@ -1,0 +1,4 @@
+installing esbuild…
+ok: map carried inline -> the trace names 5,5,5,8 in the source files
+ok: map beside the file, in a subdirectory -> the trace names 5,5,5,8 in the source files
+BUNDLE MAP MATCH — esbuild built on this engine, wrote its own output (including into a directory it created) and its map both ways, and a trace out of the bundle names the author's file and line, as node does with --enable-source-maps

@@ -1,0 +1,12 @@
+http://h/a/b + c -> http://h/a/c
+http://h/a/b + /c -> http://h/c
+http://h/a/b + ../c -> http://h/c
+http://h/a/b + ?q=1 -> http://h/a/b?q=1
+http://h/a/b + #f -> http://h/a/b#f
+http://h/a/b + //other/x -> http://other/x
+http://h/a/b + https://z/y -> https://z/y
+http://h/a/ + . -> http://h/a/
+http://h:8080/a + b -> http://h:8080/b
+/base/path + sub -> /base/sub
+urlToHttpOptions -> {"protocol":"http:","hostname":"h","hash":"#f","search":"?q=1","pathname":"/a/b","path":"/a/b?q=1","href":"http://u:p@h:8080/a/b?q=1#f","port":8080,"auth":"u:p"}
+urlToHttpOptions plain -> {"protocol":"https:","hostname":"h","hash":"","search":"","pathname":"/x","path":"/x","href":"https://h/x"}

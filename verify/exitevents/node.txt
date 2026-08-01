@@ -1,0 +1,9 @@
+main|exit|<- process.on('exit',()=>console.log('exit'));console.log('main')
+code=3|<- process.on('exit',c=>console.log('code='+c));process.exitCode=3
+code=7|<- process.on('exit',c=>console.log('code='+c));process.exit(7)
+before|exit|<- process.on('beforeExit',()=>console.log('before'));process.on('exit',()=>console.log('exit'))
+<- process.on('beforeExit',()=>console.log('before'));process.exit(0)
+before1|before2|before3|<- let n=0;process.on('beforeExit',()=>{n++;if(n<3)setImmediate(()=>{});console.log('before'+n)})
+timer|flushed|<- process.on('exit',()=>process.stdout.write('flushed\n'));setTimeout(()=>console.log('timer'),5)
+sync|<- process.on('exit',()=>{try{setTimeout(()=>console.log('too late'),0)}catch(e){}});console.log('sync')
+once|also|<- process.once('exit',()=>console.log('once'));process.on('exit',()=>console.log('also'))

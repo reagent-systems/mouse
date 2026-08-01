@@ -1,0 +1,9 @@
+installing typescript…
+ok: commonjs -> 5,5,8
+ok: es module -> 5,5,8
+ok: multi-line import above the throw -> 6,6
+ok: throw inside a callback -> 4,4,2,7
+ok: typescript with types above the throw -> 11,11,16,17
+ok: typescript with an enum above the throw -> 6,6,10
+ok: a caught error's own stack -> constructed at line 3
+STACK LINE MATCH — every frame names the line node names, through the CommonJS wrapper, the ESM prologue, a multi-line import collapsed to one, and TypeScript erasure that moves lines both ways

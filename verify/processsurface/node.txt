@@ -1,0 +1,10 @@
+cpuUsage keys: system,user
+cpuUsage positive: true
+cpuUsage advances: true (sink true)
+cpuUsage delta keys: system,user
+cpuUsage delta smaller: true
+threadCpuUsage keys: system,user
+threadCpuUsage delta keys: system,user
+finalization keys: register,registerBeforeExit,unregister
+assert(true): no throw
+assert(false): Error boom

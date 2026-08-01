@@ -1,0 +1,32 @@
+undici: ok — function function
+hono: ok — routes function
+fastify: ok — fastify function
+postcss: ok — a{color:red}
+sass: ok — a b {   color: red; }
+dayjs: ok — 2026-07-31
+markdown-it: ok — <h1>hi</h1>
+pino: ok — {"level":30,"time":1785543058083,"pid":1,"hostname":"mouse","msg":"hello"}
+pino 
+svelte: ok — svelte true
+graphql: ok — graphql ok
+tsx-esbuild-kit: FAILED — /node_modules/tsx/dist/register-zZ7SWseA.mjs:3
+vitest: ok — vitest function
+drizzle-orm: ok — drizzle function
+socket.io: ok — socket.io function
+nodemon: ok — nodemon function
+[]
+execa: ok — execa function
+zx: ok — zx function
+terser: ok — const a=2;
+@babel/core: ok — const a = () => 1;
+ts-morph: ok — ts-morph 1
+listr2: ok — listr2 function
+nanoid: ok — nanoid 21
+cheerio: ok — cheerio hi
+jsdom: ok — jsdom hi
+sharp: FAILED — /node_modules/sharp/lib/sharp.js:113
+better-sqlite3: ok — sqlite function
+pg: ok — pg function
+mongoose: ok — mongoose function
+@trpc/server: ok — trpc function
+breadth: 27 of 29 loaded

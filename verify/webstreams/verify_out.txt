@@ -1,0 +1,1 @@
+WEB STREAM MATCH — all 26 behaviours identical to real node: locking and what a released reader may still do, the controller's desiredSize and its refusals, reading to completion, errors, cancel reaching the source, tee feeding both branches, pipeTo and pipeThrough, and the node bridges in both directions

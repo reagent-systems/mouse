@@ -1,0 +1,18 @@
+modp1 bits=768 gen=02 sha=b52ba6a3026520a6
+modp2 bits=1024 gen=02 sha=3f35a3f5f6c4376a
+modp5 bits=1536 gen=02 sha=64fcc83ec403930b
+modp14 bits=2048 gen=02 sha=d66436f79bbd6b2e
+modp15 bits=3072 gen=02 sha=48cf8b092fbce435
+modp16 bits=4096 gen=02 sha=4ee95187682bcb23
+modp17 bits=6144 gen=02 sha=d1bfe6d0925ce7e4
+modp18 bits=8192 gen=02 sha=39ab4feab950a312
+agree=true len=256 pub=256
+fromPrime=true gen=02
+primes=11111111
+composites=00000000
+carmichael=000000
+gen64 prime=true bits=64 odd=true
+gen128 prime=true bits=128 odd=true
+gen256 prime=true bits=256 odd=true
+safe prime=true halfPrime=true
+default type=true bytes=8

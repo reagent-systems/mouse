@@ -1,0 +1,11 @@
+  ok   Buffer.from offset+length: [2,3,4]
+  ok   inspect depth 0: { a: [Object] }
+  ok   inspect depth default: { a: { b: { c: [Object] } } }
+  ok   querystring maxKeys: 2
+  ok   cipher authTagLength: 12
+  ok   createReadStream start+end: "2345"
+  ok   createReadStream encoding: ["string"]
+  ok   createWriteStream flags a: "0123456789AB"
+  ok   events.once signal: aborted
+
+OPTIONS MATCH — all 9 honoured

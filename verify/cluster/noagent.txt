@@ -1,0 +1,33 @@
+--- node ---
+primary: isPrimary=true isWorker=false
+workers online=3 listening=3
+worker ids: 1,2,3
+requests answered: 12
+all answers carried the right forked env: true
+work reached more than one worker: true
+total across workers: 12
+greetings received: 3
+worker exited, alive now: 2
+served after a worker died: true
+all workers disconnected: true
+round 1: IDENTICAL to real node (status 0)
+round 2: IDENTICAL to real node (status 0)
+round 3: IDENTICAL to real node (status 0)
+round 4: IDENTICAL to real node (status 0)
+round 5: IDENTICAL to real node (status 0)
+round 6: IDENTICAL to real node (status 0)
+round 7: IDENTICAL to real node (status 0)
+round 8: IDENTICAL to real node (status 0)
+round 9: IDENTICAL to real node (status 0)
+round 10: IDENTICAL to real node (status 0)
+round 11: IDENTICAL to real node (status 0)
+round 12: IDENTICAL to real node (status 0)
+round 13: IDENTICAL to real node (status 0)
+round 14: IDENTICAL to real node (status 0)
+round 15: IDENTICAL to real node (status 0)
+round 16: IDENTICAL to real node (status 0)
+round 17: IDENTICAL to real node (status 0)
+round 18: IDENTICAL to real node (status 0)
+round 19: IDENTICAL to real node (status 0)
+round 20: IDENTICAL to real node (status 0)
+CLUSTER MATCH — 20/20 rounds identical to real node

@@ -1,0 +1,25 @@
+parse "a=1&b=2" -> {"a":"1","b":"2"}
+parse "a=1&a=2" -> {"a":["1","2"]}
+parse "a" -> {"a":""}
+parse "a=" -> {"a":""}
+parse "=v" -> {"":"v"}
+parse "a=1&&b=2" -> {"a":"1","b":"2"}
+parse "a%20b=c%26d" -> {"a b":"c&d"}
+parse "a[]=1&a[]=2" -> {"a[]":["1","2"]}
+parse "a=%E6%97%A5" -> {"a":"日"}
+parse "+a+=+b+" -> {" a ":" b "}
+parse "a=1;b=2" -> {"a":"1;b=2"}
+parse "" -> {}
+stringify {"a":1,"b":2} -> "a=1&b=2"
+stringify {"a":[1,2]} -> "a=1&a=2"
+stringify {"a":"x y"} -> "a=x%20y"
+stringify {"a":"a&b"} -> "a=a%26b"
+stringify {"a":null} -> "a="
+stringify {"a":true} -> "a=true"
+stringify {"a":""} -> "a="
+stringify {"a b":"c"} -> "a%20b=c"
+stringify {"a":"日"} -> "a=%E6%97%A5"
+escape -> a%20b%26c%3Dd%E6%97%A5
+unescape -> a b&c
+custom sep/eq -> {"a":"1","b":"2"}
+stringify sep/eq -> a:1;b:2

@@ -43,13 +43,14 @@ plate:
   its own). Remaining: a `git clone` entry in the project picker
 - Editor upgrades: syntax highlighting + line numbers (Runestone/TextKit 2),
   find in file, font-size setting, large-file strategy
-- Terminal engines: the package engine (`pnpm install`, lockfile-driven,
-  reusing the native tar/gzip extractor) and dev-server engine
-  (esbuild-wasm/SWC-wasm, or native-ESM serving — **not** statically-linked
-  esbuild, which is a Go binary and cannot exec on iOS), LAN hosting, and a
-  Preview container — projects you can *run*, not just edit
-- More terminal engines behind the switcher: ssh, and `git`/`npm` becoming
-  real commands inside `msh` as their engines land
+- ~~Terminal engines~~ **Shipped** (phases F/G/D — see STATUS.md): the
+  package engine (`npm`/`pnpm install` from the real registry, lockfiles,
+  integrity, native-binary→wasm substitution) and the dev-server engine
+  (vite/esbuild through the Node layer, HMR, serving clients outside the
+  app). Remaining: a Preview container — an in-app surface for what the
+  server serves (phase C)
+- More terminal engines behind the switcher: ssh. (`git` and `npm` are real
+  `msh` commands now)
 
 ### `cursor` — the AI pair
 

@@ -1,0 +1,37 @@
+fs: 105/106 present
+  MISSING: _toUnixTimestamp
+  ours only: _fail _parentExists
+fs/promises: 32/32 present
+path: 16/17 present
+  MISSING: _makeLong
+  ours only: _stripTrailing
+os: 23/23 present
+util: 44/49 present
+  MISSING: _errnoException _exceptionWithHostPort setTraceSigInt transferableAbortController transferableAbortSignal
+events: 20/20 present
+  ours only: _onceNoSignal
+stream: 26/26 present
+buffer: 14/14 present
+crypto: 70/71 present
+  MISSING: subtle
+zlib: 89/154 present
+  MISSING: ZSTD_CLEVEL_DEFAULT ZSTD_COMPRESS ZSTD_DECOMPRESS ZSTD_btlazy2 ZSTD_btopt ZSTD_btultra ZSTD_btultra2 ZSTD_c_chainLog ZSTD_c_checksumFlag ZSTD_c_compressionLevel ZSTD_c_contentSizeFlag ZSTD_c_dictIDFlag ZSTD_c_enableLongDistanceMatching ZSTD_c_hashLog ZSTD_c_jobSize ZSTD_c_ldmBucketSizeLog ZSTD_c_ldmHashLog ZSTD_c_ldmHashRateLog ZSTD_c_ldmMinMatch ZSTD_c_minMatch ZSTD_c_nbWorkers ZSTD_c_overlapLog ZSTD_c_searchLog ZSTD_c_strategy ZSTD_c_targetLength ZSTD_c_windowLog ZSTD_d_windowLogMax ZSTD_dfast ZSTD_e_continue ZSTD_e_end ZSTD_e_flush ZSTD_error_GENERIC ZSTD_error_checksum_wrong ZSTD_error_corruption_detected ZSTD_error_dictionaryCreation_failed ZSTD_error_dictionary_corrupted ZSTD_error_dictionary_wrong ZSTD_error_dstBuffer_null ZSTD_error_dstSize_tooSmall ZSTD_error_frameParameter_unsupported ZSTD_error_frameParameter_windowTooLarge ZSTD_error_init_missing ZSTD_error_literals_headerWrong ZSTD_error_maxSymbolValue_tooLarge ZSTD_error_maxSymbolValue_tooSmall ZSTD_error_memory_allocation ZSTD_error_noForwardProgress_destFull ZSTD_error_noForwardProgress_inputEmpty ZSTD_error_no_error ZSTD_error_parameter_combination_unsupported ZSTD_error_parameter_outOfBound ZSTD_error_parameter_unsupported ZSTD_error_prefix_unknown ZSTD_error_srcSize_wrong ZSTD_error_stabilityCondition_notRespected ZSTD_error_stage_wrong ZSTD_error_tableLog_tooLarge ZSTD_error_version_unsupported ZSTD_error_workSpace_tooSmall ZSTD_fast ZSTD_greedy ZSTD_lazy ZSTD_lazy2 ZstdCompress ZstdDecompress
+  ours only: Z_TREES
+net: 15/18 present
+  MISSING: _createServerHandle _normalizeArgs _setSimultaneousAccepts
+http: 20/20 present
+dns: 50/50 present
+readline: 8/8 present
+child_process: 8/9 present
+  MISSING: _forkChild
+url: 13/13 present
+querystring: 7/7 present
+string_decoder: 1/1 present
+timers: 11/11 present
+assert: 25/25 present
+tty: 3/3 present
+process: 69/84 present
+  MISSING: _debugEnd _debugProcess _fatalException _getActiveHandles _getActiveRequests _kill _linkedBinding _maxListeners _preload_modules _rawDebug _startProfilerIdleNotifier _stopProfilerIdleNotifier _tickCallback binding domain
+  ours only: addListener availableParallelism channel connected disconnect emit eventNames getMaxListeners listenerCount listeners off on once prependListener prependOnceListener rawListeners removeAllListeners removeListener send setMaxListeners
+total missing across modules: 92
+SURFACE MATCH — every absence is a recorded refusal or a node internal

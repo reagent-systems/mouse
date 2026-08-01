@@ -1,0 +1,26 @@
+  absent crypto.subtle
+  works  crypto.createDiffieHellman
+  works  crypto.generatePrime
+  works  crypto.checkPrime
+  works  crypto.getDiffieHellman
+  absent path.matchesGlob
+  works  dns.resolveTlsa
+  works  worker.moveMessagePortToContext
+  absent zlib.zstdCompressSync
+  absent https.createServer
+  absent crypto keyType dsa
+  works  crypto keyType x448
+  absent SharedArrayBuffer across workers
+  works  fs.glob
+  works  crypto.privateEncrypt
+  works  crypto.scrypt
+  works  zlib.brotliCompressSync
+  works  process.hrtime.bigint
+  works  vm.runInContext
+  works  unhandledRejection hook
+  works  assert.AssertionError
+  works  assert deep NaN/Map
+  works  assert.throws matches
+  works  url.pathToFileURL
+
+DOC CLAIMS MATCH — every documented gap is still a gap, every built thing still works

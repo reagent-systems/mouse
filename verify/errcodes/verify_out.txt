@@ -1,0 +1,20 @@
+  ok   readFileSync missing: ENOENT open
+  ok   readFileSync on a directory: EISDIR read
+  ok   statSync missing: ENOENT stat
+  ok   mkdirSync existing: EEXIST mkdir
+  ok   mkdirSync missing parent: ENOENT mkdir
+  ok   unlinkSync missing: ENOENT unlink
+  ok   rmdirSync a file: ENOTDIR rmdir
+  ok   readdirSync a file: ENOTDIR scandir
+  ok   renameSync missing source: ENOENT rename
+  ok   openSync missing, read mode: ENOENT open
+  ok   writeFileSync into a missing dir: ENOENT open
+  ok   accessSync missing: ENOENT access
+  ok   copyFileSync missing source: ENOENT copyfile
+  ok   JSON.parse bad input: (no code) -
+  ok   connect refused: ECONNREFUSED connect
+  ok   lookup bogus host: ENOTFOUND getaddrinfo
+  ok   readFile callback missing: ENOENT open
+  ok   promises readFile missing: ENOENT open
+
+ERROR CODES MATCH — all 18

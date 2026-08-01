@@ -1,0 +1,13 @@
+ordered-1
+ordered-2
+ordered-3
+stdout instanceof Writable: true
+stderr instanceof Writable: true
+stdin instanceof Readable: true
+write returns true: true
+isTTY preserved: undefined
+has columns: false
+destroy present: function
+setDefaultEncoding present: function
+on returns this: true
+pipe target: true

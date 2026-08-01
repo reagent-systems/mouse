@@ -1,0 +1,4 @@
+installing ws (for the SERVER side) with our own package manager…
+WEBSOCKET GLOBAL MATCH — the standard API behaves as node 22's does:
+open message:welcome message:echo:one message:bin:hi close:1000:true
+constants: 0 1 2 3

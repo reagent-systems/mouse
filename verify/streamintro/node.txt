@@ -1,0 +1,8 @@
+readableAborted before: false
+readableDidRead before: false
+readableDidRead after reading: true
+readableAborted after full read: false
+writableAborted before: false
+writableAborted after destroy: true
+readableAborted after destroy: true
+unread stream didRead: false

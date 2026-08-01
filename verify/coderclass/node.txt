@@ -1,0 +1,10 @@
+Gzip: class=function factory=function new=true factory=true transform=true writable=function
+Gunzip: class=function factory=function new=true factory=true transform=true writable=function
+Deflate: class=function factory=function new=true factory=true transform=true writable=function
+Inflate: class=function factory=function new=true factory=true transform=true writable=function
+DeflateRaw: class=function factory=function new=true factory=true transform=true writable=function
+InflateRaw: class=function factory=function new=true factory=true transform=true writable=function
+Unzip: class=function factory=function new=true factory=true transform=true writable=function
+BrotliCompress: class=function factory=function new=true factory=true transform=true writable=function
+BrotliDecompress: class=function factory=function new=true factory=true transform=true writable=function
+brotli round trip: true

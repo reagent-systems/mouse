@@ -1,0 +1,14 @@
+cold passed arithmetic adds
+cold failed arithmetic fails a comparison
+cold passed arithmetic deep equality
+cold pending arithmetic skipped
+cold passed arithmetic async resolves
+cold passed arithmetic throws
+cold total=6 passed=4 failed=1 skipped=1
+warm passed arithmetic adds
+warm failed arithmetic fails a comparison
+warm passed arithmetic deep equality
+warm pending arithmetic skipped
+warm passed arithmetic async resolves
+warm passed arithmetic throws
+warm total=6 passed=4 failed=1 skipped=1

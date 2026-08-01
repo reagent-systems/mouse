@@ -1,0 +1,52 @@
+hand-assembled module: 143 bytes
+real stderr: (node:44310) ExperimentalWarning: WASI is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+---- ours ----
+hello from wasi
+start returned 0
+args: 3 bytes 24
+first arg at 0 is "hello.wasm"
+environ: 2 bytes 20
+clock_res_get: 0
+realtime clock is sane: true
+random_get: 0 filled: true
+fd_prestat_get(3): 0 name length 5
+preopen name: "/work"
+fd_fdstat_get(3) type: 3
+fd_prestat_get(9) on nothing: 8
+fd_close(9) on nothing: 8
+path_open: 0 gave a descriptor above stdio: true
+fd_read: 76 ""
+fd_seek to 2: 76 tell says 0
+fd_filestat_get size: error
+fd_close: 0
+path_open on a missing file: 44
+path_filestat_get: 27
+sched_yield: 0
+sock_send is refused: 28
+---- real ----
+hello from wasi
+start returned 0
+args: 3 bytes 24
+first arg at 0 is "hello.wasm"
+environ: 2 bytes 20
+clock_res_get: 0
+realtime clock is sane: true
+random_get: 0 filled: true
+fd_prestat_get(3): 0 name length 5
+preopen name: "/work"
+fd_fdstat_get(3) type: 3
+fd_prestat_get(9) on nothing: 8
+fd_close(9) on nothing: 8
+path_open: 0 gave a descriptor above stdio: true
+fd_read: 76 ""
+fd_seek to 2: 76 tell says 0
+fd_filestat_get size: error
+fd_close: 0
+path_open on a missing file: 44
+path_filestat_get: 27
+sched_yield: 0
+sock_send is refused: 28
+
+WASI MATCH — a hand-assembled wasm module wrote through fd_write and 21 syscall results are identical to node's own WASI, files and errors included

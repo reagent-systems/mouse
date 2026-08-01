@@ -1,0 +1,8 @@
+methods present: |
+readable getters: 99|0|false||false|
+writable getters: 77|0|false|false|false|false
+readableEncoding after setEncoding: hex
+unpipe stops delivery: ["before"]
+unpipe all: ["a:one","b:one"]
+unpipe event: fired
+writableLength grows: 5

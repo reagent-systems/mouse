@@ -6,6 +6,9 @@ process rules. Everything there applies to you.
 
 Quick anchors:
 
+- Where the project actually stands, per phase, with evidence:
+  [STATUS.md](STATUS.md). The gate suite behind it: `verify/` (run
+  `verify/verify.sh`). Keep STATUS.md current when phase state changes.
 - After adding/removing/renaming source files: `cd swift && xcodegen generate`
 - Build check: `xcodebuild -project swift/Mouse.xcodeproj -scheme Mouse
   -destination 'generic/platform=iOS Simulator' build`

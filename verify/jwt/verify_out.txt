@@ -1,0 +1,7 @@
+installing jsonwebtoken with our own package manager…
+JWT MATCH — jsonwebtoken signs on our engine and real node verifies it, and the reverse:
+ES256 payload: {"sub":"mouse","scope":"phase-g"}
+HS256 payload: {"sub":"mouse","scope":"phase-g"}
+RS256 payload: {"sub":"mouse","scope":"phase-g"}
+PS256 payload: {"sub":"mouse","scope":"phase-g"}
+tampered token rejected: JsonWebTokenError

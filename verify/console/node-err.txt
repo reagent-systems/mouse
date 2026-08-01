@@ -1,0 +1,3 @@
+warn line
+error line
+Assertion failed: assertion text

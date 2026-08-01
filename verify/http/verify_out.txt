@@ -1,0 +1,18 @@
+MARK wire: ours serving
+MARK wire: real serving
+wire: our server's bytes are node's, across 12 request shapes
+MARK get: ours serving
+MARK get: real serving
+client: node's http.get reads our server exactly as it reads node's
+wire: our CLIENT's request bytes are node's, across 8 shapes
+pool: four requests over the same number of connections as node — requests=4 connections=1
+MARK fixture http-round-trip
+fixture http-round-trip: match
+MARK fixture http-post-body
+fixture http-post-body: match
+MARK fixture http-api-surface
+fixture http-api-surface: match
+MARK fixture http-header-api
+fixture http-header-api: match
+https.createServer refuses with the TLS reason (node would create an unusable one)
+PHASE G HTTP: ALL PASS
