@@ -60,6 +60,32 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
     return (session, base)
 }
 
+/// A NodeProgram host that records every `io.write` arrival verbatim — the probe for the
+/// delivery-order contract (case 5). No parser, no session: the recording IS the assertion.
+@MainActor
+final class BurstHost {
+    let program: NodeProgram
+    var recorded = ""
+    var exited = false
+    init(source: String, root: URL) {
+        let engine = NodeEngine(root: root, env: ["TERM": "xterm-256color"])
+        program = NodeProgram(title: "node burst.js", source: source, path: "/burst.js",
+                              argv: ["node", "/burst.js"], cwd: "/", engine: engine,
+                              transcript: { _, _ in }, onExit: {})
+        program.start(io: TerminalProgramIO(rows: 10, columns: 60,
+                                            write: { [weak self] text in self?.recorded += text },
+                                            exit: { [weak self] in self?.exited = true }))
+    }
+}
+
+@MainActor
+func echoBaseFor(_ name: String) -> URL {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("tuinline-\(name)-\(getpid())")
+    try? FileManager.default.removeItem(at: base)
+    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    return base
+}
+
 @MainActor func main() async {
     var failures = 0
     func expect(_ condition: Bool, _ label: String) {
@@ -262,7 +288,36 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
         expect(backAgain, "echo after create-vite did not land in the scrollback")
     }
 
-    // -- Case 5: the control. A one-shot command stays in the scrollback; the grid stays out
+    // -- Case 5: delivery ORDER under burst writes from the engine thread. The engine emits
+    // from its JS thread; the terminal applies on the main actor. 60 interleaved
+    // stdout/stderr write pairs must arrive concatenated in exactly production order — any
+    // reorder, loss, or duplication breaks the equality. This is the contract whose absence
+    // let a burst of prompt frames apply out of order on the phone: the display settled on
+    // whichever frame happened to land LAST, which reads as a freeze at a stale frame.
+    let burstBase = echoBaseFor("burst")
+    defer { try? FileManager.default.removeItem(at: burstBase) }
+    let burst = BurstHost(source: """
+        process.stdin.setRawMode(true);
+        for (let i = 0; i < 60; i++) {
+          process.stdout.write('S' + i + ';');
+          process.stderr.write('E' + i + ';');
+        }
+        process.exit(0);
+        """, root: burstBase)
+    let burstDone = await pump(until: { burst.exited }, seconds: 30)
+    expect(burstDone, "the burst program never exited")
+    let expected = (0..<60).map { "S\($0);E\($0);" }.joined()
+    if !burst.recorded.hasPrefix(expected) {
+        expect(false, "burst writes arrived out of order or incomplete")
+        // The first divergence, for the log.
+        let got = burst.recorded.prefix(expected.count)
+        for (index, pair) in zip(expected, got).enumerated() where pair.0 != pair.1 {
+            print("    first divergence at offset \(index): want \(pair.0) got \(pair.1)")
+            break
+        }
+    }
+
+    // -- Case 6: the control. A one-shot command stays in the scrollback; the grid stays out
     // of it entirely.
     let (echoSession, echoBase) = makeSession(script: nil, name: "echo")
     defer { try? FileManager.default.removeItem(at: echoBase) }
@@ -279,8 +334,9 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
         print("TUI INLINE MATCH — cursor-up repaint engages the grid and replaces rows in place,")
         print("  a mid-run keystroke reaches the program, a @clack prompt takes eight rapid")
         print("  keystrokes into its frame and submits them, create-vite's Enter transition")
-        print("  reaches the grid observably with nothing echoed under the frame, exit restores")
-        print("  the prompt with the last frame in history, and `echo hi` stays scrollback-only")
+        print("  reaches the grid observably with nothing echoed under the frame, 120 burst")
+        print("  writes from the engine thread arrive in production order, exit restores the")
+        print("  prompt with the last frame in history, and `echo hi` stays scrollback-only")
     } else {
         print("TUI INLINE FAILED — \(failures)")
         exit(1)
