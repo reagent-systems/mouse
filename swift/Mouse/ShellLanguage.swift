@@ -209,7 +209,11 @@ enum ShellLexer {
                     case ("|", "|"): tokens.append(.op("||")); i += 2
                     case (">", ">"): tokens.append(.op(">>")); i += 2
                     case (";", ";"): tokens.append(.op(";;")); i += 2
-                    case ("&", _): throw ShellParseError(message: "no job control (&) — processes arrive with the wasm runtime")
+                    // This used to say processes "arrive with the wasm runtime". They arrived —
+                    // `pkg install python` runs CPython — and `&` still does not work, so the
+                    // old reason had stopped being true. The real one: msh runs one command at
+                    // a time, and a running program holds the terminal until a keypress stops it.
+                    case ("&", _): throw ShellParseError(message: "no job control (&) — msh runs one command at a time; a running program holds the terminal until a keypress stops it")
                     default: tokens.append(.op(String(ch))); i += 1
                     }
                 default:

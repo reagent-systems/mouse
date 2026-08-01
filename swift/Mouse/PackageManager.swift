@@ -704,6 +704,10 @@ enum TarGz {
         return try inflate(data.subdata(in: idx..<data.count))
     }
 
+    /// Raw DEFLATE, the same stream a zip entry holds — shared with `ZipArchive`, which unpacks
+    /// downloaded language runtimes.
+    static func inflateRaw(_ input: Data) throws -> Data { try inflate(input) }
+
     private static func inflate(_ input: Data) throws -> Data {
         let streamPointer = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
         defer { streamPointer.deallocate() }

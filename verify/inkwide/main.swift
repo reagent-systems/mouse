@@ -51,6 +51,29 @@ func main() async {
     let here = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     let project = here.appendingPathComponent("project")
     let source = (try? String(contentsOf: project.appendingPathComponent("app.js"), encoding: .utf8)) ?? ""
+
+    // ink and react are installed HERE, on first run, by the engine's own package manager —
+    // `node_modules` is not checked in, and a harness that assumes a tree someone else left
+    // behind is a harness that passes for the wrong reason.
+    if !FileManager.default.fileExists(atPath: project.appendingPathComponent("node_modules").path) {
+        print("installing ink and react with our own package manager…")
+        // Deliberately NOT `await`: this harness drives the engine by spinning
+        // `RunLoop.current`, and an await here suspends and resumes on a cooperative thread
+        // whose `current` run loop is not the main one — after which the pump spins a run loop
+        // nobody is scheduling work on, and ink appears to emit nothing at all for three
+        // minutes. Blocking the main thread on the install keeps every later line on the thread
+        // the run loop belongs to. Cost an hour to find; it looked exactly like a regression.
+        let finished = DispatchSemaphore(value: 0)
+        var installFailure: Error?
+        Task.detached {
+            do { _ = try await PackageManager.install(requirements: ["ink": "^7.1.1", "react": "^19.2.8"],
+                                                      into: project) }
+            catch { installFailure = error }
+            finished.signal()
+        }
+        finished.wait()
+        if let installFailure { print("INK WIDE FAILED — install: \(installFailure)"); exit(1) }
+    }
     let expected = ((try? String(contentsOf: here.appendingPathComponent("node.txt"), encoding: .utf8)) ?? "")
         .split(separator: "\n").map(String.init)
 

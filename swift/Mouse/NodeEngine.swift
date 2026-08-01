@@ -185,11 +185,21 @@ final class NodeEngine: @unchecked Sendable {
     /// The ESM entry's top-level await hasn't settled yet — the loop keeps driving.
     private var entryPending = false
 
-    init(root: URL, env: [String: String], shell: ShellBridge? = nil, tty: TTY? = nil) {
+    /// Directories outside `root` that are visible at a fixed path in the virtual filesystem.
+    /// An installed language runtime lives in Application Support, not in the user's project, so
+    /// without this a `python` mounted at `/usr/lib/python` simply does not exist to any script.
+    /// Longest prefix wins; `normalize` has already collapsed `..`, so a mounted path cannot be
+    /// used to climb out of the mount.
+    private var mounts: [(prefix: String, url: URL)] = []
+
+    init(root: URL, env: [String: String], shell: ShellBridge? = nil, tty: TTY? = nil,
+         mounts: [(prefix: String, url: URL)] = []) {
         self.root = root
         self.env = env
         self.shell = shell
         self.tty = tty
+        self.mounts = mounts.map { (normalizeMountPrefix($0.prefix), $0.url) }
+            .sorted { $0.prefix.count > $1.prefix.count }
     }
 
     /// Attach the terminal after init — the host program can't hand closures over itself
@@ -1124,7 +1134,9 @@ final class NodeEngine: @unchecked Sendable {
                     result[pair.key] = String(describing: pair.value)
                 }
             }
-            let child = NodeEngine(root: root, env: childEnv, shell: shell)
+            // Mounts are inherited: a child process that cannot see the runtimes its parent can
+            // is a filesystem that changes shape depending on who is looking at it.
+            let child = NodeEngine(root: root, env: childEnv, shell: shell, mounts: mounts)
             // Output crosses back as event-loop jobs on OUR thread, like every other event.
             child.attachTTY(TTY(
                 write: { [weak self] text in
@@ -2422,6 +2434,14 @@ final class NodeEngine: @unchecked Sendable {
     // MARK: - Paths (workspace-virtual ↔ real)
 
     /// "/a/b" and "a/b" both live under the workspace root; ".." clamps at "/".
+    /// A mount prefix is always absolute and never trailing-slashed, so prefix comparison is a
+    /// plain string test rather than a special case per call site.
+    private func normalizeMountPrefix(_ prefix: String) -> String {
+        var text = prefix.hasPrefix("/") ? prefix : "/" + prefix
+        while text.count > 1 && text.hasSuffix("/") { text.removeLast() }
+        return text
+    }
+
     private func normalize(_ path: String) -> String {
         var parts: [String] = []
         for piece in path.split(separator: "/") {
@@ -2434,6 +2454,13 @@ final class NodeEngine: @unchecked Sendable {
 
     private func realURL(_ path: String) -> URL {
         let normalized = normalize(path)
+        for mount in mounts {
+            if normalized == mount.prefix { return mount.url }
+            if normalized.hasPrefix(mount.prefix + "/") {
+                let rest = String(normalized.dropFirst(mount.prefix.count + 1))
+                return mount.url.appendingPathComponent(rest)
+            }
+        }
         return normalized == "/" ? root : root.appendingPathComponent(String(normalized.dropFirst()))
     }
 
@@ -5745,6 +5772,17 @@ final class NodeEngine: @unchecked Sendable {
         return open + '\n' + entries.map(function(entry) { return padding + entry; }).join(',\n')
              + '\n' + '  '.repeat(indent || 0) + close;
       }
+      const inspectCustomSymbol = Symbol.for('nodejs.util.inspect.custom');
+      // `util.inspect.defaultOptions` — a LIVE bag node lets a program mutate to change how
+      // every later inspect prints. Values mirror node v22 exactly (note breakLength 80 here,
+      // against the 128 the console path uses). n8n's bin sets `customInspect = false` on it
+      // and crashed on the phone because the object did not exist.
+      const inspectDefaults = {
+        showHidden: false, depth: 2, colors: false, customInspect: true, showProxy: false,
+        maxArrayLength: 100, maxStringLength: 10000, breakLength: 80, compact: 3,
+        sorted: false, getters: false, numericSeparator: false,
+      };
+
       function inspect(value, depth, seen) {
         // The outer call reports a cycle with `<ref *1>` so a reader knows the [Circular *1]
         // marker below refers to THIS object rather than something further out.
@@ -5763,6 +5801,20 @@ final class NodeEngine: @unchecked Sendable {
         if (type === 'boolean') return String(value);
         if (type === 'bigint') return String(value) + 'n';
         if (type === 'symbol') return String(value);
+        // A type's OWN opinion of how it prints. node calls this hook for every object and
+        // function that defines it, and packages rely on it (n8n turns it off explicitly, which
+        // is only meaningful if it is on by default). We never called it at all.
+        if (inspect._customInspect !== false && (type === 'object' || type === 'function')) {
+          const custom = value[inspectCustomSymbol];
+          if (typeof custom === 'function') {
+            // node hands the hook the current depth, an options bag and `inspect` itself so it
+            // can recurse. A string comes back verbatim; anything else is formatted as a value.
+            const produced = custom.call(value, depth,
+                                         { depth: depth, colors: false, customInspect: true },
+                                         inspect);
+            return typeof produced === 'string' ? produced : inspect(produced, depth, seen);
+          }
+        }
         if (type === 'function') {
           const isClass = /^class[\s{]/.test(String(value));
           if (isClass) return value.name ? '[class ' + value.name + ']' : '[class (anonymous)]';
@@ -6439,8 +6491,16 @@ final class NodeEngine: @unchecked Sendable {
         env: Object.assign({}, __env),
         platform: 'darwin',
         arch: 'arm64',
-        version: 'v20.19.0',
-        versions: { node: '20.19.0', mouse: '1.0.0' },
+        // The version we claim is the version the suite DIFFS against: every fixture in
+        // verify/ is compared byte-for-byte with real node v22.22.3, so 20.19.0 was an
+        // understatement, not a safety margin — and it locked out every package with
+        // `engines: >=22` (n8n refuses to start on the phone with exactly that message).
+        // Absent on purpose: v8, openssl, uv, modules. We are JavaScriptCore with no native
+        // ABI; a `modules` value would invite node-pre-gyp to fetch a prebuilt .node and fail
+        // at load instead of failing at resolve. No package in the installed corpus reads
+        // them, and 65 read `versions.node`.
+        version: 'v22.22.3',
+        versions: { node: '22.22.3', mouse: '1.0.0' },
         pid: 1,
         ppid: 0,
         execArgv: [],
@@ -7430,24 +7490,35 @@ final class NodeEngine: @unchecked Sendable {
                 const memory = view();
                 let cursor = bufferPointer;
                 let index = Number(cookie);
-                while (index < names.length) {
+                const end = bufferPointer + bufferLength;
+                while (index < names.length && cursor < end) {
                   const name = utf8(names[index]);
-                  const needed = 24 + name.length;
-                  if (cursor + needed > bufferPointer + bufferLength) break;
-                  memory.setBigUint64(cursor, BigInt(index + 1), true);          // next cookie
-                  memory.setBigUint64(cursor + 8, 0n, true);                     // inode
-                  memory.setUint32(cursor + 16, name.length, true);
                   let type = FILETYPE.unknown;
                   try {
                     type = fs.statSync(pathModule.join(entry.real, names[index])).isDirectory()
                       ? FILETYPE.directory : FILETYPE.regular;
                   } catch (error) {}
-                  memory.setUint8(cursor + 20, type);
-                  bytes().set(name, cursor + 24);
-                  cursor += needed;
+                  // Assembled whole, then copied CLAMPED to what is left. A partially written
+                  // final entry is what the protocol expects; writing one field at a time
+                  // straight into wasm memory would run past the buffer the module gave us.
+                  const record = Buffer.alloc(24 + name.length);
+                  record.writeBigUInt64LE(BigInt(index + 1), 0);                 // next cookie
+                  record.writeBigUInt64LE(0n, 8);                                // inode
+                  record.writeUInt32LE(name.length, 16);
+                  record.writeUInt8(type, 20);
+                  name.copy(record, 24);
+                  bytes().set(record.subarray(0, Math.min(record.length, end - cursor)), cursor);
+                  cursor += record.length;
                   index += 1;
                 }
-                memory.setUint32(usedPointer, cursor - bufferPointer, true);
+                // A SHORT answer means "the directory ended". Stopping before an entry that did
+                // not fit left bufused < bufferLength with names still to come, so the caller
+                // concluded the listing was complete and everything past the cut vanished — for
+                // CPython that was `import re` failing while `import json`, 38 names earlier in
+                // the same directory, worked. Filling the buffer to the brim (the last entry
+                // truncated, which the protocol allows and the caller re-reads by cookie) is
+                // what says "ask again".
+                memory.setUint32(usedPointer, Math.min(cursor - bufferPointer, bufferLength), true);
                 return E.success;
               },
               path_open(dirFd, dirFlags, pathPointer, pathLength, openFlags,
@@ -7557,12 +7628,21 @@ final class NodeEngine: @unchecked Sendable {
         }
 
         function writeFilestat(memory, pointer, stat, entry) {
-          const isDirectory = stat ? stat.isDirectory() : (entry && entry.kind !== 'file');
+          // The standard streams are CHARACTER devices, not directories. The old rule here was
+          // "anything without an open file behind it is a directory", which quietly reported
+          // fd 0/1/2 as directories — and CPython refuses to start at all against that:
+          // "init_sys_streams: <stdin> is a directory, cannot continue". Nothing smaller than a
+          // whole language runtime had ever asked.
+          const kind = entry ? entry.kind : null;
+          const type = (kind === 'stdin' || kind === 'stdout' || kind === 'stderr')
+                     ? FILETYPE.character
+                     : stat ? (stat.isDirectory() ? FILETYPE.directory : FILETYPE.regular)
+                     : (kind === 'file' ? FILETYPE.regular : FILETYPE.directory);
           const size = stat ? stat.size : 0;
           const time = stat && stat.mtimeMs ? BigInt(Math.round(stat.mtimeMs)) * 1000000n : 0n;
           memory.setBigUint64(pointer, 0n, true);                      // dev
           memory.setBigUint64(pointer + 8, 0n, true);                  // ino
-          memory.setUint8(pointer + 16, isDirectory ? FILETYPE.directory : FILETYPE.regular);
+          memory.setUint8(pointer + 16, type);
           memory.setBigUint64(pointer + 24, 1n, true);                 // nlink
           memory.setBigUint64(pointer + 32, BigInt(size), true);
           memory.setBigUint64(pointer + 40, time, true);
@@ -8042,29 +8122,39 @@ final class NodeEngine: @unchecked Sendable {
           format: format,
           // node takes an OPTIONS object here; only a positional depth was understood, so
           // `{depth: 0}` read as depth `undefined` and printed the whole tree.
-          inspect: function(value, options) {
-            if (options !== null && typeof options === 'object') {
-              const depth = options.depth === null ? Infinity
-                          : options.depth === undefined ? 2 : Number(options.depth);
-              // `compact: false` and a small `breakLength` are how a caller asks for one entry
-              // per line, and `maxArrayLength` is how it asks for less — all three were
-              // accepted and ignored, which reads as a formatter that does not work.
-              const previous = { break: inspect._breakLength, compact: inspect._compact,
-                                 max: inspect._maxArrayLength };
-              if (options.breakLength !== undefined) inspect._breakLength = Number(options.breakLength);
-              if (options.compact !== undefined) inspect._compact = options.compact;
-              if (options.maxArrayLength !== undefined) {
-                inspect._maxArrayLength = options.maxArrayLength === null
-                  ? Infinity : Number(options.maxArrayLength);
-              }
-              try { return inspect(value, depth); }
-              finally {
-                inspect._breakLength = previous.break;
-                inspect._compact = previous.compact;
-                inspect._maxArrayLength = previous.max;
-              }
+          inspect: function(value, options, positionalDepth) {
+            // Per-call options win, `defaultOptions` fills the rest — which is what makes a
+            // mutated default take effect. The legacy signature is
+            // `inspect(object, showHidden, depth, colors)`: a non-object second argument is
+            // showHidden, NOT depth. Reading it as depth made `inspect(x, 0)` collapse the
+            // whole tree where node prints two levels.
+            const bag = (options !== null && typeof options === 'object') ? options : {};
+            const settings = Object.assign({}, inspectDefaults, bag);
+            if (options === null || typeof options !== 'object') {
+              settings.showHidden = !!options;
+              if (positionalDepth !== undefined) settings.depth = positionalDepth;
             }
-            return inspect(value, options);
+            const depth = settings.depth === null ? Infinity
+                        : settings.depth === undefined ? 2 : Number(settings.depth);
+            // `compact: false` and a small `breakLength` are how a caller asks for one entry
+            // per line, and `maxArrayLength` is how it asks for less — all three were
+            // accepted and ignored, which reads as a formatter that does not work.
+            const previous = { break: inspect._breakLength, compact: inspect._compact,
+                               max: inspect._maxArrayLength, custom: inspect._customInspect };
+            if (settings.breakLength !== undefined) inspect._breakLength = Number(settings.breakLength);
+            if (settings.compact !== undefined) inspect._compact = settings.compact;
+            if (settings.maxArrayLength !== undefined) {
+              inspect._maxArrayLength = settings.maxArrayLength === null
+                ? Infinity : Number(settings.maxArrayLength);
+            }
+            inspect._customInspect = settings.customInspect !== false;
+            try { return inspect(value, depth); }
+            finally {
+              inspect._breakLength = previous.break;
+              inspect._compact = previous.compact;
+              inspect._maxArrayLength = previous.max;
+              inspect._customInspect = previous.custom;
+            }
           },
           inherits: function(ctor, superCtor) {
             ctor.super_ = superCtor;
@@ -17140,7 +17230,8 @@ final class NodeEngine: @unchecked Sendable {
           if (!m.TextDecoder) m.TextDecoder = globalThis.TextDecoder;
           if (!m.formatWithOptions) m.formatWithOptions = function(options, ...rest) { return m.format.apply(null, rest); };
           if (!m.isDeepStrictEqual) m.isDeepStrictEqual = function(a, b) { return globalThis.__deepEqual(a, b, true); };
-          if (m.inspect && !m.inspect.custom) m.inspect.custom = Symbol.for('nodejs.util.inspect.custom');
+          if (m.inspect && !m.inspect.custom) m.inspect.custom = inspectCustomSymbol;
+          if (m.inspect && !m.inspect.defaultOptions) m.inspect.defaultOptions = inspectDefaults;
           if (m.promisify && !m.promisify.custom) m.promisify.custom = Symbol.for('nodejs.util.promisify.custom');
           if (!m.getSystemErrorName) m.getSystemErrorName = function(code) {
             const names = { 2: 'ENOENT', 13: 'EACCES', 17: 'EEXIST', 20: 'ENOTDIR', 21: 'EISDIR', 32: 'EPIPE' };

@@ -4,26 +4,11 @@
 # really a typo is the most expensive kind of noise: it looks exactly like a regression.
 #
 # Usage: ./verify.sh [harness ...]      (no arguments = all of them)
-M=/Users/thyfriendlyfox/Projects/mouse/swift/Mouse
 T="$(cd "$(dirname "$0")" && pwd)"
 
-# The Node engine and everything it links.
-NODE_SET="$M/NodeEngine.swift $M/NodeSockets.swift $M/NodeWatch.swift $M/NodeKeys.swift \
-$M/NodeScrypt.swift $M/NodeBrotli.swift $M/NodeDNS.swift $M/PackageManager.swift"
-# Harnesses that drive the terminal screen need phase T as well.
-TERM_SET="$NODE_SET $M/TerminalScreen.swift $M/TerminalWidth.swift $M/TerminalPrograms.swift"
-# msh needs the shell, its language, git and the terminal.
-SHELL_SET="$M/Shell.swift $M/ShellLanguage.swift $M/GitCore.swift $M/GitRemote.swift $TERM_SET"
-
-sources_for() {
-  case "$1" in
-    shell)     echo "$SHELL_SET" ;;
-    tty|termtest) echo "$TERM_SET" ;;
-    # termsays drives the TerminalSession itself, so it needs the shell as well as the screen.
-    termsays)  echo "$SHELL_SET $M/Terminal.swift $M/Workspace.swift $M/CarouselDeck.swift" ;;
-    *)         echo "$NODE_SET" ;;
-  esac
-}
+# The source sets each harness builds against live in build-one.sh, which this script invokes.
+# They were duplicated here as well and the copy drifted out of date, which is worse than having
+# none: it reads as authoritative.
 
 # Each harness recompiles the whole engine, so a serial full run is around an hour. Build in
 # PARALLEL — the machine has cores and the builds are independent.
@@ -38,15 +23,6 @@ if [ ${#targets[@]} -eq 0 ]; then
   done
 fi
 
-build_one() {
-  name="$1"; dir="$T/$name"
-  # The binary AND any stale results go first: a failed build otherwise leaves both in place and
-  # the old ones pass, which has happened here before.
-  rm -f "$dir/verify_bin" "$dir/verify_out.txt"
-  (cd "$dir" && xcrun swiftc -O -o verify_bin main.swift $(sources_for "$name") -lz -lresolv \
-     > verify_build.log 2>&1)
-}
-export -f build_one 2>/dev/null || true
 
 echo "building ${#targets[@]} harnesses ($JOBS at a time)..."
 printf '%s\n' "${targets[@]}" | xargs -P "$JOBS" -n 1 "$T/build-one.sh"

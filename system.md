@@ -2685,6 +2685,64 @@ small `fs` shim gives a real scripting language immediately.
 
 ---
 
+## 5b. Phase E — runtimes as data
+
+Phase E was the one phase with no section of its own, which is how it kept
+being described as further away than it was. What it means concretely:
+**a language runtime is a WebAssembly artifact the app downloads, not code
+the app ships.**
+
+The measurement that settled it: the official CPython `wasm32-wasi` build
+(`python.wasm`, 30 MB, from `cpython-wasi-build`) imports **nothing but
+`wasi_snapshot_preview1`** — 42 functions, and phase G already implemented
+all 42. No threads, no shared memory, no sockets. There was no runtime work
+left to do; the gap was delivery.
+
+Three pieces close it, and all three are gated:
+
+- **A catalog and an installer** ([Runtimes.swift](swift/Mouse/Runtimes.swift)).
+  `pkg install python` downloads the release, checks it against a recorded
+  SHA-256, and unpacks it into Application Support — *not* Caches, which iOS
+  may evict, and a language vanishing mid-project is worse than the disk.
+  Unpacking needs a **zip reader written here**: iOS has no `unzip`, and the
+  runtimes upstream publishes are zips. It reuses the raw-DEFLATE inflate
+  `TarGz` already had for npm tarballs, and refuses any entry whose name
+  escapes its directory.
+- **Mounts** ([NodeEngine.swift](swift/Mouse/NodeEngine.swift)). The engine's
+  filesystem is rooted at the workspace, so nothing outside it exists to a
+  script. An installed runtime is visible at a fixed path — `/usr/lib/python`
+  — through a mount table that children inherit. Without this the runtime is
+  installed and unreachable.
+- **A launcher** (`python` in [Shell.swift](swift/Mouse/Shell.swift)). There
+  is no exec on iOS: msh writes a small bootstrap, the node engine runs it,
+  and the bootstrap instantiates the interpreter through `node:wasi` — the
+  same path that already runs esbuild and rollup, with a much larger
+  passenger.
+
+Two bugs only a whole language runtime was ever going to find, both in WASI:
+
+- `fd_filestat_get` reported **stdin, stdout and stderr as directories**
+  (the rule was "anything without an open file behind it is a directory").
+  CPython refuses to start against that: *"init_sys_streams: `<stdin>` is a
+  directory, cannot continue"*.
+- `fd_readdir` stopped before an entry that did not fit, leaving
+  `bufused < buf_len` — which in WASI **means the directory ended**. Every
+  name past the cut disappeared. The visible symptom was `import re` failing
+  while `import json`, 38 entries earlier in the same directory, worked.
+
+What is NOT done under this phase: `$PATH` lookup, executable bits, and
+background jobs (`&`, `jobs`, `kill`). The msh lexer still refuses `&` by
+name. Those are the process half of E; the runtime half is what shipped.
+
+Gated by `verify/python` (CPython's own behaviour: `-c`, script files, the
+shipped stdlib, computation, file IO, and `sys.exit`/traceback statuses) and
+`verify/pkgpython` (the whole `pkg install python` → `python hello.py` path
+through msh). Real node is deliberately **not** the reference for these: it
+segfaults on this module about as often as it runs it, flipping on
+differences as small as how deep the JS stack was at `wasi.start`.
+
+---
+
 ## 6. Unified phase map
 
 Merging this document, [compile.md](compile.md), and [xcode.md](xcode.md)
@@ -2697,7 +2755,9 @@ C  artifact server        serve/LAN; = xcode.md Phase 0        pays for itself 3
 D  web toolchain          tsc, bundling, Preview container     MOSTLY DONE — tsc compiles and
                           watches, and webpack bundles byte-identically to node
                           (see §0); the Preview container remains
-E  wasm runtime           WASI, $PATH, real processes          the system substrate
+E  wasm runtime           WASI, $PATH, real processes          RUNTIME HALF DONE — see §5b:
+                          `pkg install python` runs CPython 3.14.6 from the official
+                          wasm32-wasi build. Remaining: $PATH, exec bits, background jobs
 F  package manager        pkg + pnpm on existing tar/gzip     ✅ DONE (resolve/install/bins; run needs G)
 G  Node layer             API shim on JSContext                ✅ DONE (CJS+ESM, live node children + child_process→msh, streaming fetch/https, raw TTY→phase-T screen, streams, readline, zlib, real TCP, pooling http client+server, WebSockets incl. wss, fs.watch, ciphers+KDFs, RSA/EC/Ed25519 signing — express, ws, chokidar, tsc --watch, webpack, JWTs; gaps: TLS server, finite-field DH, shared memory between threads, WebView JIT)
 H  CI bridge              push → build → fetch artifact        unlocks Rust/Go/Swift

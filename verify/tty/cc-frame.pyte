@@ -1,0 +1,30 @@
+╭────────────────────────────────────────────────────────────────────╮
+│                                                                    │
+│ Configuration Error                                                │
+│                                                                    │
+│ The configuration file at /.claude.json contains invalid JSON.     │
+│                                                                    │
+│ JSON Parse error: Expected '}'                                     │
+│                                                                    │
+│ Choose an option:                                                  │
+│ ❯ 1. Exit and fix manually                                         │
+│   2. Reset with default configuration                              │
+│                                                                    │
+╰────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

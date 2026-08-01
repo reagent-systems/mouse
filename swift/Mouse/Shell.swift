@@ -1237,6 +1237,9 @@ final class MouseShell {
             return await npmCmd(tool: name, args, context: context, interactive: interactive)
         case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
+        case "pkg": return await pkgCmd(args, context: context)
+        case "python", "python3":
+            return await pythonCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1263,11 +1266,23 @@ final class MouseShell {
     // MARK: - node (the phase-G engine behind `node`, bins, and npx)
 
     private func nodeCmd(_ args: [String], stdin: String, context: Context, interactive: Bool) async -> IO {
-        if args.first == "-v" || args.first == "--version" { return IO(out: "v20.19.0\n") }
+        if args.first == "-v" || args.first == "--version" { return IO(out: "v22.22.3\n") }
         if args.first == "-e" || args.first == "--eval" {
             guard args.count >= 2 else { return IO(err: "node: -e needs code\n", status: 2) }
             return await runNode(source: args[1], path: "/[eval].js", args: Array(args.dropFirst(2)),
                                  stdin: stdin, context: context, title: "node -e",
+                                 interactive: interactive, isEval: true)
+        }
+        // `node -p` is `-e` that PRINTS the expression's value — the form every quick check and
+        // half the shell scripts in a package's bin directory use. It was unimplemented, so it
+        // fell through to "can't read -p", which reads as a missing file rather than a missing
+        // flag. The expression is wrapped rather than post-processed so that its value goes
+        // through the engine's own console.log, exactly as node's does.
+        if args.first == "-p" || args.first == "--print" {
+            guard args.count >= 2 else { return IO(err: "node: -p needs code\n", status: 2) }
+            let printed = "console.log((function(){ return eval(" + Self.jsStringLiteral(args[1]) + "); })())"
+            return await runNode(source: printed, path: "/[eval].js", args: Array(args.dropFirst(2)),
+                                 stdin: stdin, context: context, title: "node -p",
                                  interactive: interactive, isEval: true)
         }
         guard let file = args.first else { return IO(err: "node: usage: node <file> | -e <code>\n", status: 2) }
@@ -1277,6 +1292,143 @@ final class MouseShell {
         }
         return await runNode(source: source, path: "/" + resolved.rel, args: Array(args.dropFirst()),
                              stdin: stdin, context: context, title: "node \(file)", interactive: interactive)
+    }
+
+    // MARK: - Language runtimes (pkg, python)
+
+    /// Every installed runtime, visible to every program at a stable path. Mounting them
+    /// unconditionally rather than per-command is deliberate: a runtime is part of the
+    /// environment, and a filesystem whose shape depends on which command is running is a
+    /// filesystem nobody can reason about.
+    private var runtimeMounts: [(prefix: String, url: URL)] {
+        RuntimeStore.installedNames().compactMap { name in
+            RuntimeStore.installed(name).map { (prefix: "/usr/lib/" + name, url: $0.directory) }
+        }
+    }
+
+    private func pkgCmd(_ args: [String], context: Context) async -> IO {
+        let action = args.first ?? "list"
+        switch action {
+        case "list", "ls":
+            var lines: [String] = []
+            for entry in RuntimeCatalog.all {
+                let mark = RuntimeStore.installed(entry.name) != nil ? "installed" : "available"
+                lines.append("\(entry.name) \(entry.version)  \(mark)  — \(entry.summary)")
+            }
+            return IO(out: lines.joined(separator: "\n") + "\n")
+        case "install", "add":
+            guard args.count >= 2 else { return IO(err: "pkg: install what? (`pkg list`)\n", status: 2) }
+            let name = args[1]
+            guard let entry = RuntimeCatalog.entry(named: name) else {
+                let known = RuntimeCatalog.all.map(\.name).joined(separator: ", ")
+                return IO(err: "pkg: no runtime called \(name) (have: \(known))\n", status: 1)
+            }
+            if RuntimeStore.installed(name) != nil {
+                return IO(out: "\(entry.name) \(entry.version) is already installed\n")
+            }
+            do {
+                // A multi-megabyte download with a silent terminal is indistinguishable from a
+                // hang, so each line lands in the scrollback as it happens.
+                for try await note in RuntimeStore.install(entry) {
+                    context.emit(Output(text: note, isError: false))
+                }
+            } catch {
+                return IO(err: "pkg: \(error)\n", status: 1)
+            }
+            return IO()
+        case "remove", "rm", "uninstall":
+            guard args.count >= 2 else { return IO(err: "pkg: remove what? (`pkg list`)\n", status: 2) }
+            guard RuntimeStore.remove(args[1]) else {
+                return IO(err: "pkg: \(args[1]) is not installed\n", status: 1)
+            }
+            return IO(out: "removed \(args[1])\n")
+        default:
+            return IO(err: "pkg: \(action)? (list, install, remove)\n", status: 2)
+        }
+    }
+
+    /// CPython, run as a WebAssembly module through the engine's own WASI. There is no exec on
+    /// iOS: what happens here is that msh writes a small bootstrap, hands it to the node engine,
+    /// and the engine instantiates a 30 MB interpreter — the same path that runs esbuild and
+    /// rollup, with a much larger passenger.
+    private func pythonCmd(_ args: [String], stdin: String, context: Context, interactive: Bool) async -> IO {
+        guard let python = RuntimeStore.installed("python") else {
+            return IO(err: "python: not installed — `pkg install python`\n", status: 127)
+        }
+        let mount = "/usr/lib/python"
+        // A bare script name means a file in the current directory, and the interpreter has no
+        // cwd of its own — every WASI path is absolute. Anything that names a real file is
+        // rewritten to its absolute virtual path; everything else (flags, -c code) is untouched.
+        let argv: [String] = ["python"] + args.map { argument in
+            guard !argument.hasPrefix("-") else { return argument }
+            guard let resolved = resolve(argument, context: context) else { return argument }
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: resolved.url.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else { return argument }
+            return "/" + resolved.rel
+        }
+        let environment: [String: String] = [
+            // $PYTHONHOME/lib/python3.14 is where CPython looks; PYTHONPATH names the same
+            // directory outright so an import works even if the home layout ever moves.
+            "PYTHONHOME": mount,
+            "PYTHONPATH": mount + "/lib/python\(python.version.split(separator: ".").prefix(2).joined(separator: "."))",
+            // Writing .pyc files into the user's project on every run would show up in
+            // `git status`, which is the last thing running a script should do.
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
+        ]
+        let bootstrap = """
+        const fs = require('fs');
+        const { WASI } = require('node:wasi');
+        const wasi = new WASI({
+          version: 'preview1',
+          args: \(Self.jsJSON(argv)),
+          env: \(Self.jsJSON(environment)),
+          preopens: { '/': '/' },
+          returnOnExit: true,
+        });
+        const instance = new WebAssembly.Instance(
+          new WebAssembly.Module(fs.readFileSync('\(mount)/python.wasm')), wasi.getImportObject());
+        const code = wasi.start(instance);
+        if (code) process.exitCode = code;
+        """
+        return await runNode(source: bootstrap, path: "/[python].js", args: [], stdin: stdin,
+                             context: context, title: "python", interactive: interactive, isEval: true)
+    }
+
+    /// A JSON literal for embedding a Swift value in generated JavaScript. JSON is a subset of
+    /// JS expression syntax, so this is also valid source.
+    static func jsJSON(_ value: Any) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value),
+              let text = String(data: data, encoding: .utf8) else { return "null" }
+        // U+2028/2029 are ordinary in JSON and statement-ending in JavaScript.
+        return text.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+                   .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+    }
+
+    /// A JS source-level string literal for arbitrary text. JSON escaping covers quotes,
+    /// backslashes and controls; U+2028/2029 are added because they are line terminators in
+    /// JavaScript but ordinary characters in JSON, and an unescaped one ends the statement.
+    static func jsStringLiteral(_ text: String) -> String {
+        var out = "\""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case "\u{2028}": out += "\\u2028"
+            case "\u{2029}": out += "\\u2029"
+            default:
+                if scalar.value < 0x20 {
+                    out += String(format: "\\u%04x", scalar.value)
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return out + "\""
     }
 
     private func runInstalledBin(_ binPath: String, args: [String], stdin: String, context: Context,
@@ -1311,7 +1463,7 @@ final class MouseShell {
         // A terminal to stand on: the program owns stdin, decides transcript vs screen, and
         // the command returns now — like every full-screen launch (less, top).
         if interactive, stdin.isEmpty, let launch = context.launchProgram {
-            let engine = NodeEngine(root: context.root, env: env, shell: bridge)
+            let engine = NodeEngine(root: context.root, env: env, shell: bridge, mounts: runtimeMounts)
             let program = NodeProgram(
                 title: title, source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
                 cwd: "/" + cwd, engine: engine,
@@ -1323,7 +1475,7 @@ final class MouseShell {
         }
         nodeDepth += 1
         defer { nodeDepth -= 1 }
-        let engine = NodeEngine(root: context.root, env: env, shell: bridge)
+        let engine = NodeEngine(root: context.root, env: env, shell: bridge, mounts: runtimeMounts)
         let result = await engine.run(source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
                                       cwd: "/" + cwd, stdin: stdin)
         context.reloadTree()   // scripts write files

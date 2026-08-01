@@ -7,6 +7,18 @@ let here = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let source = (try? String(contentsOf: here.appendingPathComponent("probe.js"), encoding: .utf8)) ?? ""
 let expected = ((try? String(contentsOf: here.appendingPathComponent("node.txt"), encoding: .utf8)) ?? "")
     .trimmingCharacters(in: .whitespacesAndNewlines)
+
+// The packages this harness needs are installed HERE, on first run, by the engine's own package
+// manager — `node_modules` is not checked in, and a harness that assumes a tree someone else
+// left behind is a harness that passes for the wrong reason. It is skipped when already present
+// so a re-run costs nothing.
+let packagesRoot = here.appendingPathComponent("project")
+if !FileManager.default.fileExists(atPath: packagesRoot.appendingPathComponent("node_modules").path) {
+    print("installing axios dependencies with our own package manager…")
+    do { _ = try await PackageManager.install(requirements: ["axios": "^1.19.0"], into: packagesRoot) }
+    catch { print("AXIOS FAILED — install: \(error)"); exit(1) }
+}
+
 let engine = NodeEngine(root: here, env: ["PATH": "/usr/bin"])
 let started = Date()
 let mine = await engine.run(source: source, path: "/probe.js", argv: ["node", "/probe.js"], cwd: "/", stdin: "")
