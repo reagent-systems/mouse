@@ -8,6 +8,11 @@ carry breaking changes.
 ## [Unreleased]
 
 ### Added
+- Node layer: **the `performance` timeline is real** — `mark` and `measure` were empty
+  functions with no entry buffer behind them. Marks and measures are recorded now, with
+  `getEntries`/`getEntriesByName`/`getEntriesByType`, `clearMarks`/`clearMeasures`, `toJSON`,
+  measure-from-options, a missing mark raising node's `SyntaxError`, and a `PerformanceObserver`
+  that batches. `perf_hooks` gains `constants`, `createHistogram` and the entry classes.
 - Node layer: **readline matches node** — 24 behaviours swept. `for await (const line of rl)`
   works at last (the interface had no async iterator), queueing lines that arrive while the
   loop body is busy and closing the interface when the loop breaks; `rl.question` honours an
@@ -196,6 +201,9 @@ carry breaking changes.
   module-surface audit and are documented API, not the node internals they sat beside.
 
 ### Fixed
+- Node layer: `monitorEventLoopDelay` reported a mean of 0 no matter what the loop was doing,
+  and `eventLoopUtilization` did not exist. The loop now counts the time it spends asleep
+  against the time it spends running callbacks, and the delay monitor samples real lateness.
 - Node layer: a `fetch` of a `data:` URL reported `status: 0` — the bridge only had a status
   when the response was HTTP. node answers 200 with the media type from the URL, and 0 reads
   as a failed fetch; a wasm module embedded in a bundle (how ink loads its layout engine)

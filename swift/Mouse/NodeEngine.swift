@@ -84,6 +84,11 @@ final class NodeEngine: @unchecked Sendable {
         let callback: JSValue
         let arguments: [Any]
     }
+    /// Nanoseconds the loop spent WAITING versus running callbacks. `eventLoopUtilization`
+    /// reports the ratio, and a fabricated number there is worse than no number: it is the
+    /// figure a caller uses to decide whether the process is saturated.
+    private var idleNanos: UInt64 = 0
+    private var activeNanos: UInt64 = 0
     private var timers: [Timer] = []
     private var immediates: [(id: Int, callback: JSValue, arguments: [Any])] = []
     private var nextTimerID = 1
@@ -620,7 +625,9 @@ final class NodeEngine: @unchecked Sendable {
             if let next {
                 let wait = next.due.timeIntervalSinceNow
                 if wait > 0 {
+                    let slept = DispatchTime.now().uptimeNanoseconds
                     _ = wakeup.wait(timeout: .now() + min(wait, 60))
+                    idleNanos += DispatchTime.now().uptimeNanoseconds - slept
                     continue
                 }
                 timers.removeAll { $0.id == next.id }
@@ -632,7 +639,9 @@ final class NodeEngine: @unchecked Sendable {
                 invoke(next.callback, next.arguments)
             } else {
                 // Only in-flight I/O remains: sleep until a completion signals.
+                let slept = DispatchTime.now().uptimeNanoseconds
                 _ = wakeup.wait(timeout: .now() + 60)
+                idleNanos += DispatchTime.now().uptimeNanoseconds - slept
             }
         }
         drainTicks()
@@ -642,6 +651,8 @@ final class NodeEngine: @unchecked Sendable {
     /// reaction the callback queues. Falls back to a direct call if the trampoline is missing
     /// (it cannot be, after the bootstrap, but a direct call is the safe degradation).
     private func invoke(_ callback: JSValue, _ arguments: [Any]) {
+        let began = DispatchTime.now().uptimeNanoseconds
+        defer { activeNanos += DispatchTime.now().uptimeNanoseconds - began }
         guard let trampoline = context.objectForKeyedSubscript("__invoke"),
               !trampoline.isUndefined else {
             callback.call(withArguments: arguments)
@@ -1006,6 +1017,11 @@ final class NodeEngine: @unchecked Sendable {
         let clearImmediateBlock: @convention(block) (Int) -> Void = { [weak self] id in
             self?.immediates.removeAll { $0.id == id }
         }
+        let loopUtilization: @convention(block) () -> [String: Double] = { [weak self] in
+            guard let self else { return ["idle": 0, "active": 0] }
+            return ["idle": Double(self.idleNanos) / 1e6, "active": Double(self.activeNanos) / 1e6]
+        }
+        expose("loopUtilization", loopUtilization)
         expose("setTimer", setTimer)
         expose("clearTimer", clearTimer)
         expose("timerRef", timerRef)
@@ -4112,12 +4128,176 @@ final class NodeEngine: @unchecked Sendable {
       // timeOrigin is a WALL-clock instant by spec, but `now()` is an offset on the monotonic
       // clock — mixing the two sources is the point, not an oversight.
       globalThis.__perfStart = BigInt(bridge.monotonicNanos());
+      // The performance TIMELINE, not just a clock. `mark` and `measure` were empty functions:
+      // a caller could mark and measure all it liked and then find nothing to read back, which
+      // is the failure mode where a build tool reports no timings and blames itself.
+      const performanceEntries = [];
+      const performanceObservers = [];
+      class PerformanceEntry {
+        constructor(name, entryType, startTime, duration, detail) {
+          this.name = String(name);
+          this.entryType = entryType;
+          this.startTime = startTime;
+          this.duration = duration;
+          this.detail = detail === undefined ? null : detail;
+        }
+        toJSON() {
+          return { name: this.name, entryType: this.entryType, startTime: this.startTime,
+                   duration: this.duration, detail: this.detail };
+        }
+      }
+      globalThis.PerformanceEntry = PerformanceEntry;
+      globalThis.PerformanceMark = class PerformanceMark extends PerformanceEntry {};
+      globalThis.PerformanceMeasure = class PerformanceMeasure extends PerformanceEntry {};
+      function recordEntry(entry) {
+        performanceEntries.push(entry);
+        for (const observer of performanceObservers.slice()) observer._offer(entry);
+        return entry;
+      }
+      // A mark named here but never set is a PROGRAMMING error, and node raises the DOM's
+      // SyntaxError for it rather than measuring from zero and reporting a plausible lie.
+      function markTime(value, what) {
+        if (typeof value === 'number') return value;
+        for (let i = performanceEntries.length - 1; i >= 0; i -= 1) {
+          const entry = performanceEntries[i];
+          if (entry.entryType === 'mark' && entry.name === String(value)) return entry.startTime;
+        }
+        throw new DOMException('The "' + value + '" performance mark has not been set', 'SyntaxError');
+      }
       globalThis.performance = {
         timeOrigin: Date.now(),
         now: function(){
           return Number(BigInt(bridge.monotonicNanos()) - globalThis.__perfStart) / 1e6;
         },
-        mark: function(){}, measure: function(){},
+        mark: function(name, options){
+          const startTime = options && options.startTime !== undefined
+            ? Number(options.startTime) : performance.now();
+          return recordEntry(new globalThis.PerformanceMark(name, 'mark', startTime, 0,
+                                                            options && options.detail));
+        },
+        measure: function(name, startOrOptions, endMark){
+          let startTime, endTime, detail;
+          if (startOrOptions && typeof startOrOptions === 'object') {
+            const options = startOrOptions;
+            detail = options.detail;
+            const hasStart = options.start !== undefined;
+            const hasEnd = options.end !== undefined;
+            startTime = hasStart ? markTime(options.start) : undefined;
+            endTime = hasEnd ? markTime(options.end) : undefined;
+            if (options.duration !== undefined) {
+              if (hasStart) endTime = startTime + Number(options.duration);
+              else if (hasEnd) startTime = endTime - Number(options.duration);
+            }
+            if (startTime === undefined) startTime = 0;
+            if (endTime === undefined) endTime = performance.now();
+          } else {
+            startTime = startOrOptions === undefined ? 0 : markTime(startOrOptions);
+            endTime = endMark === undefined ? performance.now() : markTime(endMark);
+          }
+          return recordEntry(new globalThis.PerformanceMeasure(name, 'measure', startTime,
+                                                               endTime - startTime, detail));
+        },
+        // Sorted by when they STARTED, which is the order things happened in — not the order
+        // they were recorded, since a measure is recorded after the marks it spans.
+        getEntries: function(){
+          return performanceEntries.slice().sort(function(a, b){ return a.startTime - b.startTime; });
+        },
+        getEntriesByName: function(name, type){
+          return performance.getEntries().filter(function(entry){
+            return entry.name === String(name) && (type === undefined || entry.entryType === type);
+          });
+        },
+        getEntriesByType: function(type){
+          return performance.getEntries().filter(function(entry){ return entry.entryType === type; });
+        },
+        clearMarks: function(name){
+          for (let i = performanceEntries.length - 1; i >= 0; i -= 1) {
+            const entry = performanceEntries[i];
+            if (entry.entryType === 'mark' && (name === undefined || entry.name === String(name))) {
+              performanceEntries.splice(i, 1);
+            }
+          }
+        },
+        clearMeasures: function(name){
+          for (let i = performanceEntries.length - 1; i >= 0; i -= 1) {
+            const entry = performanceEntries[i];
+            if (entry.entryType === 'measure' && (name === undefined || entry.name === String(name))) {
+              performanceEntries.splice(i, 1);
+            }
+          }
+        },
+        // Measured, not invented: the loop counts the nanoseconds it spends asleep against the
+        // ones it spends running callbacks, and this is that ratio.
+        eventLoopUtilization: function(since, before){
+          const counts = bridge.loopUtilization();
+          const current = { idle: counts.idle, active: counts.active,
+                            utilization: counts.idle + counts.active > 0
+                              ? counts.active / (counts.idle + counts.active) : 0 };
+          if (!since) return current;
+          const idle = current.idle - since.idle;
+          const active = current.active - since.active;
+          const total = idle + active;
+          if (before) {
+            return { idle: since.idle - before.idle, active: since.active - before.active,
+                     utilization: (since.idle - before.idle) + (since.active - before.active) > 0
+                       ? (since.active - before.active) / ((since.idle - before.idle) + (since.active - before.active))
+                       : 0 };
+          }
+          return { idle: idle, active: active, utilization: total > 0 ? active / total : 0 };
+        },
+        get nodeTiming(){
+          return new PerformanceEntry('node', 'node', 0, performance.now(), null);
+        },
+        toJSON: function(){
+          return { timeOrigin: performance.timeOrigin, nodeTiming: performance.nodeTiming,
+                   eventLoopUtilization: performance.eventLoopUtilization() };
+        },
+      };
+      globalThis.PerformanceObserver = class PerformanceObserver {
+        constructor(callback) {
+          this._callback = callback;
+          this._types = [];
+          this._buffered = [];
+          this._scheduled = false;
+        }
+        observe(options) {
+          options = options || {};
+          this._types = options.entryTypes ? options.entryTypes.slice()
+            : (options.type ? [options.type] : []);
+          if (performanceObservers.indexOf(this) < 0) performanceObservers.push(this);
+          return this;
+        }
+        disconnect() {
+          const index = performanceObservers.indexOf(this);
+          if (index >= 0) performanceObservers.splice(index, 1);
+          this._buffered = [];
+        }
+        takeRecords() { const taken = this._buffered; this._buffered = []; return taken; }
+        _offer(entry) {
+          if (this._types.indexOf(entry.entryType) < 0) return;
+          this._buffered.push(entry);
+          // Delivered in a BATCH on a later turn, as node does: an observer that fires
+          // synchronously per entry would run inside the mark() call that produced it.
+          if (this._scheduled) return;
+          this._scheduled = true;
+          const self = this;
+          setTimeout(function(){
+            self._scheduled = false;
+            const entries = self.takeRecords();
+            if (!entries.length) return;
+            self._callback({
+              getEntries: function(){ return entries.slice(); },
+              getEntriesByName: function(name, type){
+                return entries.filter(function(e){
+                  return e.name === String(name) && (type === undefined || e.entryType === type);
+                });
+              },
+              getEntriesByType: function(type){
+                return entries.filter(function(e){ return e.entryType === type; });
+              },
+            }, self);
+          }, 0);
+        }
       };
       // The Web Crypto global (distinct from the `crypto` module): nanoid, uuid, and browser-
       // targeted libraries reach for `crypto.getRandomValues` / `crypto.randomUUID`.
@@ -4130,8 +4310,6 @@ final class NodeEngine: @unchecked Sendable {
         },
         randomUUID: function(){ return bridge.randomUUID(); },
       };
-      // WHATWG streams — the subset vendored fetch/undici code touches. Queue-backed,
-      // single-reader, promise-correct; no backpressure sizing.
       // Web streams, to the rules the platform actually enforces. The two that matter most are
       // invisible until they are missing: a stream is LOCKED to one reader (so two consumers
       // cannot silently eat each other's chunks), and a controller reports how much it wants
@@ -14536,10 +14714,89 @@ final class NodeEngine: @unchecked Sendable {
         };
       };
       coreFactories.perf_hooks = function() {
+        // A real sampler rather than a fixed zero. It parks a timer at a known interval and
+        // records how LATE each firing was — which is what loop delay means, and the previous
+        // answer (mean 0, always) was a number nobody could act on.
+        function monitorEventLoopDelay(options) {
+          const resolution = (options && options.resolution) || 10;
+          const samples = [];
+          let handle = null;
+          return {
+            enable: function() {
+              if (handle) return false;
+              let expected = Date.now() + resolution;
+              handle = setInterval(function() {
+                const now = Date.now();
+                samples.push(Math.max(0, now - expected) * 1e6);   // nanoseconds, as node reports
+                expected = now + resolution;
+              }, resolution);
+              if (handle.unref) handle.unref();
+              return true;
+            },
+            disable: function() {
+              if (!handle) return false;
+              clearInterval(handle);
+              handle = null;
+              return true;
+            },
+            reset: function() { samples.length = 0; },
+            get min() { return samples.length ? Math.min.apply(null, samples) : 0; },
+            get max() { return samples.length ? Math.max.apply(null, samples) : 0; },
+            get mean() {
+              if (!samples.length) return 0;
+              return samples.reduce(function(a, b){ return a + b; }, 0) / samples.length;
+            },
+            get stddev() {
+              if (samples.length < 2) return 0;
+              const mean = samples.reduce(function(a, b){ return a + b; }, 0) / samples.length;
+              const variance = samples.reduce(function(a, b){ return a + (b - mean) * (b - mean); }, 0)
+                / (samples.length - 1);
+              return Math.sqrt(variance);
+            },
+            get exceeds() { return 0; },
+            get count() { return samples.length; },
+            percentile: function(p) {
+              if (!samples.length) return 0;
+              const sorted = samples.slice().sort(function(a, b){ return a - b; });
+              const index = Math.min(sorted.length - 1,
+                                     Math.max(0, Math.ceil((Number(p) / 100) * sorted.length) - 1));
+              return sorted[index];
+            },
+          };
+        }
         return {
           performance: globalThis.performance,
-          monitorEventLoopDelay: function() { return { enable: function(){}, disable: function(){}, mean: 0, percentile: function(){ return 0; } }; },
-          PerformanceObserver: class PerformanceObserver { observe() {} disconnect() {} },
+          PerformanceEntry: globalThis.PerformanceEntry,
+          PerformanceMark: globalThis.PerformanceMark,
+          PerformanceMeasure: globalThis.PerformanceMeasure,
+          PerformanceObserver: globalThis.PerformanceObserver,
+          monitorEventLoopDelay: monitorEventLoopDelay,
+          createHistogram: function() {
+            const values = [];
+            return {
+              record: function(value) { values.push(Number(value)); },
+              recordDelta: function() {},
+              reset: function() { values.length = 0; },
+              get count() { return values.length; },
+              get min() { return values.length ? Math.min.apply(null, values) : 0; },
+              get max() { return values.length ? Math.max.apply(null, values) : 0; },
+              get mean() {
+                if (!values.length) return 0;
+                return values.reduce(function(a, b){ return a + b; }, 0) / values.length;
+              },
+              percentile: function(p) {
+                if (!values.length) return 0;
+                const sorted = values.slice().sort(function(a, b){ return a - b; });
+                return sorted[Math.min(sorted.length - 1,
+                                       Math.max(0, Math.ceil((Number(p) / 100) * sorted.length) - 1))];
+              },
+            };
+          },
+          constants: {
+            NODE_PERFORMANCE_ENTRY_TYPE_GC: 0, NODE_PERFORMANCE_ENTRY_TYPE_HTTP: 1,
+            NODE_PERFORMANCE_ENTRY_TYPE_HTTP2: 2, NODE_PERFORMANCE_ENTRY_TYPE_NET: 3,
+            NODE_PERFORMANCE_ENTRY_TYPE_DNS: 4,
+          },
         };
       };
       coreFactories.inspector = function() {
