@@ -118,7 +118,78 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
     let rawEnded = await pump(until: { rawSession.program == nil })
     expect(rawEnded, "the raw-mode program did not exit on q")
 
-    // -- Case 3: the control. A one-shot command stays in the scrollback; the grid stays out
+    // -- Case 3: the real thing, at typing speed. @clack/prompts (create-vite's prompt
+    // library) runs a text prompt through its own plumbing: a `new tty.WriteStream(0)` sink
+    // whose overridden `_write` is where it reads `rl.line` to track the typed value, stdin
+    // piped into that sink, readline echoing into it. Eight keystrokes fired back-to-back
+    // with no yields between them — the phone's fast typing — must ALL land in the frame,
+    // with no echo fragments sprayed under it, and Enter must advance and submit. A single
+    // slow keystroke passed while this exact flow was broken on the phone; the storm is the
+    // test.
+    let project = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("project")
+    try? FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    // Installed HERE on first run, by the engine's own package manager — node_modules is not
+    // checked in, and a harness that assumes someone else's tree passes for the wrong reason.
+    if !FileManager.default.fileExists(atPath: project.appendingPathComponent("node_modules").path) {
+        print("installing @clack/prompts with our own package manager…")
+        do { _ = try await PackageManager.install(requirements: ["@clack/prompts": "^0.7.0"], into: project) }
+        catch {
+            print("  install: \(error)")
+            print("TUI INLINE FAILED — install")
+            exit(1)
+        }
+    }
+    let clackApp = """
+    const { text, select, isCancel } = require('@clack/prompts');
+    (async () => {
+      const name = await text({ message: 'Project name:', placeholder: 'vite-project' });
+      if (isCancel(name)) process.exit(1);
+      const fw = await select({
+        message: 'Select a framework:',
+        options: [
+          { value: 'vanilla', label: 'Vanilla' },
+          { value: 'vue', label: 'Vue' },
+        ],
+      });
+      if (isCancel(fw)) process.exit(1);
+      console.log('DONE name=' + name + ' fw=' + fw);
+      process.exit(0);
+    })();
+    """
+    try? clackApp.write(to: project.appendingPathComponent("app.js"), atomically: true, encoding: .utf8)
+    let clack = TerminalSession(root: project)
+    clack.setGridSize(rows: 14, columns: 60)
+    _ = clack.run("node app.js")
+    let clackUp = await pump(until: { clack.screen.plainText.contains("Project name") }, seconds: 120)
+    expect(clackUp, "the clack prompt never drew")
+    if clackUp {
+        let linesBefore = clack.lines.count
+        for key in ["p", "h", "o", "n", "e", "a", "p", "p"] { _ = clack.sendKey(key) }
+        let allTyped = await pump(until: { clack.screen.plainText.contains("phoneapp") }, seconds: 20)
+        expect(allTyped, "rapid keystrokes lost: grid shows \(clack.screen.plainText.split(separator: "\n").filter { !$0.isEmpty })")
+        // The value replaced the placeholder INSIDE the frame; nothing leaked below it.
+        let rows = (0..<clack.screen.rows).map { clack.screen.text(row: $0) }
+        if let frameEnd = rows.lastIndex(where: { $0.hasPrefix("└") }) {
+            for row in (frameEnd + 1)..<rows.count {
+                expect(rows[row].isEmpty, "echo artifacts under the frame at row \(row): |\(rows[row])|")
+            }
+        } else {
+            expect(false, "no frame edge on the grid")
+        }
+        expect(clack.lines.count == linesBefore,
+               "typing leaked into the scrollback (\(linesBefore) → \(clack.lines.count) lines)")
+        _ = clack.sendKey("\r")
+        let selectUp = await pump(until: { clack.screen.plainText.contains("Select a framework") }, seconds: 20)
+        expect(selectUp, "Enter did not advance to the select prompt")
+        _ = clack.sendKey("\r")
+        let clackDone = await pump(until: { clack.program == nil }, seconds: 20)
+        expect(clackDone, "the clack flow never exited")
+        expect(clack.lines.contains { $0.text == "DONE name=phoneapp fw=vanilla" },
+               "the typed value did not survive to submit: \(clack.lines.suffix(3).map(\.text))")
+    }
+
+    // -- Case 4: the control. A one-shot command stays in the scrollback; the grid stays out
     // of it entirely.
     let (echoSession, echoBase) = makeSession(script: nil, name: "echo")
     defer { try? FileManager.default.removeItem(at: echoBase) }
@@ -133,8 +204,9 @@ func makeSession(script: String?, name: String) -> (TerminalSession, URL) {
 
     if failures == 0 {
         print("TUI INLINE MATCH — cursor-up repaint engages the grid and replaces rows in place,")
-        print("  a mid-run keystroke reaches the program, exit restores the prompt with the last")
-        print("  frame in history, and `echo hi` stays scrollback-only")
+        print("  a mid-run keystroke reaches the program, a @clack prompt takes eight rapid")
+        print("  keystrokes into its frame and submits them, exit restores the prompt with the")
+        print("  last frame in history, and `echo hi` stays scrollback-only")
     } else {
         print("TUI INLINE FAILED — \(failures)")
         exit(1)
