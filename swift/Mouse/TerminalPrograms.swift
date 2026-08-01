@@ -121,6 +121,12 @@ struct TerminalProgramIO {
     let columns: Int
     let write: @MainActor (String) -> Void
     let exit: @MainActor () -> Void
+    /// The program's `rendersScreen` flipped mid-run (a Node program deciding it is a TUI).
+    /// The host must hear about it through a call, not by re-reading the property: the flip
+    /// is invisible to SwiftUI observation — `rendersScreen` lives on a plain program object —
+    /// and a terminal that keyed its display on the property alone kept showing the
+    /// scrollback while a TUI drew on the grid nobody rendered. That was the phone bug.
+    var modeChanged: @MainActor () -> Void = {}
 }
 
 /// `less`/`more` — the pager, and the proof program for the screen model. Wraps long lines,
@@ -293,10 +299,19 @@ final class TopProgram: TerminalProgram {
 /// `process.stdin`, and rotation is a real `resize` event — so a CLI written for a TTY
 /// behaves as it would on one.
 ///
-/// Mode is decided by the program, not by us: output stays in the SCROLLBACK until the
-/// script asks for raw keys (`stdin.setRawMode(true)`) or switches to the alt screen, at
-/// which point the grid takes over. `node build.js` prints lines like any command;
-/// `node tui.js` draws. That is exactly the two-mode rule real terminals follow.
+/// Mode is decided by the program, not by us. THE ENGAGEMENT RULE (architecture — the
+/// two-surface terminal depends on it): output stays in the SCROLLBACK until the program
+/// does something only a screen-oriented program does —
+///   1. switches to the alternate screen (`ESC[?1049h` and friends — vim, less), or
+///   2. asks for raw keystrokes (`stdin.setRawMode(true)` — every TUI framework), or
+///   3. moves the cursor UP over output it already wrote (CUU `ESC[nA`, CPL `ESC[nF`,
+///      RI `ESC M`) — the inline-repaint idiom of ink and logUpdate, which never touch
+///      the alt screen and may repaint before enabling raw mode.
+/// From that moment the grid takes over. A line-streaming command (`node build.js`,
+/// a watcher clearing between runs with `ESC[2J`/`ESC[J` + home) never does any of the
+/// three, so its output belongs to — and stays in — the scrollback. Meanwhile EVERY write
+/// is also fed to the grid as a live shadow, so at the moment of engagement the screen
+/// already holds what the program drew and a cursor-up lands on the rows it meant.
 @MainActor
 final class NodeProgram: TerminalProgram {
     let title: String
@@ -392,18 +407,20 @@ final class NodeProgram: TerminalProgram {
 
     /// Output from the engine (already hopped to the main actor).
     private func receive(_ text: String, isError: Bool) {
-        if !rendersScreen, text.contains("\u{1b}[?1049h") || text.contains("\u{1b}[?1047h") || text.contains("\u{1b}[?47h") {
+        if !rendersScreen, Self.asksForScreen(text) {
             enterScreenMode()
         }
-        if rendersScreen {
-            // ONLCR, the TTY's job, not the emulator's: a real PTY maps NL→CR-NL on output,
-            // so a program that ends lines with a bare `\n` (ink's inline frames, every
-            // logUpdate-style repaint) lands each line at column 0. Without it the screen —
-            // correctly xterm-faithful, LF is index — shears the frame diagonally. We are
-            // the PTY substitute, so the translation belongs here.
-            io?.write(Self.onlcr(text))
-            return
-        }
+        // ONLCR, the TTY's job, not the emulator's: a real PTY maps NL→CR-NL on output,
+        // so a program that ends lines with a bare `\n` (ink's inline frames, every
+        // logUpdate-style repaint) lands each line at column 0. Without it the screen —
+        // correctly xterm-faithful, LF is index — shears the frame diagonally. We are
+        // the PTY substitute, so the translation belongs here.
+        //
+        // Fed UNCONDITIONALLY — in transcript mode this is the live shadow the engagement
+        // rule relies on: when a later chunk cursor-ups into rows drawn earlier, the grid
+        // must already hold those rows, or the first engaged frame repaints a blank screen.
+        io?.write(Self.onlcr(text))
+        if rendersScreen { return }
         // Transcript mode: line-buffer, and emit complete lines with escapes stripped.
         // Scalar-level splitting: to Swift, "\r\n" is ONE Character, invisible to a
         // Character-level search for "\n".
@@ -428,6 +445,32 @@ final class NodeProgram: TerminalProgram {
         transcript(text, isError)
     }
 
+    /// The output half of the engagement rule (see the class comment): an alt-screen switch,
+    /// or upward cursor motion — CUU (`ESC[nA`), CPL (`ESC[nF`), RI (`ESC M`). Going back UP
+    /// to rewrite rows already written is repainting, and repainting is what a screen is for;
+    /// no line-streaming command ever does it. Deliberately NOT triggers: clear-screen forms
+    /// (watchers clear the transcript and stream on), CR-only spinners (single-line, no
+    /// motion), and cursor-forward/down (progress formatting within a line).
+    static func asksForScreen(_ text: String) -> Bool {
+        if text.contains("\u{1b}[?1049h") || text.contains("\u{1b}[?1047h") || text.contains("\u{1b}[?47h") {
+            return true
+        }
+        // A tiny CSI walk rather than `contains`: the count parameter is arbitrary
+        // (`ESC[A`, `ESC[1A`, `ESC[12A`), so the final byte is what identifies the sequence.
+        var iterator = text.unicodeScalars.makeIterator()
+        while let scalar = iterator.next() {
+            guard scalar == "\u{1b}", let kind = iterator.next() else { continue }
+            if kind == "M" { return true }                       // RI — reverse index
+            guard kind == "[" else { continue }
+            while let byte = iterator.next() {
+                guard (0x40...0x7e).contains(byte.value) else { continue }  // still parameters
+                if byte == "A" || byte == "F" { return true }    // CUU / CPL
+                break
+            }
+        }
+        return false
+    }
+
     /// ESC[2J / ESC[3J (erase display, and the scrollback with it), ESC c (full reset), and
     /// ESC[J / ESC[0J — erase from the cursor DOWN, which is how readline's `clearScreenDown`
     /// clears and therefore how vite, nodemon and every watcher clear: home the cursor, erase
@@ -444,11 +487,13 @@ final class NodeProgram: TerminalProgram {
     }
 
     /// The program took the screen: the scrollback keeps what it already said (like a shell
-    /// keeps its history when vim opens), and the grid gets everything from here on.
+    /// keeps its history when vim opens), and the grid gets everything from here on. The host
+    /// is TOLD — it cannot observe the property flip (see `TerminalProgramIO.modeChanged`).
     private func enterScreenMode() {
         guard !rendersScreen else { return }
         flushPendingLine()
         rendersScreen = true
+        io?.modeChanged()
     }
 
     /// ONLCR: a bare `\n` (not already preceded by `\r`) becomes `\r\n`. A stray `\r\n`
