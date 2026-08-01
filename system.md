@@ -2685,6 +2685,27 @@ small `fs` shim gives a real scripting language immediately.
 
 ---
 
+## 5a. Agent CLIs have become native binaries
+
+§4 assumes an agent CLI is JavaScript this engine can run. For claude-code
+that stopped being true: `@anthropic-ai/claude-code` now ships
+`bin/claude.exe`, a per-platform native binary, with `cli-wrapper.cjs` as a
+fallback launcher that spawns it. iOS will not execute unsigned native
+code, so the current package cannot run here — the same wall as `.node`
+addons, arrived at from a new direction.
+
+The JS-bundle releases still work, and were verified on the phone:
+claude-code 1.0.128 installs through our own npm and renders its React/ink
+UI on the phase-T screen. That is what every claim about "claude-code
+running" in this document and in STATUS.md refers to.
+
+This is worth watching rather than solving: the trend is toward shipping
+compiled launchers, and where a CLI goes native the answer is the same as
+for Rust and Go — the CI bridge in compile.md Phase 7, not on-device
+execution.
+
+---
+
 ## 5b. Phase E — runtimes as data
 
 Phase E was the one phase with no section of its own, which is how it kept
