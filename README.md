@@ -56,8 +56,11 @@ The full interaction and architecture reference lives in
   the app, debounced autosave, live shared buffers across rings
 - **Commit graph** — branch rails, merges, tips, drawn like a desktop client
 - **Terminal** — `msh`, a from-scratch shell scoped to the workspace:
-  pipes, redirection, quoting, variables, globs, `&&`/`||`, history — plus
-  a JavaScriptCore engine behind a top-left engine switcher
+  pipes, redirection, quoting, variables, globs, `&&`/`||`, history, scripts
+- **`node`** — a Node-compatible runtime on JavaScriptCore, in the same
+  terminal: `npm install` from the real registry, CommonJS and ESM,
+  TypeScript, sockets, HTTP/1.1 and HTTP/2, workers, child processes, and
+  full-screen TUIs drawn on the terminal's own screen
 - **Push & pull** — corner action chips: one real commit via the Git Data
   API; pull with upstream detection
 - **Persistence** — the whole strip survives force-quit and relaunch
