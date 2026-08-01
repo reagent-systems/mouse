@@ -1,1 +1,0 @@
-EMITTER MATCH — all 41 behaviours identical to real node: listener order and duplicates, what `once` leaves behind, mutation during an emit in flight, the newListener/removeListener meta events, introspection, an 'error' with nobody listening, errorMonitor, and the promise and async-iterator helpers

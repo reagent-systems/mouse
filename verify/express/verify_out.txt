@@ -1,9 +1,0 @@
-installing express with our own package manager…
-EXPRESS MATCH — real express on our engine answers node's client exactly as node does:
-GET /hello 200 type=text/html; charset=utf-8 x-mouse=none "hello world"
-GET /json 200 type=application/json; charset=utf-8 x-mouse=none "{\"ok\":true,\"n\":42}"
-GET /code 418 type=text/html; charset=utf-8 x-mouse=none "teapot"
-POST /echo 200 type=application/json; charset=utf-8 x-mouse=none "{\"got\":{\"a\":1}}"
-GET /headers 200 type=text/plain; charset=utf-8 x-mouse=yes "headers"
-GET /missing 404 type=text/html; charset=utf-8 x-mouse=none "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Error</title>\n</head>\n<body>\n<pre>Cannot GET /missing</pre>\n</body>\n</html>\n"
-

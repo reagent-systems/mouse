@@ -1,2 +1,0 @@
-width table: all 199 agree with Python's unicodedata
-WIDE CHARACTERS MATCH — the width table is Unicode's, and the grid counts columns

@@ -1,7 +1,0 @@
-installing typescript with our own package manager…
-TSC --WATCH MATCH — the compiler watched, recompiled and reported the same diagnostics:
-  [pass]
-  Found 0 errors. Watching for file changes.
-  [pass]
-  src/two.ts(2,31): error TS2339: Property 'toUpperCase' does not exist on type 'n
-  Found 1 error. Watching for file changes.

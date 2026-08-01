@@ -1,2 +1,0 @@
-WIDE TUI MATCH — a Node program's boxes align on the phase-T screen, Latin and CJK alike,
-  and a keystroke through stdin ends it

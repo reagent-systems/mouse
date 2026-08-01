@@ -1,4 +1,0 @@
-ok: node -e, no arguments -> []
-ok: node -e with arguments -> ["one","two"]
-ok: node file.js with arguments -> ["SCRIPT","one","two"]
-ARGV MATCH — `node -e` argv has no script path and `node file.js` does, as node's do

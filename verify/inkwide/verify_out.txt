@@ -1,2 +1,0 @@
-INK WIDE MATCH — ink's bordered frame over CJK and emoji is identical to node's,
-  and all 6 rows measure 20 columns

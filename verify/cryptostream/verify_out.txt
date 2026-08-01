@@ -1,8 +1,0 @@
-CRYPTO STREAMS MATCH — 4/4 rounds identical to real node
-classic: 52aca00cac78c3d22a53d9fd83492ae2837fac203bb1ed8a111189960ce1facd
-is a stream: true true
-piped digest matches: true
-setEncoding hex: true
-hmac stream: true
-cipher stream matches one-shot: true
-update after digest: ERR_CRYPTO_HASH_FINALIZED

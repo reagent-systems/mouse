@@ -1,9 +1,0 @@
-scaffolding…
-npm create -> status 0, wrote: .gitignore, index.html, package.json, public, src, tsconfig.json
-installing…
-npm install -> status 0, vite present: true
-starting the dev server…
-dev server: 200 2346 bytes (compiled)
-transcript:   VITE v5.4.21  ready in 815 ms |   ➜  Local:   http://127.0.0.1:5399/
-rolldown (vite 7's bundler): blocked: Cannot find native binding. npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). Please try `npm i` again after removing both package-lock.json and node_modules directory. <- 
-FIRST RUN MATCH — `npm create vite` scaffolded a project, `npm install` filled it in, and `npm run dev` served a compiled module to a client outside the app; vite 7's rolldown gets past `node:wasi` now and is pinned on the wall behind it — its wasm is built with threads, and shared memory is off in JavaScriptCore

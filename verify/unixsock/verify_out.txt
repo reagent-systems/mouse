@@ -1,6 +1,0 @@
-real client saw: client: echo:over a file
-ours client saw: client: echo:over a file
-real server saw: listening on a socket file
-server: peer ended
-
-UNIX SOCKET MATCH — a socket file works in both directions with real node

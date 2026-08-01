@@ -1,1 +1,0 @@
-ERROR PATHS MATCH — all 5, including ENOENT for a missing binary

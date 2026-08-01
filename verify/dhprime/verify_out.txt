@@ -1,3 +1,0 @@
-DH PROPERTIES MATCH — all 18 lines identical to node
-CROSS-ENGINE MATCH — real node and this engine derived the SAME 2048-bit shared
-  secret from opposite halves of the exchange: 4772a671fd45ffca9bcd0a06974a634a…

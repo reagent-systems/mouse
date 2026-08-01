@@ -1,1 +1,0 @@
-ALL 25 SCRIPTS MATCH /bin/sh

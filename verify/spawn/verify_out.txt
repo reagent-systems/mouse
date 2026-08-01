@@ -1,8 +1,0 @@
----- ours ----
-stderr:child up | reply 1 to ask0 | reply 2 to ask1 | reply 3 to ask2 | bye after 4 | exit:7 | close:7
-pid is a number: true exitCode: 7
----- real ----
-stderr:child up | reply 1 to ask0 | reply 2 to ask1 | reply 3 to ask2 | bye after 4 | exit:7 | close:7
-pid is a number: true exitCode: 7
-
-SPAWN MATCH — a live node child, interleaved over real pipes, exactly as node does

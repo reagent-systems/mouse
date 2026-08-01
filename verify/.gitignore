@@ -1,0 +1,4 @@
+verify/*/verify_bin
+verify/*/verify_out.txt
+verify/*/verify_build.log
+verify/*/node_modules/

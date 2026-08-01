@@ -1,1 +1,0 @@
-ABORT MATCH — all 28 behaviours identical to real node: the reason a signal carries and where it comes from, listener order and the event object, a listener attached after the abort, the statics (abort, any, timeout), and what timers/promises and the events helpers do with a signal — including an already aborted one

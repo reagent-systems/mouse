@@ -1,7 +1,0 @@
-installing vite with our own package manager…
-substituted: rollup → @rollup/wasm-node, esbuild → esbuild-wasm
-real stderr: [33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
-
-ours stderr: [33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
-
-VITE MATCH — our engine ran vite's dev server (3 modules) AND its rollup-wasm production build, byte-identically to real node's vite

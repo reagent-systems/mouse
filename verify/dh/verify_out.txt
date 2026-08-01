@@ -1,8 +1,0 @@
-local agreement matches node:
-x25519: agree=true bytes=32
-prime256v1: agree=true bytes=32
-secp384r1: agree=true bytes=48
-secp521r1: agree=true bytes=66
-x25519 cross-engine: both sides derived the same secret (f15b13378eb49054…)
-ec cross-engine: both sides derived the same secret (3e768af90d710726…)
-DIFFIE-HELLMAN MATCH

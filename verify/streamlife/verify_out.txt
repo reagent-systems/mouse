@@ -1,1 +1,0 @@
-STREAM LIFECYCLE MATCH — 25 of 33 scenarios byte-identical to real node and 8 pinned to the same events and the same final state: readable, writable, duplex half-open, transform, pipe, pipeline, finished and async iteration, including every destroy and error path

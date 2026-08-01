@@ -1,2 +1,0 @@
-JavaScriptCore: {"constructorAccepts":"ArrayBuffer","sharedModuleParses":false,"reason":"WebAssembly.Module doesn't parse at byte 12: shared memory is not enabled (evalu"}
-SHARED MEMORY MATCH — the constructor accepts `shared: true` and returns ordinary memory, and a module declaring shared memory does not parse: wasm threads are off, and feature-detecting on the constructor would miss it

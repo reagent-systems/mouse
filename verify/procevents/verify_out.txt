@@ -1,1 +1,0 @@
-PROCESS EVENTS MATCH — all 6 cases, and warnings still reach stderr

@@ -1,9 +1,0 @@
-installing chokidar with our own package manager…
-CHOKIDAR MATCH — the watcher every dev tool uses sees the same events on our engine:
-add tree/first.txt
-add tree/nested/deep.txt
-add tree/second.txt
-addDir tree
-addDir tree/nested
-change tree/first.txt
-unlink tree/second.txt

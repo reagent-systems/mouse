@@ -1,8 +1,0 @@
----- ours ----
-main thread: true
-{"hello":true,"isMainThread":false,"gotData":{"seed":7},"threadIsNumber":true} | {"squared":36} | {"done":true} | exit:0
----- real ----
-main thread: true
-{"hello":true,"isMainThread":false,"gotData":{"seed":7},"threadIsNumber":true} | {"squared":36} | {"done":true} | exit:0
-
-WORKER MATCH — Worker, workerData, parentPort and MessageChannel behave as node's; shared-memory APIs refuse by name

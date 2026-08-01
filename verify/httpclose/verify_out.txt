@@ -1,4 +1,0 @@
-HTTP CLOSE MATCH — 5/5 rounds identical
-methods present: true true
-in-flight survived closeIdleConnections: true
-closeAllConnections killed in-flight: true

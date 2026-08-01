@@ -1,1 +1,0 @@
-AGENT EXTENSION MATCH — a subclass's createConnection decides where the request goes

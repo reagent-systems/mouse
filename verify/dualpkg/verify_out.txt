@@ -1,3 +1,0 @@
-probe.cjs: 7 specifiers resolved as node resolves them
-probe.mjs: 5 specifiers resolved as node resolves them
-EXPORTS MATCH — every specifier reached the same file real node reaches, across both syntaxes
