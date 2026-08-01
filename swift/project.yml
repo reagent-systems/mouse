@@ -16,6 +16,10 @@ targets:
           - Fonts
       - path: Mouse/Fonts/IBMPlexMono-Bold.ttf
         buildPhase: resources
+      # The language-runtime catalog is DATA, and it lives outside Mouse/ on purpose: the
+      # "language as data" proof is a grep of swift/Mouse for a language's name finding nothing.
+      - path: Runtimes.json
+        buildPhase: resources
     # UIAppFonts has no INFOPLIST_KEY_* build setting, so it must come from a real Info.plist;
     # Xcode merges this file with the generated one.
     info:
