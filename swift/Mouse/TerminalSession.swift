@@ -43,9 +43,22 @@ final class TerminalSession {
     private(set) var isRunning = false
 
     /// The full-screen program owning the terminal right now (less, top), or nil at the
-    /// prompt. While set, the container renders `screen` instead of the scrollback and every
-    /// keystroke routes to the program — the foreground-process model without fork/exec.
+    /// prompt. While set, every keystroke routes to the program — the foreground-process
+    /// model without fork/exec.
     private(set) var program: TerminalProgram?
+    /// True while the running program DRAWS ON THE GRID — the observable truth the view keys
+    /// its two modes on. This is a session property, not `program?.rendersScreen`, because a
+    /// Node program flips `rendersScreen` mid-run on a plain (non-observable) object: SwiftUI
+    /// never saw the flip, kept rendering the scrollback, and a TUI drew on a grid nobody
+    /// displayed — ink UIs piling up as text at the bottom of the phone's terminal while
+    /// keystrokes repainted an invisible screen. Updated at launch, on the program's
+    /// `modeChanged` call, and at exit.
+    private(set) var programOnScreen = false
+    /// Whether the current program ever used the ALTERNATE screen. An alt-screen program
+    /// (less, vim) restores the normal screen on exit — nothing to keep. An inline TUI (ink)
+    /// leaves its last frame ON the normal screen, and a real terminal keeps that frame in
+    /// history — see `programExited`.
+    @ObservationIgnored private var programUsedAltScreen = false
     /// The grid a program draws into; its output feeds through `parser`.
     let screen = TerminalScreen()
     /// Bumped on every program write so SwiftUI redraws the grid (TerminalScreen itself is
@@ -147,7 +160,14 @@ final class TerminalSession {
             return
         }
         screen.resize(rows: gridRows, columns: gridColumns)
+        // A fresh program gets a fresh screen: leave any stranded alt screen, show the
+        // cursor, drop DECCKM/bracketed paste, then RIS. Programs are also fed to the grid
+        // while still in transcript mode (the engagement shadow — TerminalPrograms.swift),
+        // so leftovers from the last program would otherwise sit under the new one's frame.
+        parser.feed("\u{1b}[?1049l\u{1b}[?25h\u{1b}[?1l\u{1b}[?2004l\u{1b}c")
         self.program = program
+        programOnScreen = program.rendersScreen
+        programUsedAltScreen = false
         screenGeneration += 1
         // Terminal query replies (DSR/DA/DECRQM) travel back to the program as keystrokes —
         // the same path a real tty answers on. A program probing cursor position or feature
@@ -159,9 +179,15 @@ final class TerminalSession {
             write: { [weak self] text in
                 guard let self else { return }
                 self.parser.feed(text)
+                if self.screen.isAlternate { self.programUsedAltScreen = true }
                 self.screenGeneration += 1
             },
-            exit: { [weak self] in self?.programExited() }
+            exit: { [weak self] in self?.programExited() },
+            modeChanged: { [weak self] in
+                guard let self, let program = self.program else { return }
+                self.programOnScreen = program.rendersScreen
+                self.screenGeneration += 1
+            }
         ))
     }
 
@@ -210,7 +236,19 @@ final class TerminalSession {
 
     private func programExited() {
         guard program != nil else { return }
+        // An inline TUI (ink — never on the alt screen) leaves its last frame on the normal
+        // screen, and on a real terminal that frame stays in history when the prompt returns.
+        // Ours does the same: the final grid rows join the scrollback. A scaffolder's closing
+        // instructions ("cd app && npm install") survive the flip back. Alt-screen programs
+        // restored the normal screen instead — nothing of theirs to keep, same as real less.
+        if programOnScreen, !programUsedAltScreen {
+            let rows = (0..<screen.rows).map { screen.text(row: $0) }
+            if let last = rows.lastIndex(where: { !$0.isEmpty }) {
+                for row in rows[...last] { append(row, .output) }
+            }
+        }
         program = nil
+        programOnScreen = false
         parser.respond = nil
         // A crashed-out program must not strand the terminal on the alt screen.
         if screen.isAlternate { parser.feed("\u{1b}[?25h\u{1b}[?1049l") }

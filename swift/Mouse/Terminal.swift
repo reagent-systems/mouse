@@ -20,7 +20,12 @@ struct TerminalContainerView: View {
                     // the size it will draw into.
                     GeometryReader { geo in
                         Group {
-                            if terminal.program?.rendersScreen == true {
+                            // Keyed on the session's OBSERVABLE flag, never on
+                            // `program?.rendersScreen`: that property flips mid-run on a
+                            // plain object, observation never fires, and the view keeps
+                            // showing the scrollback while the TUI draws on an invisible
+                            // grid (the claude-code-drew-in-the-scrollback bug).
+                            if terminal.programOnScreen {
                                 TerminalScreenGrid(terminal: terminal)
                             } else {
                                 // Bottom-anchored like a chat: content sticks to the bottom
