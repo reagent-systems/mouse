@@ -1238,8 +1238,6 @@ final class MouseShell {
         case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "pkg": return await pkgCmd(args, context: context)
-        case "python", "python3":
-            return await pythonCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1255,6 +1253,14 @@ final class MouseShell {
         case "passwd":
             return IO(err: "passwd: no user accounts on iOS", status: 1)
         default:
+            // Language runtimes dispatch from the catalog, not from case labels — `python` here
+            // is data, and language N+1 is a catalog entry, not a Swift edit. The catalog knows
+            // an UNINSTALLED runtime's commands too, so its command before `pkg install <name>`
+            // answers "not installed" (inside runtimeCmd) rather than lying with "command not
+            // found".
+            if let entry = RuntimeCatalog.entry(command: name) {
+                return await runtimeCmd(entry, args, stdin: stdin, context: context, interactive: interactive)
+            }
             if let manifest = PackageManager.readManifest(root: context.root), let binPath = manifest.bins[name] {
                 return await runInstalledBin(binPath, args: args, stdin: stdin, context: context,
                                              title: name, interactive: interactive)
@@ -1294,16 +1300,17 @@ final class MouseShell {
                              stdin: stdin, context: context, title: "node \(file)", interactive: interactive)
     }
 
-    // MARK: - Language runtimes (pkg, python)
+    // MARK: - Language runtimes (pkg)
 
-    /// Every installed runtime, visible to every program at a stable path. Mounting them
-    /// unconditionally rather than per-command is deliberate: a runtime is part of the
+    /// Every installed runtime, visible to every program at a stable path (`/usr/lib/<name>`).
+    /// Mounting unconditionally rather than per-command is deliberate: a runtime is part of the
     /// environment, and a filesystem whose shape depends on which command is running is a
-    /// filesystem nobody can reason about.
+    /// filesystem nobody can reason about. The mount is the whole `usr` directory (the store
+    /// mirrors the usr/lib layout on disk) so that /usr and /usr/lib are real directories —
+    /// interpreters that canonicalize their load paths walk those ancestors, and a path that
+    /// exists only as a mount prefix answers ENOENT.
     private var runtimeMounts: [(prefix: String, url: URL)] {
-        RuntimeStore.installedNames().compactMap { name in
-            RuntimeStore.installed(name).map { (prefix: "/usr/lib/" + name, url: $0.directory) }
-        }
+        RuntimeStore.installedNames().isEmpty ? [] : [(prefix: "/usr", url: RuntimeStore.usr)]
     }
 
     private func pkgCmd(_ args: [String], context: Context) async -> IO {
@@ -1347,36 +1354,34 @@ final class MouseShell {
         }
     }
 
-    /// CPython, run as a WebAssembly module through the engine's own WASI. There is no exec on
-    /// iOS: what happens here is that msh writes a small bootstrap, hands it to the node engine,
-    /// and the engine instantiates a 30 MB interpreter — the same path that runs esbuild and
-    /// rollup, with a much larger passenger.
-    private func pythonCmd(_ args: [String], stdin: String, context: Context, interactive: Bool) async -> IO {
-        guard let python = RuntimeStore.installed("python") else {
-            return IO(err: "python: not installed — `pkg install python`\n", status: 127)
+    /// A language runtime, run as a WebAssembly module through the engine's own WASI. There is
+    /// no exec on iOS: what happens here is that msh writes a small bootstrap, hands it to the
+    /// node engine, and the engine instantiates a multi-megabyte interpreter — the same path
+    /// that runs esbuild and rollup, with a much larger passenger.
+    ///
+    /// ONE code path for every language: which interpreter, what environment it needs, and
+    /// whether its script arguments get rewritten all come from the catalog entry. Nothing in
+    /// here knows a language by name.
+    private func runtimeCmd(_ entry: RuntimeCatalog.Entry, _ args: [String], stdin: String,
+                            context: Context, interactive: Bool) async -> IO {
+        guard RuntimeStore.installed(entry.name) != nil else {
+            return IO(err: "\(entry.name): not installed — `pkg install \(entry.name)`\n", status: 127)
         }
-        let mount = "/usr/lib/python"
+        let mount = "/usr/lib/" + entry.name
         // A bare script name means a file in the current directory, and the interpreter has no
         // cwd of its own — every WASI path is absolute. Anything that names a real file is
         // rewritten to its absolute virtual path; everything else (flags, -c code) is untouched.
-        let argv: [String] = ["python"] + args.map { argument in
-            guard !argument.hasPrefix("-") else { return argument }
+        let argv: [String] = [entry.name] + args.map { argument in
+            guard entry.rewriteScriptPaths, !argument.hasPrefix("-") else { return argument }
             guard let resolved = resolve(argument, context: context) else { return argument }
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: resolved.url.path, isDirectory: &isDirectory),
                   !isDirectory.boolValue else { return argument }
             return "/" + resolved.rel
         }
-        let environment: [String: String] = [
-            // $PYTHONHOME/lib/python3.14 is where CPython looks; PYTHONPATH names the same
-            // directory outright so an import works even if the home layout ever moves.
-            "PYTHONHOME": mount,
-            "PYTHONPATH": mount + "/lib/python\(python.version.split(separator: ".").prefix(2).joined(separator: "."))",
-            // Writing .pyc files into the user's project on every run would show up in
-            // `git status`, which is the last thing running a script should do.
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONUNBUFFERED": "1",
-        ]
+        let environment = entry.env.mapValues {
+            $0.replacingOccurrences(of: "{root}", with: mount)
+        }
         let bootstrap = """
         const fs = require('fs');
         const { WASI } = require('node:wasi');
@@ -1388,12 +1393,12 @@ final class MouseShell {
           returnOnExit: true,
         });
         const instance = new WebAssembly.Instance(
-          new WebAssembly.Module(fs.readFileSync('\(mount)/python.wasm')), wasi.getImportObject());
+          new WebAssembly.Module(fs.readFileSync('\(mount)/\(entry.wasm)')), wasi.getImportObject());
         const code = wasi.start(instance);
         if (code) process.exitCode = code;
         """
-        return await runNode(source: bootstrap, path: "/[python].js", args: [], stdin: stdin,
-                             context: context, title: "python", interactive: interactive, isEval: true)
+        return await runNode(source: bootstrap, path: "/[\(entry.name)].js", args: [], stdin: stdin,
+                             context: context, title: entry.name, interactive: interactive, isEval: true)
     }
 
     /// A JSON literal for embedding a Swift value in generated JavaScript. JSON is a subset of

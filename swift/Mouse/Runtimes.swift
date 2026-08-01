@@ -12,8 +12,18 @@ import CryptoKit
 ///
 /// What runs the artifact is the phase-G engine's own `node:wasi`: every one of python.wasm's 42
 /// imports is `wasi_snapshot_preview1`, and every one of those is already implemented here.
+///
+/// The catalog itself is DATA — `Runtimes.json`, bundled beside the code — because the acceptance
+/// test for this layer is that language N+1 is a new JSON entry and nothing else: no Swift edit,
+/// no case label, no release. Everything the shell needs to install and launch a runtime rides in
+/// the entry.
 enum RuntimeCatalog {
-    struct Entry {
+    enum Archive: String, Decodable {
+        case zip
+        case tarGz = "tar.gz"
+    }
+
+    struct Entry: Decodable {
         let name: String
         let version: String
         let url: URL
@@ -21,39 +31,91 @@ enum RuntimeCatalog {
         /// starts; the hash is what makes the install refuse a corrupted or substituted archive.
         let downloadBytes: Int
         let sha256: String
-        /// The interpreter inside the archive, and the directory its standard library lives in.
+        /// How the download unpacks, and how many leading path components to drop while it does
+        /// (release tarballs wrap their content in a versioned directory; the zips here are flat).
+        let archive: Archive
+        let strip: Int?
+        /// The interpreter inside the unpacked archive, and the directory its standard library
+        /// lives in — both relative to the runtime's install directory.
         let wasm: String
         let library: String?
+        /// The command names this runtime answers to at the prompt (`python` and `python3` are
+        /// one interpreter). The catalog knows them for UNINSTALLED runtimes too, which is what
+        /// lets the shell answer "not installed" instead of "command not found".
+        let commands: [String]
+        /// The interpreter's environment. `{root}` expands to the runtime's mount path
+        /// (`/usr/lib/<name>`) at launch, so an entry can name its own stdlib without knowing
+        /// where installs live.
+        let env: [String: String]
+        /// Whether bare script arguments are rewritten to absolute virtual paths before launch.
+        /// WASI interpreters have no cwd of their own, so `python hello.py` only works if the
+        /// shell turns `hello.py` into `/hello.py` — flags and inline code stay untouched.
+        let rewriteScriptPaths: Bool
         /// A one-line description of what the runtime is, for `pkg list`.
         let summary: String
     }
 
-    static let python = Entry(
-        name: "python",
-        version: "3.14.6",
-        url: URL(string: "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.14.6/python-3.14.6-wasi_sdk-24.zip")!,
-        downloadBytes: 14_231_464,
-        sha256: "73bf2e9774c4d8820d0877ec5db0b963df3a9611fc2a63838aeaee29dfd034e6",
-        wasm: "python.wasm",
-        library: "lib",
-        summary: "CPython, the official wasm32-wasi build"
-    )
-
-    static let all: [Entry] = [python]
+    static let all: [Entry] = load()
 
     static func entry(named name: String) -> Entry? {
         all.first { $0.name == name }
+    }
+
+    /// The entry that answers to a typed command — installed or not.
+    static func entry(command: String) -> Entry? {
+        all.first { $0.commands.contains(command) }
+    }
+
+    private struct Catalog: Decodable { let runtimes: [Entry] }
+
+    private static func load() -> [Entry] {
+        // The app reads the bundled copy. The headless harnesses compile this file directly with
+        // swiftc and have no bundle, so they fall back to the checkout the source was built
+        // from — `#filePath` names this file, and Runtimes.json sits one directory up, outside
+        // swift/Mouse on purpose: the "language as data" proof is a grep of swift/Mouse for the
+        // language's name finding nothing.
+        var candidates: [URL] = []
+        if let bundled = Bundle.main.url(forResource: "Runtimes", withExtension: "json") {
+            candidates.append(bundled)
+        }
+        candidates.append(URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Runtimes.json"))
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            if let catalog = try? JSONDecoder().decode(Catalog.self, from: data) {
+                return catalog.runtimes
+            }
+        }
+        return []
     }
 }
 
 /// Where installed runtimes live, and how they get there.
 enum RuntimeStore {
-    static let root: URL = {
+    /// On disk the store is `MouseRuntimes/usr/lib/<name>`, and the shell mounts the whole `usr`
+    /// directory at `/usr`. The extra two levels are not decoration: an interpreter that
+    /// canonicalizes its load paths (realpath) walks `/usr`, then `/usr/lib`, then
+    /// `/usr/lib/<name>` component by component, and a component that exists only as a
+    /// mount-table prefix answers ENOENT. With the layout mirrored on disk, every ancestor a
+    /// runtime names is a real directory.
+    static let usr: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let directory = base.appendingPathComponent("MouseRuntimes", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+            .appendingPathComponent("MouseRuntimes", isDirectory: true)
+        let usr = base.appendingPathComponent("usr", isDirectory: true)
+        let lib = usr.appendingPathComponent("lib", isDirectory: true)
+        try? FileManager.default.createDirectory(at: lib, withIntermediateDirectories: true)
+        // Installs from before this layout sat directly under MouseRuntimes. A language silently
+        // vanishing after an update is worse than the rename, so carry them across.
+        if let entries = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) {
+            for entry in entries where entry.lastPathComponent != "usr" && !entry.lastPathComponent.hasPrefix(".") {
+                try? FileManager.default.moveItem(at: entry, to: lib.appendingPathComponent(entry.lastPathComponent))
+            }
+        }
+        return usr
     }()
+
+    static let root: URL = usr.appendingPathComponent("lib", isDirectory: true)
 
     struct Installed {
         let name: String
@@ -146,7 +208,12 @@ enum RuntimeStore {
         try? FileManager.default.removeItem(at: staging)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         do {
-            try ZipArchive.extract(data, to: staging)
+            // Both unpackers refuse entries that escape the destination (`..`, absolute names) —
+            // an archive is a download, and a download must not write outside its directory.
+            switch entry.archive {
+            case .zip: try ZipArchive.extract(data, to: staging)
+            case .tarGz: try TarGz.extract(data, into: staging, stripComponents: entry.strip ?? 0)
+            }
         } catch {
             try? FileManager.default.removeItem(at: staging)
             throw InstallError.unpack("\(error)")
@@ -169,9 +236,9 @@ enum RuntimeStore {
     }
 }
 
-/// A reader for the ZIP format, because iOS has no `unzip` and the runtimes upstream publishes
-/// are zips. Only what an unpack needs: walk the central directory, then copy stored entries and
-/// inflate deflated ones. The inflate itself is the one `TarGz` already uses for npm
+/// A reader for the ZIP format, because iOS has no `unzip` and some runtimes are published as
+/// zips (tar.gz releases go through the same `TarGz` npm tarballs use). Only what an unpack
+/// needs: walk the central directory, then copy stored entries and inflate deflated ones. The inflate itself is the one `TarGz` already uses for npm
 /// tarballs — Apple's `compression` framework in raw-DEFLATE mode, which is exactly what a zip
 /// entry holds.
 enum ZipArchive {

@@ -2,8 +2,11 @@
 # Build ONE harness. A separate file rather than an inline xargs body: embedding the source lists
 # in the command line overflowed it, and the failure was silent enough that three harnesses then
 # reported ok from binaries an earlier run had left behind.
-M=/Users/thyfriendlyfox/Projects/mouse/swift/Mouse
+# M resolves relative to this script so a harness always builds the shipping source of the
+# checkout it lives in — an absolute path here silently built ANOTHER checkout's engine when the
+# suite ran from a worktree, which is the "green about code that does not ship" trap again.
 T="$(cd "$(dirname "$0")" && pwd)"
+M="$(cd "$T/../swift/Mouse" && pwd)"
 NODE_SET="$M/NodeEngine.swift $M/NodeSockets.swift $M/NodeWatch.swift $M/NodeKeys.swift $M/NodeScrypt.swift $M/NodeBrotli.swift $M/NodeDNS.swift $M/PackageManager.swift"
 TERM_SET="$NODE_SET $M/TerminalScreen.swift $M/TerminalWidth.swift $M/TerminalPrograms.swift"
 # msh installs language runtimes (`pkg install python`), so the shell set carries them.
