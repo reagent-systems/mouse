@@ -332,6 +332,52 @@ final class NodeProgram: TerminalProgram {
     private let cwd: String
     private var io: TerminalProgramIO?
     private var task: Task<Void, Never>?
+    /// One event from the engine thread, in the order the program produced it.
+    private enum Delivery {
+        case output(String, isError: Bool)
+        case rawMode(Bool)
+    }
+    /// The engine→terminal channel. ORDER IS THE CONTRACT (architecture): the engine emits
+    /// stdout, stderr and mode changes from its JS thread, and the terminal must apply them
+    /// in exactly that order — a frame applied after a newer frame leaves the screen showing
+    /// the stale one, which is a display that "freezes" at whatever chunk happened to land
+    /// last. Per-event `Task { @MainActor }` hops were used here once: independent tasks
+    /// carry no ordering guarantee (and stdout/stderr were two separate closures, so even
+    /// their relative order was luck). The mailbox below appends under one lock (arrival
+    /// order) and drains through a SINGLE scheduled main-actor task that applies everything
+    /// available in one turn — ordered, published (every applied chunk bumps the session's
+    /// generation), and never mid-feed when SwiftUI reads the grid, since each application
+    /// is synchronous on the main actor.
+    private final class DeliveryChannel: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffer: [Delivery] = []
+        private var scheduled = false
+        private let apply: @MainActor ([Delivery]) -> Void
+        init(apply: @escaping @MainActor ([Delivery]) -> Void) { self.apply = apply }
+        /// Any thread. FIFO by the lock; at most one drain task in flight, so application
+        /// order is append order.
+        func push(_ delivery: Delivery) {
+            lock.lock()
+            buffer.append(delivery)
+            let schedule = !scheduled
+            if schedule { scheduled = true }
+            lock.unlock()
+            if schedule { Task { @MainActor in self.drain() } }
+        }
+        /// Applies every pending delivery, looping until the buffer is observed empty —
+        /// items pushed mid-drain are picked up here rather than racing a second task.
+        @MainActor func drain() {
+            while true {
+                lock.lock()
+                let batch = buffer
+                buffer.removeAll()
+                if batch.isEmpty { scheduled = false; lock.unlock(); return }
+                lock.unlock()
+                apply(batch)
+            }
+        }
+    }
+    private var channel: DeliveryChannel?
     /// Raw mode = keystrokes are bytes, ^C included; cooked mode = ^C is SIGINT.
     private var rawMode = false
     /// Transcript text still waiting for its newline.
@@ -357,20 +403,37 @@ final class NodeProgram: TerminalProgram {
 
     func start(io: TerminalProgramIO) {
         self.io = io
+        let channel = DeliveryChannel { [weak self] batch in
+            guard let self else { return }
+            for delivery in batch {
+                switch delivery {
+                case .output(let text, let isError): self.receive(text, isError: isError)
+                case .rawMode(let raw): self.rawModeChanged(raw)
+                }
+            }
+        }
+        self.channel = channel
         // Attached here, not in init: the program is born knowing the grid it draws into —
-        // a TUI measures process.stdout.columns in its first breath.
-        // The closures hop to the main actor: the engine calls them from its JS thread.
+        // a TUI measures process.stdout.columns in its first breath. The closures run on the
+        // engine's JS thread and only PUSH into the channel — synchronous and FIFO — so the
+        // main-actor drain applies everything in production order (see `DeliveryChannel`).
+        // The raw-mode flip travels the same channel: engagement lands exactly between the
+        // writes it separates, as it would on a real pty.
         engine.attachTTY(NodeEngine.TTY(
-            write: { [weak self] text in Task { @MainActor in self?.receive(text, isError: false) } },
-            writeError: { [weak self] text in Task { @MainActor in self?.receive(text, isError: true) } },
+            write: { channel.push(.output($0, isError: false)) },
+            writeError: { channel.push(.output($0, isError: true)) },
             rows: io.rows,
             columns: io.columns,
-            rawModeChanged: { [weak self] raw in Task { @MainActor in self?.rawModeChanged(raw) } }
+            rawModeChanged: { channel.push(.rawMode($0)) }
         ))
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await self.engine.run(source: self.source, path: self.path,
                                                argv: self.argv, cwd: self.cwd, stdin: "")
+            // Everything the program wrote was pushed before run() returned. Drain it HERE,
+            // so the exit steps below observe the final frame — an exit that raced the
+            // channel used to restore the screen out from under chunks still in flight.
+            self.channel?.drain()
             // TTY writes streamed live; what's left in the result is the crash report
             // (a fatal exception's stack lands there, not in the stream).
             if !result.err.isEmpty { self.receive(result.err, isError: true) }
