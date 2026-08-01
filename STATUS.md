@@ -48,6 +48,21 @@ launches and is driven on the iPhone 16 Pro simulator
   `python 3.14.6 on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
   `python hello.py` prints what the script prints. Screenshots at 23:48 on
   2026-07-31.
+- **A node server runs on the phone and answers real requests from off the
+  device.** `node server.js` printed `listening on 8787`, and three
+  requests made from the Mac (`GET /hello-from-the-mac`, `GET /page-two`,
+  `POST /submit`) were each logged live in the terminal as they arrived;
+  curl received `HTTP/1.1 200` and the body. The simulator shares the
+  host's network stack, so those were real external requests, not a
+  loopback inside the app.
+- **A running program could not be stopped at all**, found by doing the
+  above: while a full-screen program owns the keyboard every keystroke is
+  routed to it, so the any-key interrupt beneath it can never fire — and an
+  iOS keyboard has no Control key. A `node` server held the terminal until
+  the app was killed. There is now a `^C` chip beside the prompt, shown
+  only while a program runs; tapping it sends the interrupt the program
+  already knew how to handle. Verified: the server stopped, the prompt came
+  back, and the port stopped answering.
 - Navigation is the gesture law working as designed: an in-lane horizontal
   drag cycles containers within a ring, an edge drag travels between rings
   **or mints a new one**. The "Swipe?" screen is the onboarding lesson

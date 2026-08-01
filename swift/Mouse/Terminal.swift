@@ -70,6 +70,14 @@ struct TerminalContainerView: View {
                         )
                         .frame(maxWidth: .infinity)
                         .frame(height: 22)
+                        // While a PROGRAM owns the keyboard every keystroke belongs to it, so
+                        // the any-key interrupt below it can never fire — and an iOS keyboard
+                        // has no Control. Without this, a `node` server started here holds the
+                        // terminal until the app is killed. Measured on the phone: three real
+                        // HTTP requests answered, and no way back to a prompt.
+                        if terminal.program != nil {
+                            TerminalInterruptChip(session: terminal)
+                        }
                     }
                 }
                 .padding(16)
@@ -399,6 +407,28 @@ private final class ProgramKeyTextField: UITextField {
         case .keyboardF12: return .function(12)
         default: return nil
         }
+    }
+}
+
+/// The stop control, shown only while a full-screen program holds the terminal. Named `^C`
+/// because that is what it sends and what a terminal calls it — the program decides what
+/// quitting means, exactly as it would on a machine with a Control key.
+private struct TerminalInterruptChip: View {
+    let session: TerminalSession
+
+    var body: some View {
+        Button {
+            session.interrupt()
+        } label: {
+            Text("^C")
+                .font(.custom(AppFont.asciiName, size: 10))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .overlay(Capsule().strokeBorder(.white.opacity(0.35), lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 
