@@ -14,6 +14,15 @@ struct TerminalContainerView: View {
                 // The ring's OWN session: rings sharing a repo get separate terminals.
                 let terminal = deck.terminal(for: workspace)
                 VStack(alignment: .leading, spacing: 6) {
+                    // The keys a phone does not have. iOS's software keyboard has no arrows,
+                    // no escape and no tab, and those arrive through `pressesBegan` — which
+                    // only fires for a HARDWARE keyboard. Without this strip a menu renders
+                    // perfectly and its selection cannot be moved. Shown only while a program
+                    // owns the screen, and at the top so it never sits under the thumb that is
+                    // reaching for the prompt.
+                    if terminal.programOnScreen {
+                        TerminalKeyStrip(session: terminal)
+                    }
                     // Two modes, like a real terminal: the transcript (scrollback), or the
                     // SCREEN while a full-screen program (less, top) owns it. The geometry
                     // reader sizes the character grid either way, so a program is born at
@@ -418,6 +427,45 @@ private final class ProgramKeyTextField: UITextField {
         case .keyboardF11: return .function(11)
         case .keyboardF12: return .function(12)
         default: return nil
+        }
+    }
+}
+
+/// The keys an iOS software keyboard does not have, in the same drawn capsules as the engine
+/// switcher. Every one of these already had an encoding in `TerminalKey` — what was missing was
+/// any way to send it without a hardware keyboard, which made a rendered menu unusable: the
+/// selection could not move.
+///
+/// `esc` and `tab` earn their place beside the arrows: escape is how a prompt is abandoned and
+/// how vim leaves insert mode, and tab is completion. Enter stays on the prompt field's own
+/// return key, which already routes to the program.
+///
+/// Same shape as the git module's toolbar — bare labels on their own row at the top of the
+/// container, not chips — so a container's commands read the same wherever they appear.
+private struct TerminalKeyStrip: View {
+    let session: TerminalSession
+
+    private static let keys: [(label: String, key: TerminalKey)] = [
+        ("↑", .up), ("↓", .down), ("←", .left), ("→", .right), ("esc", .escape), ("tab", .tab),
+    ]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Right-aligned: the engine switcher owns the container's top-LEFT corner, and a
+            // left-aligned row lands underneath it.
+            Spacer(minLength: 0)
+            ForEach(Self.keys, id: \.label) { entry in
+                Button {
+                    session.sendSpecialKey(entry.key, [])
+                } label: {
+                    Text(entry.label)
+                        .font(.custom(AppFont.asciiName, size: 12))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.vertical, 6)      // taller hit area than the 12pt glyph
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 }
