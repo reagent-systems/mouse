@@ -445,8 +445,11 @@ private final class ProgramKeyTextField: UITextField {
 private struct TerminalKeyStrip: View {
     let session: TerminalSession
 
+    // Words, not arrow glyphs: the git module's row reads `commit sync branch merge refresh`,
+    // and a container's commands should read the same way wherever they appear.
     private static let keys: [(label: String, key: TerminalKey)] = [
-        ("↑", .up), ("↓", .down), ("←", .left), ("→", .right), ("esc", .escape), ("tab", .tab),
+        ("up", .up), ("down", .down), ("left", .left), ("right", .right),
+        ("esc", .escape), ("tab", .tab),
     ]
 
     var body: some View {
