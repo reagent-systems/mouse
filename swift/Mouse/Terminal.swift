@@ -17,10 +17,14 @@ struct TerminalContainerView: View {
                     // The keys a phone does not have. iOS's software keyboard has no arrows,
                     // no escape and no tab, and those arrive through `pressesBegan` — which
                     // only fires for a HARDWARE keyboard. Without this strip a menu renders
-                    // perfectly and its selection cannot be moved. Shown only while a program
-                    // owns the screen, and at the top so it never sits under the thumb that is
-                    // reaching for the prompt.
-                    if terminal.programOnScreen {
+                    // perfectly and its selection cannot be moved. At the top, so it never sits
+                    // under the thumb reaching for the prompt.
+                    //
+                    // Gated on a program existing at all, not on it owning the SCREEN: a
+                    // transcript-mode program (a `node` server streaming request lines) needs
+                    // `canc` just as much, and that was the case that once held the terminal
+                    // until the app was killed.
+                    if terminal.program != nil {
                         TerminalKeyStrip(session: terminal)
                     }
                     // Two modes, like a real terminal: the transcript (scrollback), or the
@@ -84,14 +88,6 @@ struct TerminalContainerView: View {
                         )
                         .frame(maxWidth: .infinity)
                         .frame(height: 22)
-                        // While a PROGRAM owns the keyboard every keystroke belongs to it, so
-                        // the any-key interrupt below it can never fire — and an iOS keyboard
-                        // has no Control. Without this, a `node` server started here holds the
-                        // terminal until the app is killed. Measured on the phone: three real
-                        // HTTP requests answered, and no way back to a prompt.
-                        if terminal.program != nil {
-                            TerminalInterruptChip(session: terminal)
-                        }
                     }
                 }
                 .padding(16)
@@ -437,7 +433,8 @@ private final class ProgramKeyTextField: UITextField {
 /// selection could not move.
 ///
 /// `esc` and `tab` earn their place beside the arrows: escape is how a prompt is abandoned and
-/// how vim leaves insert mode, and tab is completion. Enter stays on the prompt field's own
+/// how vim leaves insert mode, and tab is completion. `canc` sends the interrupt — ^C on a real
+/// terminal, another key an iOS keyboard cannot type. Enter stays on the prompt field's own
 /// return key, which already routes to the program.
 ///
 /// Same shape as the git module's toolbar — bare labels on their own row at the top of the
@@ -458,38 +455,21 @@ private struct TerminalKeyStrip: View {
             // left-aligned row lands underneath it.
             Spacer(minLength: 0)
             ForEach(Self.keys, id: \.label) { entry in
-                Button {
-                    session.sendSpecialKey(entry.key, [])
-                } label: {
-                    Text(entry.label)
-                        .font(.custom(AppFont.asciiName, size: 12))
-                        .foregroundStyle(.white.opacity(0.85))
-                        .padding(.vertical, 6)      // taller hit area than the 12pt glyph
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                control(entry.label) { session.sendSpecialKey(entry.key, []) }
             }
+            // Last, and the only one that is not a keystroke: it stops the program. On a real
+            // terminal this is ^C, which an iOS keyboard cannot type either.
+            control("canc") { session.interrupt() }
         }
     }
-}
 
-/// The stop control, shown only while a full-screen program holds the terminal. Named `^C`
-/// because that is what it sends and what a terminal calls it — the program decides what
-/// quitting means, exactly as it would on a machine with a Control key.
-private struct TerminalInterruptChip: View {
-    let session: TerminalSession
-
-    var body: some View {
-        Button {
-            session.interrupt()
-        } label: {
-            Text("^C")
-                .font(.custom(AppFont.asciiName, size: 10))
+    private func control(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.custom(AppFont.asciiName, size: 12))
                 .foregroundStyle(.white.opacity(0.85))
-                .padding(.horizontal, 8)
-                .frame(height: 22)
-                .overlay(Capsule().strokeBorder(.white.opacity(0.35), lineWidth: 1))
-                .contentShape(Capsule())
+                .padding(.vertical, 6)      // taller hit area than the 12pt glyph
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
