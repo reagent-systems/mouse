@@ -131,25 +131,34 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
 **4 — Runtimes.** Reuse `Runtimes.json` unchanged; port `RuntimeStore` +
 the zip reader; `pkg install python` and `pkg install ruby` on Android.
 
-**5 — Phase A: the shell LANGUAGE. Not started, and not previously tracked
-anywhere.** This plan scoped T, F and G because those were the phases
-AGENTS.md recorded as iOS-only — but iOS also has phase A, and Android's msh
-does not. `swift/Mouse/ShellLanguage.swift` is 690 lines of `if`/`for`/
-`while`/`case`, `test`/`[`, command substitution and script execution;
-`MouseShell.kt` has **none of it** — grepping for control-flow keywords or
-`$(` returns zero. What Kotlin has is the word layer: quoting, variables,
-globs, pipes, redirection, `;`/`&&`/`||`, history and ~50 built-ins.
+**5 — Phase A: the shell LANGUAGE. DONE.** `ShellLanguage.swift` is
+`kotlin/shell/src/.../ShellLanguage.kt` — lexer, AST, recursive-descent
+parser and arithmetic, ported structurally intact — and the executor half of
+`Shell.swift` joined `MouseShell`: `if`/`elif`/`else`, `for`, `while`/
+`until`, `case`, functions with their own positional frame and `local`
+scope, `break`/`continue`/`return`/`exit` as non-local control flow,
+`test`/`[`, `$(…)`/backticks, `$((…))`, the `${…}` operators, field
+splitting by quote context, `set -e`/`-x`/`-o pipefail`, `read`, compound
+redirects, and `eval`/`source`/`.`/`sh`/`./script.sh`. `&` still refuses,
+for the reason the Swift file gives. The corpus also proved four built-ins
+were missing or wrong (`chmod`, `uname`, `mkdir -p` making a directory
+called `-p`, `touch` taking only its first file) and that `globToRegex`
+mangled bracket ranges — one real `fnmatch` (`ShellPattern`) now serves case
+patterns, `${x##…}` stripping and globs alike.
 
-It blocks none of the three stop-condition legs, which is why it stayed
-invisible, but "everything the iOS app can do now" includes it and a parity
-claim that omits it is wrong rather than incomplete.
+Gated by `./gradlew :shellcheck:run`, a port of `verify/shell/main.swift`
+that is DIFFERENTIAL in the same way: the same 25 scripts through msh and
+through the real `/bin/sh`, each side in its own scratch directory,
+comparing stdout and exit status. **All 25 match, and none diverge** — the
+same result STATUS.md records for iOS on the same corpus.
 
-The gate is already written and needs no porting decisions: `verify/shell`
-is DIFFERENTIAL — it runs each script through msh and through the real
-`/bin/sh` and compares stdout and exit status. A Kotlin `:shellcheck` can
-drive the identical corpus against `MouseShell` and the same `/bin/sh`. Until
-that exists, the Kotlin shell is the one shared component with no gate at all,
-which by this plan's own rule makes its parity unfalsifiable.
+The move that made it gatable: `MouseShell` was in `:app`, so no pure-JVM
+harness could construct one, which is exactly why it was the last shared
+component with no gate. It is now `:shell`, carved out like `:terminal`,
+`:packages` and `:node` before it, coroutine-free like `:packages` — the API
+is blocking, `Terminal.kt` wraps it in `withContext(Dispatchers.IO)`, and
+cancellation arrives as `Context.isActive` so a streaming `ping` still stops
+on a keypress.
 
 ## Stop condition
 

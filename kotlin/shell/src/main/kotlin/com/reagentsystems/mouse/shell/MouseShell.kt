@@ -1636,14 +1636,11 @@ class MouseShell {
 
     private fun export(args: List<String>): IO {
         for (arg in args) {
+            // Everything here is exported already (one process); a bare NAME is a no-op that
+            // succeeds, NAME=value assigns. This used to reject a bare NAME, which made the
+            // `export PATH` that ends every install script a hard error.
             val eq = arg.indexOf('=')
-            // `export NAME` with no value marks an already-set variable; only a bare unknown name
-            // is a usage error. `export PATH` after `PATH=…` is ordinary in install scripts.
-            if (eq < 0) {
-                if (env.containsKey(arg)) continue
-                return IO(err = "export: usage: export NAME=value", status = 1)
-            }
-            env[arg.substring(0, eq)] = arg.substring(eq + 1)
+            if (eq >= 0) env[arg.substring(0, eq)] = arg.substring(eq + 1)
         }
         return IO()
     }

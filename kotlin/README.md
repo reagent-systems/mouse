@@ -42,12 +42,24 @@ stop building off-device.
 | `:pkgcheck` | The headless gate for `:packages` |
 | `:node` | The Node layer's portable half: the bootstrap's extraction from the iOS source, the `__mouse` bridge protocol, the process globals, the event loop's bookkeeping, the workspace-virtual filesystem (`NodeFs`) and node's module-resolution algorithm (`ModuleResolver`). Pure Kotlin/JVM |
 | `:nodecheck` | The headless gate for `:node` — including the bootstrap-drift check |
+| `:shell` | `msh` itself: the word layer (quoting, variables, globs, pipes, redirection, sequencing, history, ~50 built-ins) and the LANGUAGE (`ShellLanguage.kt` — lexer, AST, parser, arithmetic, `fnmatch`). Pure Kotlin/JVM, JDK-only |
+| `:shellcheck` | The headless gate for `:shell` — differential against the real `/bin/sh` |
 
-`:terminal`, `:packages` and `:node` are modules rather than files in `:app` for
-the reason phase T learned on iOS: logic that shares a file with UI is logic no
-harness can reach. They run on a JVM, so the screen, the whole npm install path
-and everything about the Node layer except the WebView are gated without an
-emulator.
+`:terminal`, `:packages`, `:node` and `:shell` are modules rather than files in
+`:app` for the reason phase T learned on iOS: logic that shares a file with UI
+is logic no harness can reach. They run on a JVM, so the screen, the whole npm
+install path, everything about the Node layer except the WebView, and the whole
+shell are gated without an emulator.
+
+`msh` was the last of the four to move, and it moved because it was the only
+shared component with **no gate at all** — which was a structural fact, not an
+oversight: the differential harness needs to construct a `MouseShell` from a
+bare `main()`, and it could not while the class imported Compose.
+
+Like `:packages`, `:shell` is free of kotlinx-coroutines. Its API is blocking
+and `Terminal.kt` wraps it in `withContext(Dispatchers.IO)`; cancellation — what
+a streaming `ping` needs, and what `Task.isCancelled` supplies on iOS — arrives
+as `MouseShell.Context.isActive`, a lambda the app closes over its `Job`.
 
 ## Verifying the terminal screen
 
@@ -81,6 +93,33 @@ the tree and requiring out of it — a mocked registry grades the mock. Needs
 so they cache under `~/.cache/mouse-verify/npm-tarballs`; packuments are
 deliberately fetched every time, because a cached one loses a publish race
 against the live pnpm it is compared with.
+
+## Verifying the shell
+
+```sh
+cd kotlin
+ANDROID_HOME=~/Library/Android/sdk ./gradlew :shellcheck:run
+```
+
+DIFFERENTIAL, and a port of `verify/shell/main.swift` down to the corpus: the
+same 25 scripts run through msh **and** through the real `/bin/sh` on this
+machine, each side in its own scratch directory, comparing stdout and exit
+status. All 25 match; so do they on iOS.
+
+That shape is the point. A shell graded against expectations someone typed by
+hand only proves it is self-consistent — it will happily agree with its own
+bugs. Graded against `/bin/sh`, every disagreement names a real one, and it is
+not `/bin/sh` that is wrong. The corpus is ordinary shell, not a feature list:
+`if`/`elif`/`else`, `for`, `while`/`until`, `case` with glob patterns,
+functions with positionals and `return`, `test`/`[`, `$(…)` and backticks,
+`$((…))`, the `${…}` operators, field splitting, redirects, `read` from a pipe
+and from a file, `set -e`, `eval`/`source`/`sh`, and an install-script-shaped
+program that exercises most of it at once.
+
+The corpus is duplicated into the harness rather than read from
+`verify/shell/main.swift`, unlike the fixtures `:screencheck` reads directly —
+those are data, that is Swift source. The two harnesses reporting different
+script counts is what catches drift.
 
 ## Verifying the Node layer
 
@@ -229,6 +268,20 @@ Feature parity with the iOS app, built natively in Compose:
 - **Terminal** — two engines behind the switcher: `msh` (the same
   from-scratch shell as iOS, ported) and the device's **real
   `/system/bin/sh`** as a persistent process — Android's honest advantage
+- **Shell language** (`:shell`) — the POSIX subset real scripts are written
+  in: `if`/`elif`/`else`, `for`, `while`/`until`, `case`, functions with their
+  own positional frame and `local` scope, `break`/`continue`/`return`/`exit`,
+  `test`/`[`, `$(…)` and backticks, `$((…))`, the `${…}` operators, field
+  splitting by quote context, `set -e`/`-x`/`-o pipefail`, `read`, compound
+  redirects, and `eval`/`source`/`.`/`sh`/`./script.sh`. Gated by
+  `:shellcheck` against the real `/bin/sh`. `&` job control is refused, as on
+  iOS — msh runs one command at a time. **One gap at the prompt, not in the
+  language:** a compound typed across several lines is not continued. The
+  parser already reports it (`ShellParseError.incomplete` is set for an
+  unclosed quote or a missing `fi`/`done`, which is what iOS's session uses to
+  ask for the next line) but the Compose prompt does not yet consume that, so
+  `for x in a b; do echo $x; done` must be one line. Scripts, which is where
+  multi-line compounds actually live, are unaffected
 - **Terminal screen** (`:terminal`) — the VT100/xterm cell grid, ANSI parser,
   Unicode width table and key encoding, gated by `:screencheck`
 - **Package manager** (`:packages`) — semver (ranges, caret/tilde, prerelease
@@ -256,6 +309,19 @@ Feature parity with the iOS app, built natively in Compose:
 
 ## Known Android nuances
 
+- **`$$` cannot use `ProcessHandle` on Android.** `ProcessHandle.current()` is
+  JDK-only; `java.lang.management` is absent too. `MouseShell` tries
+  `ProcessHandle` first and falls back to resolving the `/proc/self` symlink,
+  which is the real pid on Android and Linux and missing on a Mac — between
+  them every platform this shell runs on is covered. Nothing in the corpus
+  depends on the value, so a wrong `$$` would have gone unnoticed; it is a
+  number rather than a crash by construction, not by test.
+- **The shell's `Context` callbacks arrive off the main thread.** `:shell` is
+  blocking and runs on `Dispatchers.IO`, so `emit`, `clear` and
+  `launchProgram` are called from a background thread while everything they
+  touch is Compose snapshot state. `Terminal.kt` routes all three through
+  `onMain`. On iOS the compiler enforces this with `@MainActor`; here it is by
+  hand, and a missed one is a race that will not reproduce on demand.
 - **`statfs` cannot use `Files.getFileStore` on Android, and the JVM gate
   cannot see that.** Resolving a `FileStore` means matching the path against
   the mount table, and an app cannot read enough of `/proc/mounts` to do it —
@@ -335,6 +401,29 @@ Feature parity with the iOS app, built natively in Compose:
   axis crosses touch slop first claims the drag. Direction locks on the
   first movement so a mid-drag wobble can't flip neighbors. A one-lane ring
   has no gap, so the edge strips remain its travel path there.
+
+### Noted in the shared design, not fixed here
+
+iOS is frozen for the parity loop, so these are recorded rather than changed.
+None of them affect behavior; all three are comments or code that describe a
+shell that is not the one running.
+
+- **`verify/shell/main.swift` says msh keeps trailing comments. It does not.**
+  The `comments-continuation` script carries the inline note "trailing comments
+  are words in msh and sh differs — keep separate", and the harness has a
+  matching comment about stripping it "for sh fairness" above code that strips
+  nothing. Both are stale: `#` opens a comment whenever it starts a word, and
+  `flushWord()` sets `atWordStart` after every space, so msh drops trailing
+  comments exactly like `/bin/sh`. The script passes on both platforms
+  *because* the note is wrong — if msh behaved as described, that case would
+  fail.
+- **`ShellParser.parseList` ends with an empty `if`.** `if stoppers.isEmpty ==
+  false, nodes.isEmpty { }` evaluates two conditions and does nothing. Dropped
+  in the Kotlin port rather than reproduced.
+- **`ShellArithmetic` computes in `Int`.** The Kotlin port uses `Long`, which
+  is the wider type on both platforms rather than a deliberate divergence.
+  Nothing in the corpus reaches the boundary, so the two agree everywhere it
+  is checked.
 
 ## Platform differences (by design)
 
