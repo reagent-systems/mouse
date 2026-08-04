@@ -49,7 +49,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.reagentsystems.mouse.terminal.AnsiColor
@@ -480,43 +479,26 @@ fun TerminalContainer(deck: CarouselDeck) {
             // While a program runs, its name stands where the prompt was.
             BasicText(terminal.program?.title ?: terminal.prompt,
                 style = TextStyle(fontFamily = mono, fontSize = Theme.codeSize, color = Theme.secondary))
-            // The field is seeded the moment a program takes over, and emptied when it leaves:
-            // the sentinel is the mechanism above, and leaving it behind at the prompt would put
-            // an invisible character at the head of the next command.
-            LaunchedEffect(terminal.program != null) {
-                field = if (terminal.program != null) {
-                    TextFieldValue(PROGRAM_SENTINEL, selection = TextRange(PROGRAM_SENTINEL.length))
-                } else {
-                    TextFieldValue("")
-                }
-            }
             BasicTextField(
                 value = field,
                 onValueChange = { new ->
                     when {
                         // A program owns the keyboard: every character is a keystroke to it, and
-                        // the field never accumulates a line the program has already consumed.
+                        // the field stays empty so it never accumulates a line the program has
+                        // already consumed.
                         //
-                        // It holds a SENTINEL rather than nothing, and that is what makes
-                        // backspace reachable at all. An empty field has nothing to delete, so
-                        // Compose fires no `onValueChange` for the key and the keystroke is lost
-                        // — `npx create-vite` asks for a project name, and a name that cannot be
-                        // corrected is a prompt that cannot be answered. With one invisible
-                        // character parked in it, a deletion is always an EDIT, and an edit is an
-                        // event. The sentinel is a zero-width space: it occupies the field
-                        // without occupying the screen.
+                        // BACKSPACE DOES NOT REACH THE PROGRAM, and the fix is not the obvious
+                        // one. An empty field has nothing to delete, so Compose fires no
+                        // `onValueChange` for the key. Parking an invisible sentinel character
+                        // here to make every deletion an edit was tried and REVERTED: with the
+                        // field rewritten on each change the IME and the field's own state
+                        // disagree, and typed text stopped arriving at the program altogether —
+                        // arrows still worked, because the key strip never touches this field.
+                        // Trading a capability that works for one that was never demonstrated is
+                        // a bad trade, so this stays as it is until the IME path is understood.
                         terminal.program != null -> {
-                            val typed = new.text.removePrefix(PROGRAM_SENTINEL)
-                            if (new.text.length < PROGRAM_SENTINEL.length) {
-                                // The sentinel itself was deleted: that is the backspace.
-                                terminal.sendKey("\u007f")
-                            } else if (typed.isNotEmpty()) {
-                                terminal.sendKey(typed)
-                            }
-                            field = TextFieldValue(
-                                PROGRAM_SENTINEL,
-                                selection = TextRange(PROGRAM_SENTINEL.length),
-                            )
+                            if (new.text.isNotEmpty()) terminal.sendKey(new.text)
+                            field = TextFieldValue("")
                         }
                         // While a command runs, any keypress interrupts it (input is refused anyway).
                         terminal.isRunning -> terminal.interrupt()
@@ -544,12 +526,6 @@ fun TerminalContainer(deck: CarouselDeck) {
  * width is one "M" in the mono face at [Theme.codeSize] — measured once, at first use, because
  * a Compose text measurer is not available where the session lives.
  */
-/**
- * The invisible character the input field holds while a program owns the keyboard, so that a
- * deletion is an edit Compose will report. See the routing in the field's `onValueChange`.
- */
-private const val PROGRAM_SENTINEL = "\u200B"
-
 object TerminalCellMetrics {
     val height = 15.dp
     val width = 7.2.dp

@@ -245,8 +245,22 @@ each with a screenshot:
     override applied after load, with a gate of its own. Packages branch on
     this — napi-rs already does — so it is not cosmetic.
 
-  One known gap stands in the way of (c) and is not covered by any milestone
-  above: **backspace does not reach a running program.** While a program owns
+  **NO TYPED CHARACTER reaches a running program — not just backspace.** This
+  correction was forced by driving it: `Enter` advances a prompt (it is an IME
+  ACTION, `keyboardActions.onSend`) and the arrows work (the key strip calls
+  `sendSpecialKey` directly, never touching the field), so create-vite's menu
+  navigates by touch and its TEXT prompt silently keeps its default. Only
+  `onValueChange` is losing keystrokes, which makes the missing backspace one
+  symptom of a bigger fault rather than the whole of it.
+
+  Parking an invisible sentinel in the field to make every deletion an edit was
+  tried and REVERTED: it did not restore typed input either, so the cause is
+  not "an empty field has nothing to delete". The field is rewritten on every
+  change (`field = TextFieldValue("")`), and that is the thing to suspect next
+  — a value the IME did not ask for, applied while it holds a composing region.
+
+  The original note, kept because its reasoning still stands:
+  **backspace does not reach a running program.** While a program owns
   the keyboard the prompt field is held empty, so Compose fires no
   `onValueChange` for a deletion and the keystroke is lost. `create-vite` asks
   for a project name, so the leg cannot pass without it. The fix is the usual

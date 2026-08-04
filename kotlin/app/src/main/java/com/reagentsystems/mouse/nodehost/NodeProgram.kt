@@ -69,7 +69,7 @@ class NodeProgram(
      */
     fun write(text: String, isError: Boolean) {
         val io = this.io ?: return
-        io.write(text)
+        io.write(onlcr(text))
         if (!rendersScreen && TerminalEngagement.asksForScreen(text)) {
             engage(io)
             return
@@ -104,5 +104,32 @@ class NodeProgram(
 
     override fun resize(rows: Int, columns: Int) {
         engine.resizeTty(rows, columns)
+    }
+
+    private companion object {
+        /**
+         * ONLCR: a bare `\n` (not already preceded by `\r`) becomes `\r\n`.
+         *
+         * The TTY's job, not the emulator's. A real pty maps NL→CR-NL on output, so a program
+         * ending its lines with a bare `\n` — every `logUpdate`-style repaint, which is what
+         * clack and ink do — lands each line at column 0. Without it the screen, correctly
+         * xterm-faithful in treating LF as index, SHEARS THE FRAME DIAGONALLY: that is exactly
+         * how create-vite's menu first rendered here, each row one column further right than the
+         * last. We are the pty substitute, so the translation belongs here.
+         *
+         * A stray `\r\n` split across two writes yields a harmless `\r\r\n` — CR to column 0
+         * is idempotent — so no cross-chunk state is needed.
+         */
+        fun onlcr(text: String): String {
+            if (!text.contains('\n')) return text
+            val result = StringBuilder(text.length + 8)
+            var previous = '\u0000'
+            for (ch in text) {
+                if (ch == '\n' && previous != '\r') result.append('\r')
+                result.append(ch)
+                previous = ch
+            }
+            return result.toString()
+        }
     }
 }
