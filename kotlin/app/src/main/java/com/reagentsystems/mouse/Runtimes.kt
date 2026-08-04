@@ -3,6 +3,7 @@ package com.reagentsystems.mouse
 import android.content.Context
 import com.reagentsystems.mouse.packages.RuntimeCatalog
 import com.reagentsystems.mouse.packages.RuntimeStore
+import com.reagentsystems.mouse.shell.MouseShell
 import java.io.File
 
 /**

@@ -35,3 +35,7 @@ include(":pkgcheck")
 // node/build.gradle.kts for where the line is drawn and why.
 include(":node")
 include(":nodecheck")
+// `msh` itself — the word layer AND the language (phase A) — and its differential gate. Pure
+// Kotlin for the same reason as the three above; see shell/build.gradle.kts.
+include(":shell")
+include(":shellcheck")
