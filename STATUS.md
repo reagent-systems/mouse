@@ -138,14 +138,28 @@ commands.
   audit lists ~17 Buffer internals some packages touch; `path.matchesGlob`
   has its 1824-case corpus gathered but no decision.
 - `sharp` needs native bindings — a wall, listed so nobody rediscovers it.
+- `verify/napiwasi` has gone stale for a reason that is not ours: neither of
+  its two packages publishes a `…-wasm32-wasi` optional dependency any more
+  (rolldown dropped it at 1.2.x, oxc-parser at 0.143), so `wasiBinding` finds
+  nothing to install and the gate reports a wall that has moved. Found by the
+  Kotlin port of the same check, which now asserts the RULE on a synthetic
+  napi-rs-shaped package and keeps one live-registry leg on a package that
+  still ships one (`unrs-resolver`). Repoint the Swift harness the same way.
 - vs-code branch items (ROADMAP): `git clone` in the project picker, editor
   upgrades, ssh, the Preview container, four tracked shell gaps.
 - Android parity for T/F/G — plan at `plans/android-parity.md` (WebView +
   `@JavascriptInterface` path). Milestone 1 (phase T's pure-logic layer) is
   in: `kotlin/terminal/` holds the screen, parser, width table and key
   encoding; `./gradlew :screencheck:run` gates them against the iOS corpus
-  and the same `verify/` fixtures, pyte cross-check included. Still open:
-  the Compose grid renderer and key strip, then F and G.
+  and the same `verify/` fixtures, pyte cross-check included. Milestone 2
+  (phase F) is in: `kotlin/packages/` holds semver, the registry client, the
+  hoisting resolver, integrity, the manifest, `npm:` aliases, the wasm/wasi
+  substitutions and `TarGz`; `./gradlew :pkgcheck:run` gates it the same way
+  the iOS side is gated — semver corpus, resolution against real `pnpm
+  install --lockfile-only`, and real installs proven by real `node` requiring
+  out of the tree (94 checks, MATCH). Still open: the Compose grid renderer
+  and key strip, then G — and `npm`/`npx`/`npm run` in Kotlin msh, which wait
+  on G because they exist to run what they install.
 
 ## Blocked on the user
 

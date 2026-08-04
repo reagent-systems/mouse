@@ -422,20 +422,32 @@ The two apps share no code (no cross-platform bridge) — parity is by
 faithful re-implementation, file-for-file where it helps
 (`Shell.swift`↔`MouseShell.kt`, `CarouselDeck.swift`↔`Model.kt`, etc.).
 
-Android also has a headless gate: `./gradlew :screencheck:run` runs the
-terminal-screen corpus — the iOS one, ported assertion for assertion and
-reading the same `verify/` fixtures — and prints one verdict line ending
-in MATCH or MISMATCH. There is no JUnit (invariant #4); it is a `main()`,
-the same shape as the Swift harnesses. The engine it gates lives in
-`kotlin/terminal/`, a pure Kotlin/JVM module with no Android dependency,
-for the reason phase T learned on iOS: logic that shares a file with UI is
-logic no harness can reach.
-**Phases T, F and G (terminal screen, package manager, Node layer) are
-iOS-only by a recorded decision, not an oversight** — see "Android parity"
-in system.md for the measured split (the Node engine is 72 % portable JS
-bootstrap, 28 % host bridge) and why WebView + `@JavascriptInterface` is the
-parity path that keeps invariant #4. It is a scope decision with a stated
-trigger; don't fix it in passing.
+Android also has headless gates: `./gradlew :screencheck:run` runs the
+terminal-screen corpus and `./gradlew :pkgcheck:run` runs the package-manager
+corpus — both the iOS ones, ported assertion for assertion, reading the same
+`verify/` fixtures and hitting the same live npm registry — and each prints
+one verdict line ending in MATCH or MISMATCH. There is no JUnit
+(invariant #4); they are `main()`s, the same shape as the Swift harnesses.
+The engines they gate live in `kotlin/terminal/` and `kotlin/packages/`, pure
+Kotlin/JVM modules with no Android dependency, for the reason phase T learned
+on iOS: logic that shares a file with UI is logic no harness can reach.
+`:packages` brings its own JSON reader/writer — `org.json` is in the Android
+framework but not the JDK, so using it would cost a third-party artifact AND
+stop the module building off-device. `TarGz` lives there too, not in
+`Workspace.kt`, exactly as iOS moved it out of `Workspace.swift`: the clone
+and the installer share one reader and it must be reachable from a harness.
+`:pkgcheck` caches TARBALLS under `~/.cache/mouse-verify` (immutable,
+integrity-checked) and never caches PACKUMENTS — a cached packument loses a
+publish race against the live `pnpm` it is graded against, which is the same
+trap `verify/pkg` documents from the other side.
+**Phases T and F are ported (terminal screen, package manager); phase G — the
+Node layer — is still iOS-only by a recorded decision, not an oversight** —
+see "Android parity" in system.md for the measured split (the Node engine is
+72 % portable JS bootstrap, 28 % host bridge) and why WebView +
+`@JavascriptInterface` is the parity path that keeps invariant #4. Because
+`npm install` is real on Android but `node` is not yet, the msh commands that
+drive the installer (`npm`/`npx`/`npm run`) stay unported — they exist to run
+what they install.
 
 ## Invariants
 

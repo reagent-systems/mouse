@@ -37,6 +37,9 @@ dependencies {
     // The terminal screen engine. It is a separate pure-JVM module so it can be gated headlessly
     // — see terminal/build.gradle.kts.
     implementation(project(":terminal"))
+    // The package manager, and `TarGz` with it (the workspace clone unpacks through the same
+    // reader the npm installer does). Pure-JVM for the same reason — see packages/.
+    implementation(project(":packages"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))

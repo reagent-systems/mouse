@@ -71,9 +71,17 @@ Then the Compose grid renderer and key routing, and the key strip
 (`up down left right esc tab canc`) — Android soft keyboards have no arrows
 either.
 
-**2 — Phase F: the package manager.** Port `PackageManager.swift`: npm
-registry, semver, integrity, lockfiles, `npm run`/`npx`. Kotlin already has
-tar+gzip and `MessageDigest`. Gate against the same fixtures.
+**2 — Phase F: the package manager. DONE.** `PackageManager.swift` is
+`kotlin/packages/` — semver, npm registry, hoisting resolver, integrity,
+manifest, `npm:` aliases, the wasm/wasi substitutions, and `TarGz` moved
+across from `Workspace.kt` the way iOS moved it out of `Workspace.swift`.
+Gated by `./gradlew :pkgcheck:run` against the same fixtures: the semver
+corpus, resolution vs real `pnpm install --lockfile-only`, and real installs
+proven by real `node` requiring out of the tree. Kotlin already had tar+gzip
+and `MessageDigest`; it did NOT have JSON that works off-device (`org.json` is
+framework-only), so the module carries a hand-written reader/writer.
+`npm run`/`npx` are deferred to milestone 3 — they exist to RUN what they
+install, so they need the Node layer first.
 
 **3 — Phase G: the Node layer in a WebView.** The JS bootstrap moves
 across largely intact; the Kotlin bridge implements what `NodeEngine`'s
