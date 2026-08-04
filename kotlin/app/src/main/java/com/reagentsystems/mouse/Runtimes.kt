@@ -19,10 +19,22 @@ import java.io.File
 object Runtimes {
     private var loaded: MouseShell.RuntimeSupport? = null
 
+    /**
+     * The application context, kept for the one other thing a terminal needs and cannot reach: a
+     * WebView, which `NodeRunner` builds per program. `TerminalSession` is constructed from a
+     * workspace root and has no Context of its own, and threading one down to it would put an
+     * Android type through the model layer for a single use.
+     */
+    private var application: Context? = null
+
     /** Null until [attach] has run — a shell with no store answers honestly instead of crashing. */
     val support: MouseShell.RuntimeSupport? get() = loaded
 
+    /** Null in the same window, and for the same reason: the shell then reports no engine. */
+    val appContext: Context? get() = application
+
     fun attach(context: Context) {
+        application = context.applicationContext
         if (loaded != null) return
         val text = runCatching {
             context.assets.open("Runtimes.json").use { it.readBytes().toString(Charsets.UTF_8) }

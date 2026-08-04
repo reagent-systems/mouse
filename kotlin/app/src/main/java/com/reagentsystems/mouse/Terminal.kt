@@ -1,6 +1,8 @@
 package com.reagentsystems.mouse
 
 import android.os.Handler
+import com.reagentsystems.mouse.node.NodeProcessConfig
+import com.reagentsystems.mouse.nodehost.NodeRunner
 import android.os.Looper
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -290,6 +292,26 @@ class TerminalSession(val root: File) {
                 emit = { o -> onMain { append(o.text, if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT) } },
                 runtimes = Runtimes.support,
                 launchProgram = { p -> onMain { launch(p) } },
+                // The engine. `NodeRunner` blocks this (IO) thread and drives the WebView on the
+                // main one; msh's own `isActive` is what stops a dev server on a keystroke.
+                runNode = Runtimes.appContext?.let { app ->
+                    MouseShell.NodeRun { source, path, argv, environment, mounts, emit ->
+                        NodeRunner.run(
+                            context = app,
+                            source = source,
+                            path = path,
+                            config = NodeProcessConfig(
+                                argv = argv,
+                                env = environment,
+                                cwd = "/" + msh.cwd,
+                            ),
+                            root = root,
+                            mounts = mounts,
+                            sink = { text, isError -> emit(MouseShell.Output(text, isError)) },
+                            cancelled = { self?.isActive == false },
+                        )
+                    }
+                },
                 isActive = { self?.isActive != false },
             )
             val (outputs, echo) = withContext(Dispatchers.IO) { msh.execute(command, context) }

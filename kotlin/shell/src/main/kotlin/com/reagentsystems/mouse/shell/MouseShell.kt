@@ -59,6 +59,12 @@ class MouseShell {
          */
         val launchProgram: ((TerminalProgram) -> Unit)? = null,
         /**
+         * Run a JavaScript program in the Node engine and answer its exit status. Null in a
+         * harness, and in `:shellcheck` — which is the point of it being a hook at all: the engine
+         * is a WebView, so `:shell` cannot see it and must not try.
+         */
+        val runNode: NodeRun? = null,
+        /**
          * False once the user has interrupted the running command. Loops and streaming commands
          * poll it; it is this module's `Task.isCancelled`, supplied by the caller because a
          * coroutine-free module cannot ask a Job directly.
@@ -70,6 +76,27 @@ class MouseShell {
 
     /** The catalog and the store, handed in together so `pkg` never reaches for a singleton. */
     class RuntimeSupport(val catalog: List<RuntimeCatalog.Entry>, val store: RuntimeStore)
+
+    /**
+     * The engine, as msh sees it: source in, exit status out, output as it happens.
+     *
+     * Deliberately not "give me a NodeWebView". The engine lives on the main thread and this
+     * module is blocking and coroutine-free — the seam has to be a function that hides both facts,
+     * or `:shell` stops being gateable against the real `/bin/sh`.
+     *
+     * [mounts] grafts real directories in at virtual prefixes, which is how an installed runtime
+     * outside the workspace becomes visible to the script that runs it.
+     */
+    fun interface NodeRun {
+        fun run(
+            source: String,
+            path: String,
+            argv: List<String>,
+            env: Map<String, String>,
+            mounts: List<Pair<String, File>>,
+            emit: (Output) -> Unit,
+        ): Int
+    }
 
     /** Current directory, relative to the root ("" = root). The prompt renders it. */
     var cwd = ""; private set
@@ -1211,11 +1238,13 @@ class MouseShell {
             "ping" -> ping(args, context, streaming)
             "curl", "wget" -> curl(args, context)
             "pkg" -> pkgCmd(args, context)
-            "git", "npm", "pnpm", "node", "npx" -> IO(err = "$name: not built yet — the native ${if (name == "git") "git" else "package"} engine is on the roadmap", status = 127)
+            "node" -> nodeCmd(args, context, streaming)
+            "git", "npm", "pnpm", "npx" -> IO(err = "$name: not built yet — the native ${if (name == "git") "git" else "package"} engine is on the roadmap", status = 127)
             // A name the CATALOG claims answers honestly, installed or not — that is why the
             // catalog knows an uninstalled runtime's commands. "command not found" for a `python`
             // that is sitting on disk is simply false.
-            else -> runtimeCmd(name, context) ?: IO(err = "msh: command not found: $name (type help)", status = 127)
+            else -> runtimeCmd(name, args, context, streaming)
+                ?: IO(err = "msh: command not found: $name (type help)", status = 127)
         }
     }
 
@@ -1310,17 +1339,136 @@ class MouseShell {
      * the engine is milestone 3d and does not exist here yet. Saying so is better than "command not
      * found", which would be a lie about a 30 MB interpreter sitting on disk.
      */
-    private fun runtimeCmd(name: String, context: Context): IO? {
+    /**
+     * `node script.js`, `node -e code`, and `node` with neither (which is a REPL on a real node
+     * and is refused here by name — a REPL needs the terminal, not the engine).
+     *
+     * Output streams when the command runs solo and is collected inside a pipeline, the same rule
+     * `ping` follows: `node app.js | grep ready` has to work as strings.
+     */
+    private fun nodeCmd(args: List<String>, context: Context, streaming: Boolean): IO {
+        val run = context.runNode
+            ?: return IO(err = "node: no engine attached", status = 127)
+        val collected = StringBuilder()
+        val errors = StringBuilder()
+        val emit: (Output) -> Unit = { out ->
+            if (streaming) context.emit(out)
+            else if (out.isError) errors.append(out.text) else collected.append(out.text)
+        }
+
+        if (args.firstOrNull() == "-e" || args.firstOrNull() == "--eval") {
+            val code = args.getOrNull(1)
+                ?: return IO(err = "node: -e needs code", status = 9)
+            val status = run.run(code, "/[eval].js", listOf("node") + args.drop(2), env, emptyList(), emit)
+            return IO(collected.toString(), errors.toString(), status)
+        }
+
+        val script = args.firstOrNull()
+            ?: return IO(err = "node: a REPL needs a terminal of its own; run a file or `node -e`", status = 9)
+        val target = resolve(script, context)
+            ?: return IO(err = "node: invalid path: $script", status = 1)
+        if (!target.file.isFile) {
+            return IO(err = "node: cannot find module '${display(target.rel)}'", status = 1)
+        }
+        val source = runCatching { target.file.readText() }.getOrNull()
+            ?: return IO(err = "node: can't read ${display(target.rel)}", status = 1)
+        val path = "/" + target.rel
+        val argv = listOf("node", path) + args.drop(1)
+        val status = run.run(source, path, argv, env, emptyList(), emit)
+        return IO(collected.toString(), errors.toString(), status)
+    }
+
+    private fun runtimeCmd(
+        name: String,
+        args: List<String>,
+        context: Context,
+        streaming: Boolean = false,
+    ): IO? {
         val support = context.runtimes ?: return null
         val entry = RuntimeCatalog.forCommand(support.catalog, name) ?: return null
-        if (support.store.installed(entry) == null) {
-            return IO(err = "$name: not installed — `pkg install ${entry.name}`", status = 127)
+        val installed = support.store.installed(entry)
+            ?: return IO(err = "$name: not installed — `pkg install ${entry.name}`", status = 127)
+        val run = context.runNode
+            ?: return IO(err = "$name: no engine attached", status = 127)
+
+        // Where the runtime appears to a script. It really lives outside the workspace, under the
+        // app's own storage, and a program must never learn that path — same rule as "/" itself.
+        val mount = "/usr/lib/" + entry.name
+        // A bare script name means a file in the CURRENT directory and the interpreter has no cwd
+        // of its own: every WASI path is absolute. Anything naming a real file becomes its
+        // absolute virtual path; flags and inline code are left alone.
+        val argv = listOf(entry.name) + args.map { argument ->
+            if (!entry.rewriteScriptPaths || argument.startsWith("-")) return@map argument
+            val resolved = resolve(argument, context) ?: return@map argument
+            if (resolved.file.isFile) "/" + resolved.rel else argument
         }
-        return IO(
-            err = "$name: ${entry.name} ${entry.version} is installed, but running it needs the " +
-                "Node layer's wasm host, which is not wired into msh yet",
-            status = 127,
+        val environment = entry.env.mapValues { it.value.replace("{root}", mount) }
+        val bootstrap = wasiBootstrap(mount, entry.wasm, argv, environment)
+        val collected = StringBuilder()
+        val errors = StringBuilder()
+        val emit: (Output) -> Unit = { out ->
+            if (streaming) context.emit(out)
+            else if (out.isError) errors.append(out.text) else collected.append(out.text)
+        }
+        val status = run.run(
+            bootstrap, "/[${entry.name}].js", argv, env,
+            listOf(mount to installed.directory), emit,
         )
+        return IO(collected.toString(), errors.toString(), status)
+    }
+
+    /**
+     * The JavaScript that runs a wasm interpreter, identical in shape to the one `Shell.swift`
+     * generates — deliberately, because it is the SHARED bootstrap's `node:wasi` and
+     * `WebAssembly` that execute it on both platforms. Android needs no interpreter of its own:
+     * the WebView's V8 compiles the wasm natively.
+     */
+    private fun wasiBootstrap(
+        mount: String,
+        wasm: String,
+        argv: List<String>,
+        environment: Map<String, String>,
+    ): String = """
+        const fs = require('fs');
+        const { WASI } = require('node:wasi');
+        const wasi = new WASI({
+          version: 'preview1',
+          args: ${jsJson(argv)},
+          env: ${jsJson(environment)},
+          preopens: { '/': '/' },
+          returnOnExit: true,
+        });
+        const instance = new WebAssembly.Instance(
+          new WebAssembly.Module(fs.readFileSync('$mount/$wasm')), wasi.getImportObject());
+        const code = wasi.start(instance);
+        if (code) process.exitCode = code;
+    """.trimIndent()
+
+    /**
+     * A JSON literal, which is also a valid JavaScript expression — the same trick
+     * `Shell.jsJSON` uses. U+2028/2029 are ordinary in JSON and statement-ending in JavaScript,
+     * so they are escaped.
+     */
+    private fun jsJson(value: Any?): String = when (value) {
+        null -> "null"
+        is String -> buildString {
+            append('"')
+            for (ch in value) when {
+                ch == '"' -> append("\\\"")
+                ch == '\\' -> append("\\\\")
+                ch == '\n' -> append("\\n")
+                ch == '\r' -> append("\\r")
+                ch == '\t' -> append("\\t")
+                ch.code == 0x2028 -> append("\\u2028")
+                ch.code == 0x2029 -> append("\\u2029")
+                ch < ' ' -> append("\\u%04x".format(ch.code))
+                else -> append(ch)
+            }
+            append('"')
+        }
+        is List<*> -> value.joinToString(",", "[", "]") { jsJson(it) }
+        is Map<*, *> -> value.entries.joinToString(",", "{", "}") { jsJson(it.key.toString()) + ":" + jsJson(it.value) }
+        else -> value.toString()
     }
 
     private fun cd(args: List<String>, context: Context): IO {

@@ -74,9 +74,18 @@ class NodeWebView(
     /** The real directory the program's "/" maps to. */
     root: File,
     private val output: Output,
+    /**
+     * Real directories grafted in at virtual prefixes. An installed runtime lives outside the
+     * workspace — `python` is under `filesDir/runtimes`, not in the user's project — so without a
+     * mount at `/usr/lib/python` its `.wasm` and its stdlib simply do not exist to any script.
+     * Same list iOS builds; see `NodeFs.mount`.
+     */
+    mounts: List<Pair<String, File>> = emptyList(),
 ) {
 
-    private val fs = NodeFs(root.toPath())
+    private val fs = NodeFs(root.toPath()).also {
+        for ((prefix, real) in mounts) it.mount(prefix, real.toPath())
+    }
     private val resolver = ModuleResolver(fs)
 
     /** Where a program's stdout and stderr go. Called on the main thread. */
