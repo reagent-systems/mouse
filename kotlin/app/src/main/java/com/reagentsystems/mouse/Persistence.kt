@@ -60,10 +60,10 @@ object StripPersistence {
 
             ringJson.optString("workspaceRepo", "").takeIf { it.isNotEmpty() }?.let { repo ->
                 val dirty = ringJson.optJSONArray("workspaceDirty")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
-                val synced = ringJson.optString("workspaceSyncedSha", "").ifEmpty { null }
+                val synced = ringJson.optStringOrNull("workspaceSyncedSha")
                 Workspace.existing(base, repo, dirty, synced)?.let { ws ->
                     deck.workspace = ws
-                    deck.openFile(ringJson.optString("openFile", "").ifEmpty { null })
+                    deck.openFile(ringJson.optStringOrNull("openFile"))
                 }
             }
             rings.add(deck)
@@ -85,5 +85,18 @@ object StripPersistence {
         }
         if (finished && container.kind == kind) container.done = true
         return container
+    }
+
+    /**
+     * An absent key, an empty string, or a JSON null all mean "nothing here".
+     *
+     * `optString` alone does NOT: `save` writes `JSONObject.NULL` for a ring with no open file,
+     * and Android's `optString` renders that as the four-character string "null" rather than
+     * falling back. A ring saved with nothing open therefore reopened with a file named `null`,
+     * and the viewer greeted you with "couldn't read the file" on every launch.
+     */
+    private fun JSONObject.optStringOrNull(key: String): String? {
+        if (isNull(key)) return null
+        return optString(key, "").ifEmpty { null }
     }
 }
