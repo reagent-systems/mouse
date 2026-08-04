@@ -25,3 +25,7 @@ include(":app")
 // terminal/build.gradle.kts for why the screen does not live inside :app.
 include(":terminal")
 include(":screencheck")
+// The package manager (npm registry, semver, integrity, tar) and its headless gate. Same shape,
+// same reason — see packages/build.gradle.kts.
+include(":packages")
+include(":pkgcheck")

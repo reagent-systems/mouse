@@ -25,8 +25,11 @@ ANDROID_HOME=~/Library/Android/sdk ./gradlew assembleDebug
 Toolchain: Gradle 8.14, AGP 8.10, Kotlin 2.0, Compose (BOM 2024.09),
 minSdk 26 / target 35. Zero third-party libraries beyond the platform +
 Compose + coroutines — even tar/gzip (`GZIPInputStream` + a hand-written tar
-reader), JSON (`org.json`), HTTP (`HttpURLConnection`), and checksums
-(`MessageDigest`) are the SDK's own.
+reader), HTTP (`HttpURLConnection`) and checksums (`MessageDigest`) are the
+SDK's own. JSON is `org.json` inside `:app`, and a hand-written reader/writer
+in `:packages`: `org.json` ships in the Android framework but not the JDK, so
+a pure-JVM module that used it would need a third-party artifact and would
+stop building off-device.
 
 ## Modules
 
@@ -35,10 +38,13 @@ reader), JSON (`org.json`), HTTP (`HttpURLConnection`), and checksums
 | `:app` | The Android app — Compose, the carousel, workspaces, git, GitHub, `msh` |
 | `:terminal` | The terminal screen engine: grid, ANSI parser, Unicode width table, key encoding. Pure Kotlin/JVM — no Compose, no `android.*`, kotlin-stdlib only |
 | `:screencheck` | The headless gate for `:terminal` |
+| `:packages` | The package manager: semver, the npm registry client, the hoisting tree resolver, integrity-checked installs, the `node_modules` manifest, and `TarGz`. Pure Kotlin/JVM, JDK-only |
+| `:pkgcheck` | The headless gate for `:packages` |
 
-`:terminal` is a module rather than a file in `:app` for the reason phase T
-learned on iOS: logic that shares a file with UI is logic no harness can
-reach. It runs on a JVM, so the screen is gated without an emulator.
+`:terminal` and `:packages` are modules rather than files in `:app` for the
+reason phase T learned on iOS: logic that shares a file with UI is logic no
+harness can reach. They run on a JVM, so the screen and the whole npm install
+path are gated without an emulator.
 
 ## Verifying the terminal screen
 
@@ -55,6 +61,23 @@ it. Two platforms gated by different corpora is a parity claim nobody can
 falsify. There is no JUnit (zero third-party dependencies): the harness is a
 `main()` printing one verdict line ending in MATCH or MISMATCH, exiting
 non-zero on mismatch, like the Swift harnesses in `verify/`.
+
+## Verifying the package manager
+
+```sh
+cd kotlin
+ANDROID_HOME=~/Library/Android/sdk ./gradlew :pkgcheck:run
+```
+
+Same shape, same rule, and the corpus is the iOS one again (`verify/pkg`,
+`verify/npmalias`, the resolution half of `verify/napiwasi`). It talks to the
+real npm registry, grades resolution against a real `pnpm install
+--lockfile-only`, and proves the installed layout by running real `node` in
+the tree and requiring out of it — a mocked registry grades the mock. Needs
+`pnpm` and `node` on the machine. Tarballs are immutable and integrity-checked,
+so they cache under `~/.cache/mouse-verify/npm-tarballs`; packuments are
+deliberately fetched every time, because a cached one loses a publish race
+against the live pnpm it is compared with.
 
 ## Running on an emulator
 
@@ -110,7 +133,8 @@ Feature parity with the iOS app, built natively in Compose:
   `repo` scope (all the user's repos, no installation step); tokens in
   app-private storage
 - **Workspaces** — clone via the tarball API, extracted by the hand-written
-  `TarGz` (platform GZIP + hand tar); one workspace per repo, app-wide
+  `TarGz` in `:packages` (platform GZIP + hand tar — the same reader the npm
+  installer uses); one workspace per repo, app-wide
 - **Files / Viewer / Graph** — lazy tree, in-place editing with shared
   `FileBuffer`s across rings, the commit graph with colored rails
 - **Push / pull** — corner chips; one real commit via the Git Data API
@@ -118,6 +142,15 @@ Feature parity with the iOS app, built natively in Compose:
 - **Terminal** — two engines behind the switcher: `msh` (the same
   from-scratch shell as iOS, ported) and the device's **real
   `/system/bin/sh`** as a persistent process — Android's honest advantage
+- **Terminal screen** (`:terminal`) — the VT100/xterm cell grid, ANSI parser,
+  Unicode width table and key encoding, gated by `:screencheck`
+- **Package manager** (`:packages`) — semver (ranges, caret/tilde, prerelease
+  ordering), the npm registry client, breadth-first resolution with classic
+  hoisting, integrity-checked installs, `npm:` aliases, the wasm/wasi
+  substitutions and the `node_modules` manifest, gated by `:pkgcheck`. The
+  shell commands that drive it (`npm install`, `npx`, `npm run`) are phase G's
+  job on this platform, because they need the Node layer to run what they
+  install
 
 ## Known Android nuances
 
