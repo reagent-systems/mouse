@@ -6,7 +6,9 @@ import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.reagentsystems.mouse.node.Bootstrap
@@ -609,6 +611,18 @@ class NodeWebView(
                 load(source, entryPath, ready)
             }
         }
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                if (message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    val text = message.message() ?: ""
+                    if (text.startsWith(REJECTION_PREFIX)) {
+                        onUnhandledRejection(text.substring(REJECTION_PREFIX.length))
+                        return true
+                    }
+                }
+                return false
+            }
+        }
         web.loadDataWithBaseURL("about:blank", "<!doctype html><html></html>", "text/html", "utf-8", null)
     }
 
@@ -655,6 +669,62 @@ class NodeWebView(
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * An unhandled promise rejection, arriving by the only route that carries one here.
+     *
+     * ## Why this comes through the console and not through the engine
+     *
+     * iOS gets these from JavaScriptCore's `JSGlobalContextSetUnhandledRejectionCallback` and hands
+     * the bootstrap `(promise, reason)`, which is the signature `__mouseOnUnhandledRejection` is
+     * written to. Nothing calls that function on Android, and the reason is measured rather than
+     * assumed — see the `unhandledRejection` entry in [HostBridge.DEFERRED]. The DOM
+     * `unhandledrejection` event is PRESENT (`addEventListener` is a function, assigning
+     * `onunhandledrejection` sticks) and never fires: four rejection sites across three programs,
+     * both registration styles, native V8 promises on the real window, 500 ms each, zero events.
+     * Chromium detects every one of them anyway and reports it here, as
+     * `Uncaught (in promise) Error: boom`.
+     *
+     * ## What that buys, and what it does not
+     *
+     * The console carries a formatted STRING. node hands a handler the rejection's `reason` VALUE,
+     * so this route can serve one half of node's contract and not the other, and the split is
+     * exact:
+     *
+     *  - EXIT CODE — served in both branches. No `unhandledRejection` listener means the rejection
+     *    is fatal: print, exit 1. A listener means node does NOT exit, and neither does this.
+     *  - THE CALLBACK — not served. A program that registers a handler does not get called. The
+     *    alternative is to synthesise an `Error` from the console text and pass it off as the
+     *    reason, which a program cannot distinguish from the real one and which is wrong the
+     *    moment something rejects with a string, a number, or an object carrying a `code`.
+     *
+     * So `bridge.unhandledRejection` stays DEFERRED — the engine-internal path really is unwired —
+     * while the process-level behaviour a shell can observe is correct. The text printed is the
+     * console message with its prefix removed, which for an `Error` is `Error: boom`, node's own
+     * first stack line. There is no stack after it because the console message does not carry one.
+     */
+    private companion object {
+        /** Chromium's own wording for a rejection nothing handled. */
+        const val REJECTION_PREFIX = "Uncaught (in promise) "
+    }
+
+    private fun onUnhandledRejection(text: String) {
+        if (ended) return
+        // The query is read-only, but its completion can end the run, and a turn may not begin
+        // between the two — the same window `inFlight` closes for every other bridge call.
+        inFlight += 1
+        evaluate("globalThis.process ? process.listenerCount('unhandledRejection') : 0") { raw ->
+            inFlight -= 1
+            val handlers = (unquote(raw) ?: raw ?: "0").trim().toIntOrNull() ?: 0
+            if (handlers == 0 && !ended && loop.exitCode == null) {
+                output.stderr(text + "\n")
+                loop.exitCode = 1
+            }
+            // Teardown goes through the loop rather than straight to `end()`, so a rejection and a
+            // turn already in flight cannot both tear down.
+            pump()
         }
     }
 

@@ -232,8 +232,23 @@ object HostBridge {
             "the IPC channel that would make it real",
         listOf("unhandledRejection") to
             "iOS reports an unhandled promise rejection through JavaScriptCore's " +
-            "`JSGlobalContextSetUnhandledRejectionCallback`; a WebView exposes no equivalent hook, " +
-            "so nothing can call this",
+            "`JSGlobalContextSetUnhandledRejectionCallback`. A WebView has a hook, but it is the " +
+            "WRONG SHAPE, and the difference is the whole reason this is deferred rather than " +
+            "wired. Measured on device, not reasoned about: the DOM `unhandledrejection` event " +
+            "is present as API surface — `addEventListener` is a function, assigning " +
+            "`onunhandledrejection` sticks — and it NEVER FIRES. Four rejection sites across " +
+            "three programs, both registration styles, native V8 promises on the real window, " +
+            "500 ms each, zero events. Chromium detects every one of them regardless and reports " +
+            "it on the CONSOLE channel, where `WebChromeClient.onConsoleMessage` can read it: " +
+            "`\"Uncaught (in promise) Error: boom\", source: mouse:///rej.js (11)`. That channel " +
+            "carries a formatted STRING. node hands a handler the `reason` VALUE and the " +
+            "`promise`, and the bootstrap's `__mouseOnUnhandledRejection` is written to that " +
+            "signature, so the console text serves the no-handler half of node's contract and " +
+            "cannot serve `process.on('unhandledRejection')` without fabricating a reason the " +
+            "program would then branch on. THE FATAL HALF IS WIRED, out of band, in " +
+            "`NodeWebView.onUnhandledRejection`: no listener prints and exits 1, a listener does " +
+            "not exit, and the listener itself is never called. This name stays deferred because " +
+            "the ENGINE path really is unwired — the bootstrap still cannot reach a host here",
     )
 
     /**
