@@ -171,11 +171,22 @@ commands.
   every resolution case against `require.resolve` in one real tree — with the
   CommonJS loader that evaluates what they resolve in `node-host.js`, the same
   split `NodeEngine.swift` makes. The entry script is a module now, so `require`
-  works in it. `./gradlew :nodecheck:run` gates all of it (310 checks, MATCH),
-  including `verify/fsparity` run through the Android bridge against the same
-  `node.txt`; the WebView itself is gated on device by a debug broadcast
-  (`NodeCheckReceiver` — see `kotlin/README.md`), which now runs the filesystem
-  and require program too (45 checks, MATCH). Phase T's platform half is in as
+  works in it. Milestone 3c is in too: `NodeSockets` is a Java NIO selector
+  table (one thread, not one per socket), `NodeDns` writes and parses DNS on
+  the wire because Android has no `/etc/resolv.conf` and no JNDI, and
+  `NodeHttp` is the TLS transport behind `fetch` — so `net`, `http.createServer`
+  and `dgram` are real. `./gradlew :nodecheck:run` gates all of it (422 checks,
+  MATCH), including `verify/fsparity`, `verify/neterrors` and `verify/reqsock`
+  run through the Android bridge against the same `node.txt`, and the socket
+  table driven against real `node` peers in both directions; the WebView itself
+  is gated on device by a debug broadcast (`NodeCheckReceiver` — see
+  `kotlin/README.md`), now 64 checks, MATCH.
+
+  That device gate earned its keep at 3c: it caught three bugs behind a green
+  422-check JVM run, one of which — the loop concluding a program while its own
+  main module was still executing in the WebView's renderer process — made
+  `net.createServer().listen()` report exit 0 before the bind crossed the
+  bridge, and would have made a dev server impossible. Phase T's platform half is in as
   well: `PagerProgram`, session-side program hosting, the Compose grid renderer,
   key routing and the key strip (`up down left right esc tab canc`), with `less`
   in msh to drive them — verified on the emulator by paging a 200-line file by
@@ -184,9 +195,10 @@ commands.
   (copied into assets by a Gradle task, so the repo holds exactly one catalog),
   and `pkg list | install | remove` in Kotlin msh. `pkg install python` and
   `pkg install ruby` both land on the emulator — 30 MB of `python.wasm` and a
-  35 MB `bin/ruby`, hash-verified. Still open: 3c/3d — sockets/`net`/`http`/DNS,
-  crypto, compression, `vm`, workers, child processes, `fs.watch`, ES modules,
-  each refusing by name with its own reason; and `npm`/`npx`/`npm run` in Kotlin
+  35 MB `bin/ruby`, hash-verified. Still open: 3d — crypto, compression, `vm`,
+  workers and child processes, plus `fs.watch`, ES modules, unix-domain
+  sockets, the `cluster` descriptor handoff and the `WebSocket` global, each
+  refusing by name with its own reason; and `npm`/`npx`/`npm run` in Kotlin
   msh, which wait on G because they exist to run what they install.
 - Running an installed runtime on Android is closer than the plan assumed, and
   for a reason worth recording: the shared bootstrap reaches for the standard

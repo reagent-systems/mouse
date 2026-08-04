@@ -66,7 +66,7 @@ SDK at `~/Library/Android/sdk`, JDK 21; nothing is on PATH — export
 **1 — Phase T: the terminal screen. DONE.** `TerminalScreen.swift`,
 `TerminalWidth.swift`, `AnsiParser` and the `TerminalProgram` contract are
 `kotlin/terminal/`, gated by `:screencheck` against the iOS corpus and the
-pyte cross-check — 202 checks, reading `verify/` fixtures directly so the
+pyte cross-check — 238 checks, reading `verify/` fixtures directly so the
 platforms cannot drift. `PagerProgram` came across with them and carries the
 same 20 assertions `verify/main.swift` makes; `TopProgram` did not, because
 Kotlin msh has no `top` builtin to supply its snapshot.
@@ -124,7 +124,32 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   `android.os.FileObserver`, framework, plus a host→JS event path that arrives
   with the socket layer) and ES modules (`require()` of one refuses with node's
   own `ERR_REQUIRE_ESM`; iOS transpiles, Android has no transpiler).
-- **3c** — sockets (`NodeSockets.swift` → Java NIO), `net`/`http`, DNS.
+- **3c — sockets, `net`/`http`, DNS. DONE.** `NodeSockets.swift` is
+  `kotlin/node/.../NodeSockets.kt`: one Java NIO selector thread owning every
+  channel, not a thread per socket, because "a dev server with 50 keep-alive
+  connections must not cost 50 threads" is sharper on Android than on iOS.
+  `NodeDns` speaks DNS on the wire, name decompression included, because
+  Android ships no JNDI and has no `/etc/resolv.conf` — the nameservers come
+  from `ConnectivityManager`. `NodeHttp` is the TLS transport behind `fetch`,
+  delivered incrementally so the head arrives before the body. `:nodecheck`
+  went 310 → 422, driving the table against REAL `node` peers in both
+  directions, and the on-device check went 45 → 64.
+
+  Three bugs got through the JVM gate and were caught by the emulator, which
+  is the whole argument for the rule: `closeAll` tearing the table down from
+  the caller's thread (NPE in the JDK's own deregister), the resulting
+  `ClosedSelectorException` being unchecked and therefore fatal on Android but
+  merely printed on the JVM, and — the one that would have sunk leg (b) — the
+  loop ending a program while its main module was still running, because
+  `evaluateJavascript` returns before the renderer process has executed it.
+  `net.createServer().listen()` on the first line of a script reported exit 0
+  one millisecond before the bind crossed the bridge.
+
+  Still deferred, each for a reason true NOW: unix-domain sockets
+  (`UnixDomainSocketAddress` is API 34 against minSdk 26), the `cluster`
+  descriptor handoff (`java.nio` will not adopt an fd it did not open), and the
+  `WebSocket` global (no client in the JDK or the framework, and invariant #4
+  forbids adding one — the `ws` PACKAGE rides these sockets and works).
 - **3d** — crypto, workers, child processes; then `npm`/`npx`/`npm run` in
   Kotlin msh.
 
