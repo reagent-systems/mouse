@@ -421,6 +421,15 @@ seed: mirror any iOS feature change here too, or note in the PR why not.
 The two apps share no code (no cross-platform bridge) — parity is by
 faithful re-implementation, file-for-file where it helps
 (`Shell.swift`↔`MouseShell.kt`, `CarouselDeck.swift`↔`Model.kt`, etc.).
+
+Android also has a headless gate: `./gradlew :screencheck:run` runs the
+terminal-screen corpus — the iOS one, ported assertion for assertion and
+reading the same `verify/` fixtures — and prints one verdict line ending
+in MATCH or MISMATCH. There is no JUnit (invariant #4); it is a `main()`,
+the same shape as the Swift harnesses. The engine it gates lives in
+`kotlin/terminal/`, a pure Kotlin/JVM module with no Android dependency,
+for the reason phase T learned on iOS: logic that shares a file with UI is
+logic no harness can reach.
 **Phases T, F and G (terminal screen, package manager, Node layer) are
 iOS-only by a recorded decision, not an oversight** — see "Android parity"
 in system.md for the measured split (the Node engine is 72 % portable JS

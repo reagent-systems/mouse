@@ -34,6 +34,9 @@ android {
 }
 
 dependencies {
+    // The terminal screen engine. It is a separate pure-JVM module so it can be gated headlessly
+    // — see terminal/build.gradle.kts.
+    implementation(project(":terminal"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))

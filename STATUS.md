@@ -140,8 +140,12 @@ commands.
 - `sharp` needs native bindings — a wall, listed so nobody rediscovers it.
 - vs-code branch items (ROADMAP): `git clone` in the project picker, editor
   upgrades, ssh, the Preview container, four tracked shell gaps.
-- Android parity for T/F/G — decision recorded in AGENTS.md (WebView +
-  `@JavascriptInterface` path); no code yet.
+- Android parity for T/F/G — plan at `plans/android-parity.md` (WebView +
+  `@JavascriptInterface` path). Milestone 1 (phase T's pure-logic layer) is
+  in: `kotlin/terminal/` holds the screen, parser, width table and key
+  encoding; `./gradlew :screencheck:run` gates them against the iOS corpus
+  and the same `verify/` fixtures, pyte cross-check included. Still open:
+  the Compose grid renderer and key strip, then F and G.
 
 ## Blocked on the user
 
