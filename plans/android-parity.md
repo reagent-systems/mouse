@@ -88,6 +88,24 @@ across largely intact; the Kotlin bridge implements what `NodeEngine`'s
 Swift half does (fs, sockets, timers, child engines). Sockets are the
 biggest rewrite: `NodeSockets.swift` → Java NIO.
 
+- **3a — the foundation. DONE.** The bootstrap (13,993 lines) is copied
+  verbatim into `kotlin/app/src/main/assets/node-bootstrap.js` and
+  re-extracted from `swift/Mouse/NodeEngine.swift` and diffed on every gate
+  run, so the copy cannot drift. `kotlin/node/` holds what is pure — the
+  extraction, the `__mouse` protocol, the process globals, the event loop's
+  bookkeeping — and `kotlin/app/.../nodehost/NodeWebView.kt` is the headless
+  WebView host. Wired: `console.log`/`error` to Kotlin, `process` (argv, env,
+  cwd, version, exit code), and timers with the tick discipline the iOS engine
+  documents. Gated by `./gradlew :nodecheck:run` (87 checks) plus an
+  adb-triggerable on-device check for the WebView, which no JVM harness can
+  reach. Two things the iOS engine never had to solve turned up here: the
+  bridge cannot carry a function, and the WebView's `Window` already owns some
+  of the globals the bootstrap assigns (see `kotlin/README.md`).
+- **3b** — `fs`, and module loading (`require` over `node_modules`).
+- **3c** — sockets (`NodeSockets.swift` → Java NIO), `net`/`http`, DNS.
+- **3d** — crypto, workers, child processes; then `npm`/`npx`/`npm run` in
+  Kotlin msh.
+
 **4 — Runtimes.** Reuse `Runtimes.json` unchanged; port `RuntimeStore` +
 the zip reader; `pkg install python` and `pkg install ruby` on Android.
 

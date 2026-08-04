@@ -157,8 +157,19 @@ commands.
   substitutions and `TarGz`; `./gradlew :pkgcheck:run` gates it the same way
   the iOS side is gated — semver corpus, resolution against real `pnpm
   install --lockfile-only`, and real installs proven by real `node` requiring
-  out of the tree (94 checks, MATCH). Still open: the Compose grid renderer
-  and key strip, then G — and `npm`/`npx`/`npm run` in Kotlin msh, which wait
+  out of the tree (94 checks, MATCH). Milestone 3a (phase G's foundation) is
+  in: the JS bootstrap — 13,993 lines, the portable 72 % — is copied verbatim
+  out of `swift/Mouse/NodeEngine.swift` into
+  `kotlin/app/src/main/assets/node-bootstrap.js` and re-extracted and diffed on
+  every gate run, so the copy cannot drift; `kotlin/node/` holds the bridge
+  protocol, the process globals and the event loop's bookkeeping;
+  `kotlin/app/.../nodehost/NodeWebView.kt` is the headless WebView host, with
+  `console`, `process` (argv/env/cwd/version/exit) and timers wired.
+  `./gradlew :nodecheck:run` gates it (87 checks, MATCH) and the WebView itself
+  is gated on device by a debug broadcast (`NodeCheckReceiver` — see
+  `kotlin/README.md`). Still open: 3b/3c/3d — `fs`, module loading/`require`,
+  sockets/`net`/`http`, crypto, workers, child processes; the Compose grid
+  renderer and key strip; and `npm`/`npx`/`npm run` in Kotlin msh, which wait
   on G because they exist to run what they install.
 
 ## Blocked on the user

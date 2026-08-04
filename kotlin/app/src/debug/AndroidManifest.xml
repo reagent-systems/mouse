@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG ONLY. This manifest is merged into debug builds and nothing else, which is the point:
+  the Node layer's WebView cannot be gated on a JVM (`android.webkit` is framework), so the gate
+  has to run on the device — and a gate you can trigger from `adb` needs an exported component,
+  which is not something a shipping build should carry.
+
+    adb shell am broadcast \
+      -n com.reagentsystems.mouse/com.reagentsystems.mouse.nodehost.NodeCheckReceiver \
+      -a com.reagentsystems.mouse.NODECHECK
+
+  The verdict comes back on the broadcast's result data and again in logcat under `MouseNodeCheck`.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name="com.reagentsystems.mouse.nodehost.NodeCheckReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.reagentsystems.mouse.NODECHECK" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
