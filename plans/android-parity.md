@@ -209,6 +209,13 @@ each with a screenshot:
   Terminal output is also a byte stream now, cut on newlines rather than per
   write, because `print('a', 42)` arrives as four `fd_write`s.
 
+  **(b) PASSES.** `node server.js` runs an `http.createServer` inside the app,
+  and `curl http://127.0.0.1:18080/hello` from the HOST machine — through
+  `adb forward tcp:18080 tcp:8080` — answers `hello from mouse on android`
+  with a real 200, keep-alive and chunked encoding. The server logged
+  `request GET /hello` and `request GET /second` in the terminal as they
+  arrived, which is the half a curl transcript alone would not show.
+
   One defect found by running and NOT yet fixed:
 
   - **`process.platform` answers `darwin` on Android.** The bootstrap hardcodes
