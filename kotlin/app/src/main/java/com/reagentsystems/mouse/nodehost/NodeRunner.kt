@@ -53,6 +53,12 @@ object NodeRunner {
         mounts: List<Pair<String, File>> = emptyList(),
         sink: Sink,
         cancelled: () -> Boolean = { false },
+        /**
+         * Hand the program the terminal. Null for a plain run; supplied when the caller can host
+         * a [NodeProgram] on the phase-T screen, which is what lets a TUI draw.
+         */
+        host: ((NodeProgram) -> Unit)? = null,
+        title: String = "node",
     ): Int {
         require(Looper.myLooper() != Looper.getMainLooper()) {
             "NodeRunner.run blocks; calling it on the main thread is an ANR"
@@ -61,6 +67,7 @@ object NodeRunner {
         val done = CountDownLatch(1)
         val code = intArrayOf(0)
         val engine = arrayOfNulls<NodeWebView>(1)
+        val program = arrayOfNulls<NodeProgram>(1)
 
         handler.post {
             val view = NodeWebView(
@@ -69,15 +76,36 @@ object NodeRunner {
                 root = root,
                 mounts = mounts,
                 output = object : NodeWebView.Output {
-                    override fun stdout(text: String) = sink.write(text, false)
-                    override fun stderr(text: String) = sink.write(text, true)
+                    // With a host, output belongs to the PROGRAM: it decides per chunk whether
+                    // the line goes to the scrollback or the grid, which is the engagement rule.
+                    override fun stdout(text: String) {
+                        val hosted = program[0]
+                        if (hosted != null) hosted.write(text, false) else sink.write(text, false)
+                    }
+
+                    override fun stderr(text: String) {
+                        val hosted = program[0]
+                        if (hosted != null) hosted.write(text, true) else sink.write(text, true)
+                    }
+
                     override fun finished(exit: Int) {
                         code[0] = exit
-                        done.countDown()
+                        val hosted = program[0]
+                        if (hosted != null) hosted.finished(exit) else done.countDown()
                     }
                 },
             )
             engine[0] = view
+            if (host != null) {
+                val hosted = NodeProgram(
+                    title = title,
+                    engine = view,
+                    transcript = { line, isError -> sink.write(line + "\n", isError) },
+                    onExit = { done.countDown() },
+                )
+                program[0] = hosted
+                host(hosted)
+            }
             view.start(source, path) { error ->
                 if (error != null) {
                     sink.write(error + "\n", true)

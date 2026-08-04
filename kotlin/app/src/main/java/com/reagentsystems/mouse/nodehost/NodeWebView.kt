@@ -366,7 +366,11 @@ class NodeWebView(
          * where the screen gets told.
          */
         @JavascriptInterface
-        fun setRawMode(raw: Boolean) = Unit
+        fun setRawMode(raw: Boolean) {
+            // No longer a no-op: raw mode is one of the three triggers the engagement rule
+            // watches for, and it is the only one the PROGRAM announces rather than draws.
+            handler.post { onRawMode?.invoke(raw) }
+        }
 
         // ---------------------------------------------------------------- sockets ----
         //
@@ -716,6 +720,52 @@ class NodeWebView(
         // microtask checkpoint has only just finished when the loop decides it is done.
         web.evaluateJavascript("globalThis.__mouseDispatch && globalThis.__mouseDispatch.finish();") {
             output.finished(loop.exitCode ?: 0)
+        }
+    }
+
+    /**
+     * Raw mode, as the running program asked for it. Set by whoever hosts the engine on a
+     * screen; null when nothing is watching, which is every non-interactive run.
+     */
+    var onRawMode: ((Boolean) -> Unit)? = null
+
+    /**
+     * One keystroke into the program's stdin — data, never a signal. The host owns the terminal
+     * discipline, which is why cooked-mode ^C goes to [interrupt] instead. `__mouseDeliverInput`
+     * is the shared bootstrap's, so this is delivery and nothing else.
+     */
+    fun deliverInput(text: String) {
+        if (ended) return
+        handler.post {
+            web.evaluateJavascript(
+                "globalThis.__mouseDeliverInput && globalThis.__mouseDeliverInput(" +
+                    HostBridge.jsString(text) + ")",
+            ) { pump() }
+        }
+    }
+
+    /** The visible grid changed size: `process.stdout.rows/columns` and a SIGWINCH. */
+    fun resizeTty(rows: Int, columns: Int) {
+        if (ended) return
+        handler.post {
+            web.evaluateJavascript("globalThis.__mouseResize && globalThis.__mouseResize($rows,$columns)") { pump() }
+        }
+    }
+
+    /**
+     * Cooked-mode ^C. A program with its own SIGINT handler keeps running — that is what
+     * `__mouseSigint` answers — and one without it dies with node's 130.
+     */
+    fun interrupt() {
+        if (ended) return
+        handler.post {
+            web.evaluateJavascript("String(!!(globalThis.__mouseSigint && globalThis.__mouseSigint()))") { raw ->
+                val handled = unquote(raw) == "true"
+                if (handled) pump() else {
+                    loop.exitCode = 130
+                    end()
+                }
+            }
         }
     }
 

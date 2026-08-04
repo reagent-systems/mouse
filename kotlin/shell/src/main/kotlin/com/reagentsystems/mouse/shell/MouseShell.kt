@@ -97,6 +97,14 @@ class MouseShell {
             env: Map<String, String>,
             mounts: List<Pair<String, File>>,
             emit: (Output) -> Unit,
+            /**
+             * What the terminal calls this while it runs, and whether the program may take the
+             * KEYBOARD. Interactive means stdin is a TTY and the program can become a screen
+             * program — `npx create-vite` must, `node build.js` must not be given the chance to
+             * swallow the prompt.
+             */
+            title: String,
+            interactive: Boolean,
         ): Int
     }
 
@@ -1363,7 +1371,7 @@ class MouseShell {
         if (args.firstOrNull() == "-e" || args.firstOrNull() == "--eval") {
             val code = args.getOrNull(1)
                 ?: return IO(err = "node: -e needs code", status = 9)
-            val status = run.run(code, "/[eval].js", listOf("node") + args.drop(2), env, emptyList(), emit)
+            val status = run.run(code, "/[eval].js", listOf("node") + args.drop(2), env, emptyList(), emit, "node", false)
             return IO(collected.toString(), errors.toString(), status)
         }
 
@@ -1378,7 +1386,7 @@ class MouseShell {
             ?: return IO(err = "node: can't read ${display(target.rel)}", status = 1)
         val path = "/" + target.rel
         val argv = listOf("node", path) + args.drop(1)
-        val status = run.run(source, path, argv, env, emptyList(), emit)
+        val status = run.run(source, path, argv, env, emptyList(), emit, "node", false)
         return IO(collected.toString(), errors.toString(), status)
     }
 
@@ -1488,7 +1496,11 @@ class MouseShell {
             else if (out.isError) errors.append(out.text) else collected.append(out.text)
         }
         val path = "/" + binPath
-        val status = run.run(source, path, listOf("node", path) + args, env, emptyList(), emit)
+        // A bin run by npx is the interactive case: `create-vite` prompts, `tsc` does not,
+        // and neither says so — the engagement rule decides at runtime, which it can only do if
+        // it is given the keyboard to begin with. Only when running SOLO: mid-pipeline there is
+        // no terminal to take.
+        val status = run.run(source, path, listOf("node", path) + args, env, emptyList(), emit, title, streaming)
         return IO(collected.toString(), errors.toString(), status)
     }
 
@@ -1546,7 +1558,7 @@ class MouseShell {
         }
         val status = run.run(
             bootstrap, "/[${entry.name}].js", argv, env,
-            listOf(mount to installed.directory), emit,
+            listOf(mount to installed.directory), emit, entry.name, streaming,
         )
         return IO(collected.toString(), errors.toString(), status)
     }
