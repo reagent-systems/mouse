@@ -198,8 +198,14 @@ object HostBridge {
             "keyAgree", "ecdhGenerate", "ecdhCompute", "rsaGenerate", "rsaSign", "rsaVerify",
             "rsaEncrypt", "rsaDecrypt", "rsaPrivateEncrypt", "rsaPublicDecrypt",
         ) to
-            "the crypto surface rides CryptoKit, CommonCrypto and Security framework on iOS, and " +
-            "nothing on Android is bound to its JCA counterparts yet",
+            "asymmetric keys. The JCA HAS the primitives — `KeyPairGenerator`, `Signature`, " +
+            "`KeyAgreement`, `KeyFactory` — so this is not a missing capability, and saying so " +
+            "matters: the work is the KEYS, not the maths. Every one of these takes a PEM, and " +
+            "reading one means PKCS#8, SEC1, PKCS#1 and SPKI, identifying the curve, and " +
+            "emitting ECDSA signatures in DER or raw as the caller asks. Ed25519 adds its own " +
+            "wall: the JCA gained it at API 33, against this app's minSdk 26. It is a port of " +
+            "real size rather than a translation, which is why it is deferred and not merely " +
+            "unwired",
         listOf(
             "brotliOpen", "brotliPush", "brotliClose", "brotliTransform",
         ) to

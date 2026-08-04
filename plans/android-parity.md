@@ -178,10 +178,16 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   merely mutually decodable — plus that a tampered GCM tag refuses, which is
   the check that separates authenticated encryption from encryption.
 
-  Still deferred, and the line is now where it should have been: what remains
-  needs KEY MANAGEMENT — EC/RSA/Ed25519 signing, ECDH, key generation and
-  parsing — where iOS rides Security framework and the JCA has no one-to-one
-  counterpart, so it is a port rather than a translation. Brotli has no Android route at all: the
+  Still deferred, and the line is now where it should have been: ASYMMETRIC
+  KEYS — EC/RSA/Ed25519 signing, ECDH, key generation and parsing. The JCA has
+  the primitives (`KeyPairGenerator`, `Signature`, `KeyAgreement`,
+  `KeyFactory`), so this is not a missing capability and the reason must not
+  pretend it is. The work is the KEYS: every one of these bridge methods takes
+  a PEM, and reading one means PKCS#8, SEC1, PKCS#1 and SPKI, identifying the
+  curve, and emitting ECDSA signatures in DER or raw as the caller asks —
+  fourteen bridge methods over one shared parser. Ed25519 adds a second wall:
+  the JCA gained it at API 33, against this app's minSdk 26, so it needs a
+  runtime check rather than a straight call. Brotli has no Android route at all: the
   platform decodes it inside its HTTP stack and exposes nothing to an app, and
   a third-party artifact is what invariant #4 forbids. `vm`, workers and child
   processes are untouched.
