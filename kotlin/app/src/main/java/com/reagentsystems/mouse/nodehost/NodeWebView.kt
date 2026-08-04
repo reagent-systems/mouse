@@ -9,8 +9,12 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.reagentsystems.mouse.node.Bootstrap
 import com.reagentsystems.mouse.node.HostBridge
+import com.reagentsystems.mouse.node.ModuleResolver
+import com.reagentsystems.mouse.node.NodeCpu
+import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeLoop
 import com.reagentsystems.mouse.node.NodeProcessConfig
+import java.io.File
 
 /**
  * The Node layer's host on Android: a headless WebView running the SAME JavaScript bootstrap the
@@ -45,15 +49,27 @@ import com.reagentsystems.mouse.node.NodeProcessConfig
  *
  * ## Scope
  *
- * Milestone 3a. `console.log`/`error` reach Kotlin, `process` answers (argv, env, cwd, version,
- * exit code) and timers run with node's tick discipline. `fs`, `require`, sockets, crypto,
- * children and workers refuse BY NAME — see [HostBridge.DEFERRED].
+ * Milestones 3a and 3b. `console.log`/`error` reach Kotlin, `process` answers (argv, env, cwd,
+ * version, exit code), timers run with node's tick discipline, the filesystem is real and
+ * `require` resolves over `node_modules`. `fs.watch`, sockets, crypto, children and workers refuse
+ * BY NAME, each with its own reason — see [HostBridge.DEFERRED].
+ *
+ * ## The filesystem a program sees
+ *
+ * Workspace-virtual, as on iOS: "/" is [root] and a program never learns where that really is.
+ * On Android that is not only discipline — app-private storage lives at a path the user has no
+ * name for, and a program that hardcoded it would break on the next install.
  */
 class NodeWebView(
     context: Context,
     private val config: NodeProcessConfig = NodeProcessConfig(),
+    /** The real directory the program's "/" maps to. */
+    root: File,
     private val output: Output,
 ) {
+
+    private val fs = NodeFs(root.toPath())
+    private val resolver = ModuleResolver(fs)
 
     /** Where a program's stdout and stderr go. Called on the main thread. */
     interface Output {
@@ -159,6 +175,101 @@ class NodeWebView(
             loop.stdinActive = on
             handler.post { pump() }
         }
+
+        // ------------------------------------------------------------ filesystem ----
+        //
+        // Every one of these is SYNCHRONOUS on purpose: a `@JavascriptInterface` call blocks the
+        // JavaScript thread until it returns, which is what `fs.readFileSync` is, and what the
+        // bootstrap's async forms are built on top of (they call the same primitive and deliver
+        // the answer through a timer). None of them touches the loop, so none needs the handler.
+        //
+        // A null String reaches JavaScript as `null`, which is exactly how the bootstrap is
+        // written to hear "that failed" — see the note in node-host.js.
+
+        @JavascriptInterface
+        fun stat(path: String, followLinks: Boolean): String? = fs.statJson(path, followLinks)
+
+        @JavascriptInterface
+        fun statfs(path: String): String? = fs.statfsJson(path)
+
+        @JavascriptInterface
+        fun readdir(path: String): String? = fs.readdirJson(path)
+
+        @JavascriptInterface
+        fun readFile(path: String): String? = fs.readFile(path)
+
+        /** The same bytes as text. The module loader wants source, not base64 of source. */
+        @JavascriptInterface
+        fun readText(path: String): String? = fs.readText(path)
+
+        @JavascriptInterface
+        fun writeFile(path: String, base64: String, append: Boolean): Boolean =
+            fs.writeFile(path, base64, append)
+
+        @JavascriptInterface
+        fun mkdir(path: String): Boolean = fs.mkdir(path)
+
+        @JavascriptInterface
+        fun remove(path: String): Boolean = fs.remove(path)
+
+        @JavascriptInterface
+        fun rename(from: String, to: String): Boolean = fs.rename(from, to)
+
+        @JavascriptInterface
+        fun chmodPath(path: String, mode: Int): Boolean = fs.chmod(path, mode)
+
+        @JavascriptInterface
+        fun normalizePath(path: String): String = fs.normalize(path)
+
+        @JavascriptInterface
+        fun virtualDirname(path: String): String = fs.virtualDirname(path)
+
+        // ------------------------------------------------------- module resolution ----
+
+        @JavascriptInterface
+        fun resolveModule(request: String, fromDir: String, esm: Boolean): String =
+            resolver.resolveJson(request, fromDir, esm)
+
+        @JavascriptInterface
+        fun resolvePaths(request: String, fromDir: String): String =
+            resolver.resolvePathsJson(request, fromDir)
+
+        /**
+         * Source plus the one classification the loader cannot make for itself.
+         *
+         * Read and classify in ONE crossing: the alternative is reading a megabyte-sized bundle
+         * across the bridge and handing it straight back to be classified, and the rule for
+         * whether a file is an ES module (`.mjs`, `.cjs`, the nearest package.json "type", the
+         * syntax) then has two homes that can disagree.
+         */
+        @JavascriptInterface
+        fun loadModule(id: String): String? = resolver.loadJson(id)
+
+        // ------------------------------------------------------------- the machine ----
+
+        /** `{user, system}` in microseconds, as `process.cpuUsage()` reports it. */
+        @JavascriptInterface
+        fun cpuUsage(): String {
+            val usage = NodeCpu.read()
+            // Zeros are what the iOS block answers when `getrusage` fails, so a caller meets one
+            // shape of failure rather than two.
+            return """{"user":${usage?.userMicros ?: 0.0},"system":${usage?.systemMicros ?: 0.0}}"""
+        }
+
+        /** `{idle, active}` in milliseconds, as `performance.eventLoopUtilization()` reads it. */
+        @JavascriptInterface
+        fun loopUtilization(): String {
+            val (idle, active) = loop.utilizationMillis()
+            return """{"idle":$idle,"active":$active}"""
+        }
+
+        /**
+         * A headless host owns no terminal, so raw mode has nothing to change — the same thing
+         * `NodeEngine`'s block does when `tty == nil`. When the T↔G join lands on Android this is
+         * where the screen gets told.
+         */
+        @JavascriptInterface
+        fun setRawMode(raw: Boolean) = Unit
     }
 
     // ------------------------------------------------------------------- lifecycle ----
@@ -268,15 +379,23 @@ class NodeWebView(
         }
         handler.removeCallbacks(pumpRunnable)
 
+        // Time spent parked since the last turn is IDLE, exactly as the iOS loop counts the time
+        // it sat in `wakeup.wait`. Cleared here so a pump that was NOT preceded by a park (a
+        // bridge call posting one) contributes nothing.
+        if (parkedSinceNanos != 0L) {
+            loop.recordIdle(System.nanoTime() - parkedSinceNanos)
+            parkedSinceNanos = 0L
+        }
+
         val batch = loop.takeImmediates()
         if (batch.isNotEmpty()) {
-            web.evaluateJavascript(HostBridge.dispatchImmediate(batch)) { pump() }
+            dispatch(HostBridge.dispatchImmediate(batch))
             return
         }
 
         val due = loop.claimDue(System.nanoTime())
         if (due != null) {
-            web.evaluateJavascript(HostBridge.dispatchTimer(due.id)) { pump() }
+            dispatch(HostBridge.dispatchTimer(due.id))
             return
         }
 
@@ -288,9 +407,31 @@ class NodeWebView(
         // Only unref'd timers may be left here. They still FIRE — they are just not a reason to
         // stay alive, which isQuiescent() above has already decided.
         val wait = loop.nextWaitMillis(System.nanoTime())
-        if (wait != null) handler.postDelayed(pumpRunnable, wait.coerceAtLeast(1L))
-        // Otherwise nothing is scheduled and a hold is keeping the loop open; releasing it pumps.
+        if (wait != null) {
+            parkedSinceNanos = System.nanoTime()
+            handler.postDelayed(pumpRunnable, wait.coerceAtLeast(1L))
+        } else {
+            // Nothing is scheduled and a hold is keeping the loop open; releasing it pumps. That
+            // wait is idle too — it is the branch iOS spends in `wakeup.wait(timeout: .now() + 60)`.
+            parkedSinceNanos = System.nanoTime()
+        }
     }
+
+    /**
+     * One turn, timed. ACTIVE is the callback's own time, which is what the iOS `invoke` wrapper
+     * measures — the loop's decision-making either side of it is neither idle nor active on both
+     * platforms.
+     */
+    private fun dispatch(script: String) {
+        val began = System.nanoTime()
+        web.evaluateJavascript(script) {
+            loop.recordActive(System.nanoTime() - began)
+            pump()
+        }
+    }
+
+    /** When the loop parked, or 0 when it is running. Main thread only. */
+    private var parkedSinceNanos = 0L
 
     private val pumpRunnable = Runnable { pump() }
 

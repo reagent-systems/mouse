@@ -109,7 +109,21 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   reach. Two things the iOS engine never had to solve turned up here: the
   bridge cannot carry a function, and the WebView's `Window` already owns some
   of the globals the bootstrap assigns (see `kotlin/README.md`).
-- **3b** — `fs`, and module loading (`require` over `node_modules`).
+- **3b — `fs`, and module loading. DONE.** `NodeFs` is the workspace-virtual
+  filesystem (read/write/append, `stat` and `lstat` with node's full field set,
+  readdir, mkdir, remove, rename, chmod, statfs) and `ModuleResolver` is node's
+  resolution algorithm — both pure Kotlin in `:node`, both gated against **real
+  `node` itself**: `stat` against node's own `Stats`, and every resolution case
+  against `require.resolve` in the same tree. The loader that evaluates what
+  they resolve is JavaScript in `node-host.js`, because only the engine can run
+  a module; that is the same line `NodeEngine.swift` draws. The entry script is
+  now a MODULE, as it is on iOS, so `require` works in the one file a user is
+  most likely to write. `:nodecheck` went 87 → 310 checks and now runs
+  `verify/fsparity` through the Android bridge against the same `node.txt`.
+  Deferred with reasons named per surface: `fs.watch` (inotify is
+  `android.os.FileObserver`, framework, plus a host→JS event path that arrives
+  with the socket layer) and ES modules (`require()` of one refuses with node's
+  own `ERR_REQUIRE_ESM`; iOS transpiles, Android has no transpiler).
 - **3c** — sockets (`NodeSockets.swift` → Java NIO), `net`/`http`, DNS.
 - **3d** — crypto, workers, child processes; then `npm`/`npx`/`npm run` in
   Kotlin msh.

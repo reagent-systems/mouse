@@ -165,4 +165,25 @@ class NodeLoop {
     }
 
     fun timerCount(): Int = lock.withLock { timers.size }
+
+    // ------------------------------------------------------------- utilization ----
+
+    private var idleNanos = 0L
+    private var activeNanos = 0L
+
+    /**
+     * `performance.eventLoopUtilization()`'s two numbers, and the split is the one the iOS loop
+     * makes: IDLE is time the loop spent waiting with nothing ready, ACTIVE is time spent inside a
+     * callback. Everything else — deciding what to run next — is neither, on both platforms.
+     *
+     * The host measures; this only accumulates, because the host is the only thing that knows
+     * where a turn began. On iOS those two calls sit at `wakeup.wait` and around `invoke`.
+     */
+    fun recordIdle(nanos: Long) = lock.withLock { if (nanos > 0) idleNanos += nanos }
+
+    fun recordActive(nanos: Long) = lock.withLock { if (nanos > 0) activeNanos += nanos }
+
+    /** Idle and active, in MILLISECONDS — node's unit for this, and the iOS block's. */
+    fun utilizationMillis(): Pair<Double, Double> =
+        lock.withLock { (idleNanos / 1e6) to (activeNanos / 1e6) }
 }
