@@ -128,6 +128,10 @@
   // iOS block does with `tty == nil`. A faithful port of a no-op, not a stub standing in for one.
   bridge.setRawMode = function (raw) { host.setRawMode(!!raw); };
 
+  // The code-only `import(…)` rewrite for source compiled at runtime — the loader's own scanner,
+  // reached by name so there is exactly one of it.
+  bridge.rewriteImports = function (source) { return host.rewriteImports(String(source)); };
+
   // ---- vm ------------------------------------------------------------------------------------
   //
   // A second JavaScript context, which the refusal here used to say a WebView could not give.

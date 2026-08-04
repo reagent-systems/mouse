@@ -199,6 +199,15 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   this one is copied in before a run and out after, so the two agree at every
   `runInContext` boundary and can disagree inside one.
 
+  **`rewriteImports` was a fifth**, and the cheapest of them: its refusal said
+  "Android has no transpiler, which is also why `require()` of an ES module
+  refuses with ERR_REQUIRE_ESM". 3e made both halves false and left the surface
+  behind — it is one line over `EsmTranspiler`, the same rewriter the loader
+  already runs. Gated directly rather than only through the ESM corpus, because
+  its CALLERS differ: the loader rewrites a file, this rewrites a string a
+  program built at runtime, and what must not differ is what they refuse to
+  touch — an `import(` inside a string, a comment, or after a dot.
+
   Gated by `NodeVmSmoke`, the first DEVICE-ONLY program in the suite — an
   iframe needs a DOM and real node has none, so grading it in `:nodecheck` too
   would mean expecting different things of the two hosts, which is the trap the

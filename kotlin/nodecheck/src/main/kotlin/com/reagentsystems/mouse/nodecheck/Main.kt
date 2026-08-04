@@ -2394,6 +2394,7 @@ fun main(args: Array<String>) {
         fsCorpus(node, scratch)
         resolverCorpus(node, scratch)
         cryptoCorpus(node, scratch)
+        rewriteImportsCorpus()
         zlibCorpus(node, scratch)
         cipherCorpus(node, scratch)
         esmCorpus(node, scratch)
@@ -2704,6 +2705,45 @@ private fun cryptoCorpus(node: String?, parent: File) {
         "randomUUID is a lower-case v4 UUID ($uuid)",
     )
     check(NodeCrypto.randomUUID() != uuid, "randomUUID does not repeat itself")
+}
+
+/**
+ * `rewriteImports` — the code-only `import(…)` rewrite for source compiled at RUNTIME.
+ *
+ * Gated on its own rather than only through the ESM corpus, because its callers are different:
+ * the loader rewrites a FILE, this rewrites a string a program built at runtime, and the thing
+ * that must not differ between them is what they refuse to touch. A bundle carries JavaScript
+ * inside string literals — that is the whole reason the rewriter is a scanner — and a runtime
+ * compile is exactly where such a string ends up.
+ */
+private fun rewriteImportsCorpus() {
+    checkEqual(
+        EsmTranspiler.rewriteDynamicImport("const m = await import('./x.js');"),
+        "const m = await __dynamicImport(__mouseRequire, './x.js');",
+        "rewriteImports rewrites a dynamic import",
+    )
+    val inString = "const s = \"await import('./x.js')\";"
+    checkEqual(
+        EsmTranspiler.rewriteDynamicImport(inString),
+        inString,
+        "rewriteImports leaves an import inside a STRING alone",
+    )
+    val inComment = "// import('./x.js')\nconst a = 1;"
+    checkEqual(
+        EsmTranspiler.rewriteDynamicImport(inComment),
+        inComment,
+        "rewriteImports leaves an import inside a COMMENT alone",
+    )
+    checkEqual(
+        EsmTranspiler.rewriteDynamicImport("obj.import('./x.js');"),
+        "obj.import('./x.js');",
+        "rewriteImports leaves a METHOD named import alone",
+    )
+    checkEqual(
+        EsmTranspiler.rewriteDynamicImport("const plain = 1;"),
+        "const plain = 1;",
+        "rewriteImports returns source with no import untouched",
+    )
 }
 
 // --------------------------------------------------------------------------- zlib ----

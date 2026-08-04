@@ -156,6 +156,11 @@ object HostBridge {
         // WebView could not give one; it was measured on a device and it was wrong.
         "vmCreate",
         "vmRun",
+        // 3e — the code-only rewrite of `import(…)`, for source compiled at RUNTIME. Its refusal
+        // said "Android has no transpiler, which is also why require() of an ES module refuses";
+        // 3e made both halves false and this was left behind. It is one line over
+        // `EsmTranspiler`, which is the same rewriter the loader already runs.
+        "rewriteImports",
     )
 
     /**
@@ -177,10 +182,6 @@ object HostBridge {
             "framework, so it cannot live in the pure module this bridge is partitioned in, and " +
             "the recursive mode node documents would be one observer per subdirectory plus one " +
             "per FILE, which is the only way inotify can name which entry changed",
-        listOf("rewriteImports") to
-            "this rewrites `import(…)` inside source compiled at RUNTIME, and it is one entry " +
-            "point to the ES module transpiler; Android has no transpiler, which is also why " +
-            "`require()` of an ES module refuses with ERR_REQUIRE_ESM rather than loading it",
         listOf("netConnectUnix", "netListenUnix") to
             "a socket FILE needs AF_UNIX, and the only `java.nio` spelling for it is " +
             "`java.net.UnixDomainSocketAddress` — JDK 16, and Android API 34, against this app's " +

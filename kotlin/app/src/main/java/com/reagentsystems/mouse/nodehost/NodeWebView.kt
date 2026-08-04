@@ -284,6 +284,14 @@ class NodeWebView(
         @JavascriptInterface
         fun zlibClose(handle: Int) = NodeZlib.close(handle)
 
+        /**
+         * The code-only `import(…)` rewrite, for source a program compiles at runtime. The same
+         * scanner the module loader runs — not a second one, which is the point: a bundle that
+         * carries JavaScript inside a string must not be edited either way round.
+         */
+        @JavascriptInterface
+        fun rewriteImports(source: String): String = EsmTranspiler.rewriteDynamicImport(source)
+
         @JavascriptInterface
         fun randomUUID(): String = NodeCrypto.randomUUID()
 
