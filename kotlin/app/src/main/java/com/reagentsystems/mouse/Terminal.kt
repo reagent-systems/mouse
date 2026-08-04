@@ -276,6 +276,7 @@ class TerminalSession(val root: File) {
             openFile = { /* set on the deck by the caller wiring */ pendingOpen = it },
             clear = { lines.clear() },
             emit = { append(it.text, if (it.isError) Line.Kind.ERROR else Line.Kind.OUTPUT) },
+            runtimes = Runtimes.support,
             launchProgram = { launch(it) },
         )
         isRunning = true

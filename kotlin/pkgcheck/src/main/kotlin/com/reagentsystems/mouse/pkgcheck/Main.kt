@@ -2,11 +2,15 @@ package com.reagentsystems.mouse.pkgcheck
 
 import com.reagentsystems.mouse.packages.Json
 import com.reagentsystems.mouse.packages.PackageManager
+import com.reagentsystems.mouse.packages.RuntimeCatalog
+import com.reagentsystems.mouse.packages.RuntimeStore
 import com.reagentsystems.mouse.packages.Semver
 import com.reagentsystems.mouse.packages.SemverRange
 import com.reagentsystems.mouse.packages.TarGz
 import com.reagentsystems.mouse.packages.asObject
+import com.reagentsystems.mouse.packages.ZipArchive
 import com.reagentsystems.mouse.packages.asString
+import com.reagentsystems.mouse.packages.asStringMap
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -526,6 +530,265 @@ private fun integrityCorpus(scratch: File) {
     check(!File(root, "node_modules/left-pad/package.json").exists(), "…and nothing was unpacked")
 }
 
+// ------------------------------------------------------- 8. the runtime store (milestone 4) ---
+
+/**
+ * The catalog is read from `swift/Runtimes.json` — the SAME file the iOS app bundles, not a copy.
+ * The whole "a language is data" claim rests on there being exactly one of these in the repo, and
+ * a second copy under kotlin/ would let the platforms drift apart at the only layer that is
+ * supposed to be shared verbatim.
+ */
+private val repoRoot: File by lazy {
+    System.getProperty("mouse.repo.root")?.let { return@lazy File(it) }
+    var candidate: File? = File(".").absoluteFile
+    while (candidate != null) {
+        if (File(candidate, "swift/Runtimes.json").isFile) return@lazy candidate
+        candidate = candidate.parentFile
+    }
+    File(".").absoluteFile
+}
+
+/** Build a real zip with the system `zip`, so the reader is graded against a real writer. */
+private fun makeZip(scratch: File, name: String, files: Map<String, ByteArray>): ByteArray? {
+    val zipTool = findTool("zip") ?: return null
+    val staging = File(scratch, "zipsrc-$name")
+    staging.deleteRecursively()
+    staging.mkdirs()
+    for ((path, bytes) in files) {
+        val target = File(staging, path)
+        target.parentFile?.mkdirs()
+        target.writeBytes(bytes)
+    }
+    val archive = File(scratch, "$name.zip")
+    archive.delete()
+    val ran = run(zipTool, listOf("-r", "-q", archive.absolutePath, "."), cwd = staging)
+    if (ran.status != 0 || !archive.isFile) return null
+    return archive.readBytes()
+}
+
+private fun runtimeCorpus(scratch: File) {
+    // -- the catalog parses, and says what iOS says --------------------------------------
+    val catalogFile = File(repoRoot, "swift/Runtimes.json")
+    if (!catalogFile.isFile) {
+        fail("swift/Runtimes.json not found at ${catalogFile.path}")
+        return
+    }
+    val entries = try {
+        RuntimeCatalog.parse(catalogFile.readText())
+    } catch (e: Exception) {
+        fail("the shared catalog does not parse: ${e.message}")
+        return
+    }
+    check(entries.size >= 2, "the catalog carries more than one runtime (got ${entries.size})")
+    val python = RuntimeCatalog.entry(entries, "python")
+    if (python == null) {
+        fail("the catalog has no python entry")
+        return
+    }
+    check(python.archive == RuntimeCatalog.Archive.ZIP, "python is published as a zip")
+    check(python.commands == listOf("python", "python3"), "python answers to python and python3")
+    check(python.wasm == "python.wasm", "python's interpreter is python.wasm")
+    check(python.rewriteScriptPaths, "python needs bare script paths rewritten (WASI has no cwd)")
+    check(
+        python.env["PYTHONHOME"] == "{root}",
+        "PYTHONHOME is the {root} placeholder, not a baked path",
+    )
+    check(python.sha256.length == 64, "python's recorded hash is a full SHA-256")
+    check(python.downloadBytes > 1_000_000, "python's recorded size is a real download size")
+    val ruby = RuntimeCatalog.entry(entries, "ruby")
+    check(ruby?.archive == RuntimeCatalog.Archive.TAR_GZ, "ruby is published as a tar.gz")
+    check(ruby?.strip == 3, "ruby's tarball wraps its content three directories deep")
+    check(
+        RuntimeCatalog.forCommand(entries, "python3")?.name == "python",
+        "a typed command resolves to its runtime, installed or not",
+    )
+    check(
+        RuntimeCatalog.forCommand(entries, "perl") == null,
+        "a command no runtime claims resolves to nothing",
+    )
+
+    // -- the zip reader agrees with the system unzip -------------------------------------
+    // Two entries, one of them incompressible random bytes so `zip` stores it rather than
+    // deflating: the reader has to handle method 0 and method 8, and a corpus of only text would
+    // never produce a stored entry.
+    val random = ByteArray(4096).also { java.util.Random(7).nextBytes(it) }
+    val text = ("mouse ".repeat(2000)).toByteArray()
+    val payload = mapOf(
+        "python.wasm" to text,
+        "lib/python3.14/os.py" to "import sys\n".toByteArray(),
+        "lib/random.bin" to random,
+    )
+    val zipped = makeZip(scratch, "runtime", payload)
+    if (zipped == null) {
+        fail("could not build a zip with the system `zip` — the reader is ungraded")
+    } else {
+        val out = File(scratch, "unzipped")
+        out.mkdirs()
+        var failure: String? = null
+        try {
+            ZipArchive.extract(zipped, out)
+        } catch (e: Exception) {
+            failure = e.message
+        }
+        check(failure == null, "the zip reader unpacks a real zip (error: $failure)")
+        for ((path, bytes) in payload) {
+            val got = File(out, path)
+            check(got.isFile, "zip reader wrote $path")
+            check(got.isFile && got.readBytes().contentEquals(bytes), "zip reader round-trips $path byte for byte")
+        }
+        // Deflated and stored entries both appeared, or the corpus did not exercise both paths.
+        check(
+            String(zipped, Charsets.ISO_8859_1).contains("random.bin"),
+            "the corpus zip contains the incompressible entry",
+        )
+    }
+
+    // -- an entry that escapes its directory is refused ----------------------------------
+    // Hand-built rather than produced by `zip`, which refuses to write one. The substitute name
+    // is EXACTLY as long as the original: a zip's central directory and local headers are a web
+    // of absolute offsets, and a rename that changes length corrupts the archive — which the
+    // reader then rejects as malformed, passing this check for entirely the wrong reason.
+    val escaping = makeZip(scratch, "escape", mapOf("inner.txt" to "x".toByteArray()))
+    if (escaping != null) {
+        val renamed = String(escaping, Charsets.ISO_8859_1).replace("inner.txt", "../aa.txt")
+            .toByteArray(Charsets.ISO_8859_1)
+        var message: String? = null
+        try {
+            ZipArchive.extract(renamed, File(scratch, "escaped").apply { mkdirs() })
+        } catch (e: Exception) {
+            message = e.message
+        }
+        check(
+            message?.contains("escapes its directory") == true,
+            "a zip entry naming .. is refused (got: $message)",
+        )
+    }
+
+    // -- install, list, remove, with the download injected -------------------------------
+    // The archive is real and so is every step after it; only the network is substituted, so the
+    // gate does not pull 14 MB on every run. The REAL download is proven separately below.
+    val store = RuntimeStore(File(scratch, "store"))
+    val archive = makeZip(scratch, "install", payload)
+    if (archive != null) {
+        val digest = MessageDigest.getInstance("SHA-256").digest(archive).joinToString("") { "%02x".format(it) }
+        val entry = python.copy(sha256 = digest, downloadBytes = archive.size.toLong())
+        check(store.installed(entry) == null, "a runtime that was never installed reports absent")
+        val notes = ArrayList<String>()
+        var error: String? = null
+        try {
+            store.install(entry, note = { notes.add(it) }, fetch = { archive })
+        } catch (e: Exception) {
+            error = e.message
+        }
+        check(error == null, "a verified archive installs (error: $error)")
+        check(notes.size == 2 && notes.last().startsWith("installed python"), "the install reports progress")
+        val installed = store.installed(entry)
+        check(installed != null, "an installed runtime is found")
+        check(
+            installed?.wasm?.path?.endsWith("MouseRuntimes/usr/lib/python/python.wasm") == true,
+            "the layout is usr/lib/<name> so every ancestor a realpath walks is a real directory",
+        )
+        check(installed?.library?.isDirectory == true, "the standard library landed where the entry says")
+        check(store.installedNames(listOf(entry)) == listOf("python"), "installedNames lists it")
+
+        // A bad hash is refused, and BOTH hashes are named.
+        val wrong = entry.copy(name = "wrongpy", sha256 = "0".repeat(64))
+        var integrity: String? = null
+        try {
+            store.install(wrong, fetch = { archive })
+        } catch (e: Exception) {
+            integrity = e.message
+        }
+        check(
+            integrity?.contains("does not match its recorded hash") == true &&
+                integrity.contains(digest),
+            "a substituted archive is refused, naming both hashes (got: $integrity)",
+        )
+        check(!File(store.root, "wrongpy").exists(), "…and nothing was unpacked")
+
+        // An archive without the declared interpreter is refused, and leaves no staging behind.
+        val hollowBytes = makeZip(scratch, "hollow", mapOf("readme.txt" to "nothing here".toByteArray()))
+        if (hollowBytes != null) {
+            val hollowDigest = MessageDigest.getInstance("SHA-256").digest(hollowBytes)
+                .joinToString("") { "%02x".format(it) }
+            val hollow = entry.copy(name = "hollowpy", sha256 = hollowDigest)
+            var missing: String? = null
+            try {
+                store.install(hollow, fetch = { hollowBytes })
+            } catch (e: Exception) {
+                missing = e.message
+            }
+            check(
+                missing?.contains("did not contain python.wasm") == true,
+                "an archive missing its interpreter is refused (got: $missing)",
+            )
+            check(
+                !File(store.root, ".hollowpy.incoming").exists(),
+                "…and the staging directory is cleaned up",
+            )
+        }
+
+        // A failed reinstall leaves the working runtime in place — the reason for staging.
+        var reinstall: String? = null
+        try {
+            store.install(entry.copy(sha256 = "1".repeat(64)), fetch = { archive })
+        } catch (e: Exception) {
+            reinstall = e.message
+        }
+        check(reinstall != null, "a failing reinstall throws")
+        check(store.installed(entry) != null, "…and the previously installed runtime survives it")
+
+        check(store.remove(entry), "remove reports that it removed something")
+        check(store.installed(entry) == null, "…and the runtime is gone")
+        check(!store.remove(entry), "removing what is not there reports false")
+    }
+
+    // -- the recorded URL and hash are real ----------------------------------------------
+    // This is the check that makes the catalog trustworthy rather than plausible: it downloads the
+    // artifact the entry names and hashes it. Cached like the npm tarballs, since a release asset
+    // is immutable.
+    val cache = File(System.getProperty("user.home"), ".cache/mouse-verify/runtimes")
+    val key = MessageDigest.getInstance("SHA-256").digest(python.url.toByteArray())
+        .joinToString("") { "%02x".format(it) }
+    val cached = File(cache, "$key.bin")
+    val realStore = RuntimeStore(File(scratch, "realstore"))
+    var realNotes = 0
+    var realError: String? = null
+    try {
+        realStore.install(
+            python,
+            note = { realNotes += 1 },
+            fetch = { url ->
+                if (cached.isFile) {
+                    cached.readBytes()
+                } else {
+                    val bytes = RuntimeStore.download(url)
+                    cache.mkdirs()
+                    cached.writeBytes(bytes)
+                    bytes
+                }
+            },
+        )
+    } catch (e: Exception) {
+        realError = e.message
+    }
+    check(realError == null, "the real CPython wasm build downloads, verifies and unpacks (error: $realError)")
+    val realInstalled = realStore.installed(python)
+    check(realInstalled != null, "the real python.wasm is where the catalog says it is")
+    check(
+        (realInstalled?.wasm?.length() ?: 0) > 10_000_000,
+        "the unpacked interpreter is a real multi-megabyte wasm module",
+    )
+    // Where the stdlib actually sits comes from the entry's own PYTHONPATH rather than a guess:
+    // `library` is `lib`, but CPython keeps its modules a version directory below that, and the
+    // catalog already states which one.
+    val stdlib = python.env["PYTHONPATH"]?.replace("{root}", realInstalled?.directory?.path ?: "")
+    check(
+        stdlib != null && File(stdlib, "os.py").isFile,
+        "the real standard library came with it, where PYTHONPATH says it is ($stdlib)",
+    )
+}
+
 fun main() {
     val node = findTool("node")
     val scratch = File(System.getProperty("java.io.tmpdir"), "pkgcheck-${ProcessHandle.current().pid()}")
@@ -539,6 +802,7 @@ fun main() {
         aliasCorpus(scratch)
         substitutionCorpus()
         integrityCorpus(scratch)
+        runtimeCorpus(scratch)
     } finally {
         scratch.deleteRecursively()
     }
@@ -546,7 +810,8 @@ fun main() {
     if (failures == 0) {
         println(
             "PACKAGE MANAGER: $checks checks — semver, tar/gzip/json, resolution vs pnpm, " +
-                "real installs proven by real node, npm aliases, wasm substitution, integrity — MATCH",
+                "real installs proven by real node, npm aliases, wasm substitution, integrity, " +
+                "the runtime store against the real CPython build — MATCH",
         )
     } else {
         println("PACKAGE MANAGER: $failures of $checks checks disagree with the iOS gate — MISMATCH")

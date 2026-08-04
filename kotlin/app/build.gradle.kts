@@ -33,6 +33,25 @@ android {
     }
 }
 
+/**
+ * The language-runtime catalog ships as an asset, COPIED from `swift/Runtimes.json` rather than
+ * duplicated into this tree. The whole "a language is data" claim rests on there being exactly
+ * one catalog in the repo — a second copy under kotlin/ would let the two platforms disagree
+ * about what `pkg install python` fetches, which is the one place they must not.
+ *
+ * Same reasoning as `:screencheck` reading `verify/` fixtures directly instead of copying them.
+ */
+val runtimeCatalog by tasks.registering(Copy::class) {
+    from(rootProject.file("../swift/Runtimes.json"))
+    into(layout.buildDirectory.dir("generated/runtimeCatalog"))
+}
+
+android.sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/runtimeCatalog"))
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    dependsOn(runtimeCatalog)
+}
+
 dependencies {
     // The terminal screen engine. It is a separate pure-JVM module so it can be gated headlessly
     // — see terminal/build.gradle.kts.

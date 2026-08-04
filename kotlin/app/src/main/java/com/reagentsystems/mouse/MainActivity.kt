@@ -12,6 +12,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         GitHub.attach(applicationContext)
+        Runtimes.attach(applicationContext)
         val base = filesDir
         setContent { ForegroundView(base) }
     }
