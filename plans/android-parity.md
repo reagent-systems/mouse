@@ -216,7 +216,18 @@ each with a screenshot:
   `request GET /hello` and `request GET /second` in the terminal as they
   arrived, which is the half a curl transcript alone would not show.
 
-  **(c) is one named wall away.** `npm install`/`npm run` and `npx` are in msh
+  **(c) — create-vite RUNS; the menu is what remains.** Milestone 3e ported
+  the ES module transpiler (`EsmTranspiler.kt`, from `rewriteImportForms` and
+  `transpileESM`), gated it differentially against real node on seven grammar
+  cases, and wired it into both the resolver and the ENTRY — the second
+  because msh reads a bin itself and hands the text over, so the resolver
+  never sees it. `npx create-vite` now scaffolds a real project on the
+  emulator. It takes the DEFAULTS, because stdin is not a TTY, so what is left
+  for the leg as written is the T↔G join: `isTty`, hosting the program on the
+  phase-T screen through the engagement rule — ported and gated since phase T
+  and called by nothing until now — and the backspace routing below.
+
+  Superseded, kept for the record: `npm install`/`npm run` and `npx` are in msh
   now — `npx create-vite` resolves `create-vite@9.1.2` against the real
   registry, installs it, finds its bin and executes it. It then stops at
   `SyntaxError: Cannot use import statement outside a module`: create-vite
