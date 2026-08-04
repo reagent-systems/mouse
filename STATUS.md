@@ -218,6 +218,22 @@ commands.
   diagonally — and two faults that together swallowed every keystroke:
   `stdinIsComplete` handing an interactive program an already-ended stream, and
   the prompt field sending its whole composing region instead of the delta.
+- **Asymmetric keys are DONE on Android** — EC/RSA/Ed25519 signing in both
+  signature encodings, RSA-PSS, RSA as a cipher (OAEP, PKCS#1 v1.5, the type-1
+  pair), key generation and ECDH, all fourteen bridge methods over one PEM/DER
+  reader in `NodeKeys`. Graded both directions against real node
+  (`:nodecheck` 573 → 777) and end to end on the phone (on-device 75 → 90).
+  `npm install jsonwebtoken` then RS256 and ES256 tokens signed and verified in
+  the app, tampered token refused.
+- **Three bugs, and each needed a different KIND of gate — that is the finding.**
+  The curve-name split (`prime256v1` vs `secp256r1`) fell to the JVM corpus.
+  RSA-PSS fell to the device with 781 JVM checks green, because Android ships
+  Conscrypt, which registers `SHA256withRSA/PSS` and not the JDK's generic
+  `RSASSA-PSS`. `jsonwebtoken` fell to neither: `crypto.createSign` takes an
+  OpenSSL algorithm name and `jwa` asks for `RSA-SHA256`, a normaliser iOS has
+  and this had not ported — invisible to every check written by hand, because a
+  hand-written check passes the digest node's short way. A corpus proves the
+  maths, a device program proves the platform, a real package proves the API.
 - **Six Android deferral REASONS have turned out to be false, and that is now
   the finding rather than six incidents.** brotli, ciphers, asymmetric keys,
   `vm`, `rewriteImports`, `unhandledRejection`. Two cost real capability that

@@ -426,6 +426,30 @@ object NodeKeys {
     )
 
     /**
+     * OpenSSL's legacy digest names, which real libraries actually use.
+     *
+     * `crypto.createSign` takes an OpenSSL algorithm name, not a bare digest, and node accepts the
+     * whole family: `jwa` signs RS256 by asking for **`RSA-SHA256`**, certificates use
+     * `ecdsa-with-SHA256`, and the prefix is historical — it works for any key type in node, not
+     * only the one it names.
+     *
+     * This is a straight port of `NodeEngine.swift`'s `digestName`, which exists for the same
+     * reason and was NOT ported when the signing half landed. The corpus could not see the gap
+     * because every check in it passes the digest node's short way, the way a hand-written test
+     * does; `jsonwebtoken` on the device found it in one run, which is what a real package is for.
+     */
+    private fun digestName(raw: String): String {
+        var normalized = raw.lowercase().replace("-", "")
+        for (prefix in listOf("rsassapss", "rsa", "ecdsawith", "ecdsa")) {
+            if (normalized.startsWith(prefix)) {
+                normalized = normalized.drop(prefix.length)
+                break
+            }
+        }
+        return normalized
+    }
+
+    /**
      * The `Signature` algorithm for a key and a digest.
      *
      * Ed25519 takes NO digest — it signs the message itself, which is why the bootstrap raises
@@ -435,8 +459,8 @@ object NodeKeys {
     private fun signatureName(type: String, digest: String): String? = when (type) {
         "ed25519" -> "Ed25519"
         "ed448" -> "Ed448"
-        "ec" -> SIGNATURE_DIGESTS[digest.lowercase()]?.let { "${it}withECDSA" }
-        "rsa" -> SIGNATURE_DIGESTS[digest.lowercase()]?.let { "${it}withRSA" }
+        "ec" -> SIGNATURE_DIGESTS[digestName(digest)]?.let { "${it}withECDSA" }
+        "rsa" -> SIGNATURE_DIGESTS[digestName(digest)]?.let { "${it}withRSA" }
         else -> null
     }
 
@@ -707,7 +731,7 @@ object NodeKeys {
      * default to agree with another provider's default is how the two silently drift apart.
      */
     private fun pssSignature(algorithm: String): java.security.Signature? {
-        val digest = SIGNATURE_DIGESTS[algorithm.lowercase()] ?: return null
+        val digest = SIGNATURE_DIGESTS[digestName(algorithm)] ?: return null
         val parameters = pssParameters(algorithm) ?: return null
         val generic = runCatching {
             java.security.Signature.getInstance("RSASSA-PSS").also { it.setParameter(parameters) }
@@ -723,7 +747,7 @@ object NodeKeys {
     }
 
     private fun pssParameters(algorithm: String): java.security.spec.PSSParameterSpec? {
-        val digest = SIGNATURE_DIGESTS[algorithm.lowercase()] ?: return null
+        val digest = SIGNATURE_DIGESTS[digestName(algorithm)] ?: return null
         val jca = when (digest) {
             "SHA1" -> "SHA-1"
             else -> digest.replaceFirst("SHA", "SHA-")
@@ -924,7 +948,7 @@ object NodeKeys {
      * ambiguity.
      */
     private fun oaepParameters(digest: String): javax.crypto.spec.OAEPParameterSpec? {
-        val name = when (digest.lowercase()) {
+        val name = when (digestName(digest)) {
             "sha1" -> "SHA-1"
             "sha224" -> "SHA-224"
             "sha256" -> "SHA-256"

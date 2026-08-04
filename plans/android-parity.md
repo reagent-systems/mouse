@@ -208,6 +208,56 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   program built at runtime, and what must not differ is what they refuse to
   touch — an `import(` inside a string, a comment, or after a dot.
 
+  **ASYMMETRIC KEYS ARE DONE**, and the deferral reason turned out to be right
+  about the shape of the work: the JCA had every primitive, and the work was
+  the KEYS. `NodeKeys` is one reader under all fourteen bridge methods — PEM
+  across PKCS#8, SPKI, SEC1 and both PKCS#1 forms, identified by the algorithm
+  OID rather than by trying imports until one stops throwing, because the JCA's
+  exceptions differ across API levels and a trial import cannot separate X25519
+  from Ed25519. `KeyFactory` reads only PKCS#8 and SPKI, so the other three
+  grammars are RE-WRAPPED, which needs a DER writer beside the reader. Then
+  ECDSA in DER and `ieee-p1363`, RSA in PKCS#1 v1.5 and PSS, RSA as a cipher
+  under OAEP and the type-1 primitive, key generation, and ECDH — which touches
+  the parser not at all, since `createECDH` has no envelope and its keys are a
+  bare scalar and an uncompressed point.
+
+  Graded against real node in both directions, because a signature scheme wrong
+  in a stable way verifies its own output perfectly: node signs and this
+  verifies, this signs and node verifies, and RSA PKCS#1 v1.5 is compared byte
+  for byte on top. `:nodecheck` 573 → 777.
+
+  **THREE BUGS THE JVM CORPUS COULD NOT SEE**, in ascending order of how much
+  they say about this project's gates:
+
+  1. P-256 would not generate. node and OpenSSL call that curve `prime256v1`;
+     the JDK and Android call it `secp256r1`. P-384 and P-521 spell the same in
+     both worlds, so it failed on exactly one curve. Caught by the corpus.
+  2. RSA-PSS failed ON THE DEVICE with 781 JVM checks green. A JDK harness gets
+     SunRsaSign, which registers the generic `RSASSA-PSS`; Android ships
+     **Conscrypt**, which does not register that name at all — it registers
+     `SHA256withRSA/PSS`, digest baked in. Caught by `NodeKeysSmoke`, the
+     device-only program written for precisely this, on its first run.
+  3. `jsonwebtoken` failed on the device with the corpus green AND the device
+     smoke green. `crypto.createSign` takes an OpenSSL ALGORITHM name, not a
+     bare digest, and `jwa` signs RS256 by asking for `RSA-SHA256`.
+     `NodeEngine.swift` has a `digestName` normaliser for exactly this and it
+     was not ported. Nothing synthetic caught it because every check written by
+     hand — mine and the smoke's — passes the digest node's short way. A real
+     package found it in one run.
+
+  The lesson stacks: a corpus proves the maths, a device program proves the
+  platform, and only a real package proves the API's actual surface. The
+  workspace ran `npm install jsonwebtoken` (15 packages, real tree) and then
+  signed and verified RS256 and ES256 tokens on the phone, with a tampered
+  token refused. ES256 goes through `ecdsa-sig-formatter`, so a real library
+  exercised the `ieee-p1363` conversion rather than a check that knew to ask.
+
+  `scrypt` and `hkdf` keep the entry the asymmetric surface used to share, with
+  a reason of their own now: `SecretKeyFactory` covers PBKDF2 and nothing else
+  here, scrypt is not a JCA algorithm at any API level, and HKDF reached the JDK
+  only at 24 against a platform that has never shipped it. Both are short
+  constructions over `Mac`, so they are unwritten rather than unavailable.
+
   **`unhandledRejection` was a sixth, and false in a more interesting way than
   the rest.** It said "a WebView exposes no equivalent hook, so nothing can
   call this". There IS a hook — it is simply not the one the reason went

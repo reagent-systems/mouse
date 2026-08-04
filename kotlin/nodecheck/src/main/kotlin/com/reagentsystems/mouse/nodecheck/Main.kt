@@ -3047,6 +3047,36 @@ private fun keySignCorpus(node: String?, parent: File) {
     }
     check(verified == rows.size, "node graded every signature — $verified of ${rows.size}")
 
+    // OPENSSL'S LEGACY NAMES. `crypto.createSign` takes an OpenSSL algorithm name, not a bare
+    // digest, and real libraries use the long forms: `jwa` signs RS256 by asking for
+    // `RSA-SHA256`. Every check above passes the digest node's short way — the way a hand-written
+    // test does — so the corpus was green while `jsonwebtoken` failed on the device at the first
+    // attempt. These are the spellings that were missing.
+    val legacyRow = rows.first { it[0].startsWith("rsa 2048") && it[1] == "sha256" }
+    val legacyPrivate = String(Base64.getDecoder().decode(legacyRow[3]), Charsets.UTF_8)
+    val legacyPublic = String(Base64.getDecoder().decode(legacyRow[4]), Charsets.UTF_8)
+    for (spelling in listOf("RSA-SHA256", "rsa-sha256", "SHA256", "sha256")) {
+        val signature = NodeKeys.sign(legacyPrivate, messageBase64, spelling, false)
+        checkEqual(
+            signature ?: "<null>", legacyRow[5],
+            "an RSA signature is the same under the name `$spelling`",
+        )
+        check(
+            NodeKeys.verify(legacyPublic, messageBase64, legacyRow[5], spelling, false),
+            "and verifies under `$spelling`",
+        )
+    }
+    val ecRow = rows.first { it[0].startsWith("ec prime256v1") && it[1] == "sha256" && it[2].isEmpty() }
+    val ecPublic = String(Base64.getDecoder().decode(ecRow[4]), Charsets.UTF_8)
+    for (spelling in listOf("ecdsa-with-SHA256", "RSA-SHA256")) {
+        // `RSA-SHA256` on an EC key is not a mistake: node's prefix is historical and applies to
+        // any key type, which is exactly why the normaliser strips it rather than branching on it.
+        check(
+            NodeKeys.verify(ecPublic, messageBase64, ecRow[5], spelling, false),
+            "an EC signature verifies under `$spelling` too",
+        )
+    }
+
     // A tampered message must NOT verify. Without this the whole corpus would pass against a
     // `verify` that returned true unconditionally.
     val tampered = Base64.getEncoder().encodeToString("a different message".toByteArray())
