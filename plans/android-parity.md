@@ -142,6 +142,17 @@ each with a screenshot:
 - **(c)** an interactive TUI — `npx create-vite` — renders its menu, takes
   input through the key strip, and advances through its prompts.
 
+  One known gap stands in the way of (c) and is not covered by any milestone
+  above: **backspace does not reach a running program.** While a program owns
+  the keyboard the prompt field is held empty, so Compose fires no
+  `onValueChange` for a deletion and the keystroke is lost. `create-vite` asks
+  for a project name, so the leg cannot pass without it. The fix is the usual
+  one — keep a sentinel character in the field so a deletion is always an edit,
+  and translate edits into keys — but it is deliberately NOT written yet,
+  because there is no program on Android that can show a backspace arriving,
+  and unverifiable code is what this plan exists to avoid. It lands with 3d,
+  when a real TUI can prove it.
+
 Plus: the Kotlin app builds clean, the existing carousel/git/workspace
 behaviour is unregressed, and the iOS app is untouched.
 
