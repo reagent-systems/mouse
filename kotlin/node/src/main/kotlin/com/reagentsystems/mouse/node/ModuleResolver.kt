@@ -417,7 +417,12 @@ class ModuleResolver(private val fs: NodeFs) {
         // engine here has a module loader wired to this resolver. prettier lazy-loads its
         // plugins that way.
         val body = if (esm) EsmTranspiler.transpile(source) else EsmTranspiler.rewriteDynamicImport(source)
-        return Json.write(mapOf("source" to body, "esm" to esm))
+        // `async` is NOT the same question as `esm`, and conflating them was the jose bug. Only a
+        // module with top-level await has to be evaluated asynchronously; every other ES module
+        // finishes when its body returns, so `require()` of it can answer the real namespace the
+        // way node 22 does. See `EsmTranspiler.hasTopLevelAwait`.
+        val async = esm && EsmTranspiler.hasTopLevelAwait(source)
+        return Json.write(mapOf("source" to body, "esm" to esm, "async" to async))
     }
 
     companion object {

@@ -2402,6 +2402,7 @@ fun main(args: Array<String>) {
         keySignCorpus(node, scratch)
         keyAgreeCorpus(node, scratch)
         rsaCipherCorpus(node, scratch)
+        topLevelAwaitCorpus()
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2578,10 +2579,15 @@ private fun esmCorpus(node: String?, parent: File) {
 }
 
 /**
- * What `node-host.js` does, in the harness: wrap a transpiled module in an ASYNC function with
- * the same seven parameters, and answer a promise of its exports so an importer's
- * `if (x instanceof Promise) x = await x` has something to await. The four runtime helpers are
- * the shared bootstrap's, restated here only because a bare `node` has no bootstrap.
+ * What `node-host.js` does, in the harness: wrap a transpiled module with the same seven
+ * parameters and hand back its exports. The runtime helpers are the shared bootstrap's, restated
+ * here only because a bare `node` has no bootstrap — except `__esmSettle`, which is the ANDROID
+ * host's own and is what replaced the `await` the import sites used to emit.
+ *
+ * The wrapper is SYNCHRONOUS here, and that is the point of the change it mirrors: with no `await`
+ * in the transpiled text, a module without top-level await finishes when its body returns, so
+ * `require()` of it answers the real namespace as node 22's `require(esm)` does. The corpus runs
+ * that shape rather than the old async one, so what it grades is what the device evaluates.
  */
 private val ESM_RUNNER = """
     const fs = require('fs');
@@ -2605,25 +2611,57 @@ private val ESM_RUNNER = """
       }
     }
     function __dynamicImport(req, spec) { return Promise.resolve(req(spec)); }
+    function __esmSettle(value, specifier) {
+      if (value && typeof value.then === 'function') {
+        const e = new Error("'" + specifier + "' has top-level await and cannot be imported synchronously");
+        e.code = 'ERR_REQUIRE_ASYNC_MODULE';
+        throw e;
+      }
+      return value;
+    }
 
     function load(id) {
       if (id in cache) return cache[id];
       const source = fs.readFileSync(id, 'utf8');
       const dir = path.dirname(id);
       const require_ = (spec) => spec.startsWith('.') ? load(path.resolve(dir, spec)) : require(spec);
-      const fn = eval('(async function (exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename) {'
+      // Sync first, async on a SyntaxError — the same two-step `node-host.js` does, and for the
+      // same reason: a module whose own source uses top-level await cannot be wrapped
+      // synchronously, and the engine is the only reliable judge of which those are.
+      const build = (isAsync) => eval('(' + (isAsync ? 'async ' : '')
+        + 'function (exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename) {'
         + source + '\n})');
+      let fn;
+      let isAsync = false;
+      try {
+        fn = build(false);
+      } catch (e) {
+        if (!(e instanceof SyntaxError)) throw e;
+        fn = build(true);
+        isAsync = true;
+      }
       const module_ = { exports: {} };
-      const settled = fn(module_.exports, require_, module_, id, dir, require_, id)
-        .then(() => { cache[id] = module_.exports; return module_.exports; });
-      cache[id] = settled;
-      return settled;
+      const result = fn(module_.exports, require_, module_, id, dir, require_, id);
+      if (isAsync) {
+        const settled = result.then(() => { cache[id] = module_.exports; return module_.exports; });
+        cache[id] = settled;
+        return settled;
+      }
+      cache[id] = module_.exports;
+      return module_.exports;
     }
 
-    load(path.resolve('main.mjs')).catch((e) => {
+    try {
+      // The entry may be either shape: a module with top-level await answers a promise, one
+      // without answers its exports and is already done.
+      const entry = load(path.resolve('main.mjs'));
+      if (entry && typeof entry.then === 'function') {
+        entry.catch((e) => { console.error((e && e.stack) || e); process.exitCode = 1; });
+      }
+    } catch (e) {
       console.error((e && e.stack) || e);
       process.exitCode = 1;
-    });
+    }
 """.trimIndent()
 
 // ------------------------------------------------------------------------- crypto ----
@@ -3524,6 +3562,55 @@ private fun rsaCipherCorpus(node: String?, parent: File) {
         NodeKeys.rsaEncrypt(publicPem, secretBase64, 3, "sha1") == null,
         "a padding mode this does not implement refuses rather than guessing",
     )
+}
+
+/**
+ * `EsmTranspiler.hasTopLevelAwait` — which module is finished when its body returns.
+ *
+ * node 22's `require(esm)` turns on exactly this question, so a wrong answer is not cosmetic in
+ * either direction:
+ *
+ *  - a false YES makes `require()` of an ordinary package throw ERR_REQUIRE_ASYNC_MODULE, which is
+ *    the failure this whole change exists to remove.
+ *  - a false NO wraps a module that really does suspend in a synchronous function, and the engine
+ *    answers with a SyntaxError. `node-host.js` catches that and re-wraps async, so it degrades to
+ *    the old behaviour rather than breaking — which is why the detector is allowed to err this way
+ *    and not the other.
+ *
+ * The concise-arrow cases are here because `jose` is what found them: its
+ * `const handleJWK = async (…) => cached(…) ?? cached(…, await jwkToKey(…))` has no braces at all,
+ * so a brace-only scan reads that `await` as top-level and refuses the package. Everything else in
+ * the corpus had braces.
+ */
+private fun topLevelAwaitCorpus() {
+    val yes = listOf(
+        "a bare top-level await" to "const x = await f();",
+        "await in a top-level try" to "try { await f(); } catch (e) {}",
+        "await after imports" to "import a from 'b';\nconst x = await a();",
+        "for await at top level" to "for await (const x of gen()) { use(x); }",
+        "await inside a top-level block" to "{ const x = await f(); }",
+    )
+    val no = listOf(
+        "await in an async function" to "async function f() { const x = await g(); }",
+        "await in an async method" to "class A { async run() { return await g(); } }",
+        "await in an async arrow with a body" to "const f = async () => { return await g(); };",
+        "await in a CONCISE async arrow" to "const f = async (a) => cached(a, await g(a));",
+        "a concise arrow inside a call" to "run(async (a) => cached(a, await g(a)));",
+        "two concise arrows in sequence" to
+            "const f = async a => await g(a);\nconst h = async b => await g(b);",
+        "await after a concise arrow closes" to
+            "const f = async a => await g(a);\nfunction later() { return 1; }",
+        "an object property named await" to "const o = { await: 1 }; use(o.await);",
+        "await inside a string" to "const s = 'const x = await f();';",
+        "await inside a comment" to "// const x = await f();\nconst y = 1;",
+        "no await at all" to "export const x = 1;",
+    )
+    for ((label, source) in yes) {
+        check(EsmTranspiler.hasTopLevelAwait(source), "top-level await found — $label")
+    }
+    for ((label, source) in no) {
+        check(!EsmTranspiler.hasTopLevelAwait(source), "not top-level await — $label")
+    }
 }
 
 private fun zlibCorpus(node: String?, parent: File) {

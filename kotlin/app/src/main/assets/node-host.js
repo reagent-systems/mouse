@@ -423,20 +423,54 @@
   // `__mouseRequire` is a SEPARATE parameter carrying the same value as `require`, because a
   // module doing `const require = createRequire(...)` — legal, and what several dual packages do
   // — shadows the `require` PARAMETER scope-wide.
+  // A module that has to suspend — and only that module — is wrapped in an async function.
+  //
+  // Every ES module used to be wrapped async, because the transpiled import sites emitted `await`.
+  // They no longer do (see `EsmTranspiler.requireSettled`), so async-ness now depends solely on
+  // whether the module's OWN source uses top-level await. That is node 22's rule for
+  // `require(esm)`: no top-level await means the module is finished when its body returns, so a
+  // CommonJS caller can have the real namespace instead of a promise.
+  //
+  // The retry is the safety net for the detector. `hasTopLevelAwait` deliberately errs toward
+  // "sync" so that ordinary class-based packages are not misread as async; when it is wrong the
+  // engine says so with a SyntaxError, and the SAME transpiled text is re-wrapped async. That
+  // works only because the transpile no longer emits `await` of its own — nothing in it is
+  // invalid in a sync function.
+  // What every transpiled import site calls instead of `await`.
+  //
+  // A dependency that is already loaded arrives as its exports and passes straight through; the
+  // only thing this rejects is a PROMISE, which can mean just one thing here — the dependency has
+  // top-level await and cannot be finished synchronously. `loadFile` refuses those before they get
+  // this far, so in practice this is the second line of defence rather than the first, and it is
+  // what makes the transpiled text legal inside a synchronous wrapper.
+  globalThis.__esmSettle = function (value, specifier) {
+    if (value && typeof value.then === 'function') {
+      throw coded(
+        "'" + specifier + "' has top-level await and cannot be imported synchronously",
+        'ERR_REQUIRE_ASYNC_MODULE');
+    }
+    return value;
+  };
+
   function wrapModule(source, id, async) {
     var body = source;
     if (body.slice(0, 2) === '#!') {
       var newline = body.indexOf('\n');
       body = newline < 0 ? '' : body.slice(newline);
     }
-    // An ES module is wrapped ASYNC. The transpiled source emits `await` at its top level —
-    // every import site awaits a dependency that turns out to be pending — so the wrapper has to
-    // be a function that may suspend. A module that never awaits anything real still settles in
-    // the same turn, which is why sync modules stay sync under it.
-    return (0, eval)(
-      '(' + (async ? 'async ' : '')
-      + 'function(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){'
-      + body + '\n})\n//# sourceURL=mouse://' + id);
+    var build = function (isAsync) {
+      return (0, eval)(
+        '(' + (isAsync ? 'async ' : '')
+        + 'function(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){'
+        + body + '\n})\n//# sourceURL=mouse://' + id);
+    };
+    if (async) return { fn: build(true), async: true };
+    try {
+      return { fn: build(false), async: false };
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e;
+      return { fn: build(true), async: true };
+    }
   }
 
   function loadJson(id) {
@@ -459,8 +493,11 @@
     var info = JSON.parse(payload);
     var directory = host.virtualDirname(id);
     var fn;
+    var isAsync;
     try {
-      fn = wrapModule(info.source, id, info.esm);
+      var wrapped = wrapModule(info.source, id, !!info.async);
+      fn = wrapped.fn;
+      isAsync = wrapped.async;
     } catch (e) {
       // A SyntaxError here is the FILE failing to parse, and the message is the only thing that
       // says where. Swallowing it leaves "Cannot parse '<2 MB file>'", which is unactionable.
@@ -480,24 +517,25 @@
       delete moduleCache[id];
       throw e;
     }
-    // An ES module's wrapper is async, so `require()` of one answers a PROMISE of its exports.
-    // That is not a wart: it is the contract the transpiled import site already expects — every
-    // one of them reads `if (x instanceof Promise) x = await x`. It is also the only honest
-    // answer, because a module with top-level await genuinely is not finished yet.
-    if (info.esm && result && typeof result.then === 'function') {
-      var settled = result.then(function () {
-        delete inProgress[id];
-        moduleCache[id] = module.exports;
-        return module.exports;
-      }, function (e) {
-        delete inProgress[id];
-        delete moduleCache[id];
-        throw e;
-      });
-      // Cached as the PROMISE, so a second require during the same evaluation joins the first
-      // rather than running the module twice.
-      moduleCache[id] = settled;
-      return settled;
+    // Only a module that genuinely suspends answers a promise, and node does not let one be
+    // required at all: `require()` of a module with top-level await is ERR_REQUIRE_ASYNC_MODULE,
+    // because there is no honest synchronous answer. Everything else — which is nearly every
+    // package — is FINISHED by the time its body returns, and `require()` hands back the real
+    // namespace, as node 22's `require(esm)` does.
+    //
+    // Before this, every ES module was wrapped async and so every `require()` of one answered a
+    // promise. From a transpiled importer that was invisible, because the import site awaited it;
+    // from a CommonJS file a user wrote it produced an empty object and an error naming a missing
+    // function. `jose` is what found it.
+    if (isAsync && result && typeof result.then === 'function') {
+      // The rejection is claimed so a refused module does not also surface as an unhandled
+      // rejection somewhere with no stack.
+      result.then(null, function () {});
+      delete inProgress[id];
+      delete moduleCache[id];
+      throw coded(
+        "require() of an ES module with top-level await is not supported: '" + id + "'",
+        'ERR_REQUIRE_ASYNC_MODULE');
     }
     delete inProgress[id];
     moduleCache[id] = module.exports;
@@ -677,7 +715,10 @@
       try {
         var id = host.normalizePath(String(url || '/main.js'));
         var directory = host.virtualDirname(id);
-        var fn = wrapModule(String(source), id, !!async);
+        // The ENTRY is always wrapped async: the host awaits it, so top-level await in the
+        // one file a user is most likely to write costs nothing here. Only `require()` needs a
+        // module to be finished synchronously.
+        var fn = wrapModule(String(source), id, true).fn;
         var module = { exports: {} };
         var required = makeRequire(directory, false);
         var settled = fn(module.exports, required, module, id, directory, required, id);

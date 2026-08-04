@@ -410,8 +410,18 @@ object EsmTranspiler {
         // `if (x instanceof Promise) x = await x`. A fully-sync dependency evaluates without
         // suspension, so sync modules stay sync under the async wrapper; a TLA dependency
         // suspends its importers — the same infection real ESM has.
+        // `__esmSettle` rather than `await`, and that choice is what lets a module without
+        // top-level await be wrapped in a SYNCHRONOUS function — which is the whole of node 22's
+        // `require(esm)`. The call is legal in a sync function and in an async one alike, so the
+        // same transpiled text serves both wrappers and `node-host.js` can re-wrap async on a
+        // SyntaxError without asking for a different transpile.
+        //
+        // What it gives up: a dependency that is itself async can no longer be awaited here, and
+        // raises `ERR_REQUIRE_ASYNC_MODULE` instead. That is node's own answer for the sync case,
+        // and for the async case it is a narrowing — a module with top-level await importing
+        // another module with top-level await. Recorded rather than hidden.
         fun requireSettled(temp: String, module: String): String =
-            "let $temp = __mouseRequire('$module'); if ($temp instanceof Promise) $temp = await $temp;"
+            "let $temp = __esmSettle(__mouseRequire('$module'), '$module');"
 
         // import defaultName, { a, b as c } from 'mod'  (all combinations) / import * as ns —
         // minified bundles drop every optional space (`import{x as y}from"m"`).
@@ -540,6 +550,129 @@ object EsmTranspiler {
         if (!source.contains("import") && !source.contains("export")) return false
         val masked = rewriteImportForms(source, meta = false, mask = true).text
         return STATEMENT_PROBE.matcher(masked).find()
+    }
+
+    /**
+     * Does this module use TOP-LEVEL await — and therefore have to be evaluated asynchronously?
+     *
+     * This is the question node 22's `require(esm)` turns on. A module without top-level await is
+     * finished the moment its body returns, so `require()` of it can hand back the real namespace;
+     * one WITH top-level await genuinely is not finished, and node raises
+     * `ERR_REQUIRE_ASYNC_MODULE` rather than pretend otherwise. Before this existed every ES module
+     * was wrapped async, so `require('jose')` from a hand-written CommonJS file answered a PROMISE
+     * and `Object.keys` of it was empty — the bug a real package found.
+     *
+     * ## What counts as "top level", and which way the errors fall
+     *
+     * An `await` is top-level when no ENCLOSING brace is a function body. Blocks do not matter —
+     * `try { await x }` inside an async method is still inside that method — so the test is against
+     * the whole stack rather than the nearest brace.
+     *
+     * A brace is treated as a function body when it follows `)` or `=>`. That deliberately catches
+     * `if (…) {`, `for (…) {` and `catch (…) {` as well, and the imprecision is chosen rather than
+     * tolerated, because the two mistakes are not equally bad:
+     *
+     *  - saying ASYNC when the module is sync would make `require()` of it throw, which is the very
+     *    failure being fixed — so that direction must not happen for ordinary code, and method
+     *    shorthand (`async foo() { await … }`, which every class-based package uses) is exactly
+     *    what the `)` rule keeps out of it.
+     *  - saying SYNC when the module has top-level await produces a SyntaxError from the engine at
+     *    wrap time, and `node-host.js` catches it and re-wraps async. The emitted code is identical
+     *    either way, which is what makes that fallback safe.
+     *
+     * So this errs toward sync, and the engine itself is the backstop for the cases it misses.
+     */
+    fun hasTopLevelAwait(source: String): Boolean {
+        if (!source.contains("await")) return false
+        val masked = rewriteImportForms(source, meta = false, mask = true).text
+        // One entry per open brace: true when that brace opened a function body.
+        val enclosing = ArrayList<Boolean>()
+        // Brace depths at which a CONCISE arrow body is open — `async x => expr`, with no braces
+        // at all. jose's `const handleJWK = async (…) => cached(…) ?? cached(…, await f(…))` is
+        // exactly this, and a brace-only scan reads that `await` as top-level and refuses the
+        // whole package. The body runs to the end of its statement, so the depth is popped at the
+        // next `;` or when the enclosing brace closes.
+        val concise = ArrayList<Int>()
+        var pendingFunction = false
+        var at = 0
+        while (at < masked.length) {
+            val ch = masked[at]
+            when {
+                // The mask blanks comments, templates and regexes but keeps QUOTED strings
+                // verbatim on purpose — the import patterns have to read the specifier out of one.
+                // So they are skipped here instead, or `const s = 'await f()'` reads as real code.
+                ch == '\'' || ch == '"' -> {
+                    val quote = ch
+                    at += 1
+                    while (at < masked.length) {
+                        val inner = masked[at]
+                        at += 1
+                        if (inner == '\\') {
+                            at += 1
+                            continue
+                        }
+                        if (inner == quote || inner == '\n') break
+                    }
+                }
+                ch == '{' -> {
+                    enclosing.add(pendingFunction)
+                    pendingFunction = false
+                    at += 1
+                }
+                ch == '}' -> {
+                    if (enclosing.isNotEmpty()) enclosing.removeAt(enclosing.size - 1)
+                    while (concise.isNotEmpty() && concise.last() > enclosing.size) {
+                        concise.removeAt(concise.size - 1)
+                    }
+                    at += 1
+                }
+                ch == ';' -> {
+                    while (concise.isNotEmpty() && concise.last() >= enclosing.size) {
+                        concise.removeAt(concise.size - 1)
+                    }
+                    at += 1
+                }
+                ch == '=' && at + 1 < masked.length && masked[at + 1] == '>' -> {
+                    var probe = at + 2
+                    while (probe < masked.length && masked[probe].isWhitespace()) probe += 1
+                    if (probe < masked.length && masked[probe] == '{') {
+                        pendingFunction = true
+                    } else {
+                        concise.add(enclosing.size)
+                    }
+                    at += 2
+                }
+                ch == ')' -> {
+                    // Look ahead to the next non-space: a `{` there opens a body.
+                    var probe = at + 1
+                    while (probe < masked.length && masked[probe].isWhitespace()) probe += 1
+                    if (probe < masked.length && masked[probe] == '{') pendingFunction = true
+                    at += 1
+                }
+                ch.isLetter() || ch == '_' || ch == '$' -> {
+                    var end = at
+                    while (end < masked.length &&
+                        (masked[end].isLetterOrDigit() || masked[end] == '_' || masked[end] == '$')
+                    ) {
+                        end += 1
+                    }
+                    val word = masked.substring(at, end)
+                    // `obj.await` is a property and `{ await: 1 }` is a key — neither is the
+                    // operator, and both appear in real code.
+                    var after = end
+                    while (after < masked.length && masked[after].isWhitespace()) after += 1
+                    val member = (at > 0 && masked[at - 1] == '.') ||
+                        (after < masked.length && masked[after] == ':')
+                    if (word == "function") pendingFunction = true
+                    if (word == "await" && !member && enclosing.none { it } && concise.isEmpty()) {
+                        return true
+                    }
+                    at = end
+                }
+                else -> at += 1
+            }
+        }
+        return false
     }
 
     private val STATEMENT_PROBE: Pattern = Pattern.compile(

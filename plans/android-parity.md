@@ -272,8 +272,11 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   spelling anywhere, and `md5` works as a side effect. On the phone, scrypt
   reproduces RFC 7914's published vector.
 
-  **OPEN, found by `jose` and reduced to three lines: `require()` of an ES
-  module from a HAND-WRITTEN CommonJS file yields `{}`.** Not a jose problem
+  **CLOSED — node 22's `require(esm)`, and `jose` loads.** What follows is how
+  it stood when the gap was found; the fix is below it.
+
+  **Found by `jose` and reduced to three lines: `require()` of an ES
+  module from a HAND-WRITTEN CommonJS file yielded `{}`.** Not a jose problem
   and not a barrel problem — `require('./leaf.mjs')` where leaf.mjs is two
   plain named exports answers an empty object too.
 
@@ -287,12 +290,41 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   empty, and the failure surfaces as `jose.generateKeyPair is not a function` —
   a message that points nowhere near the cause.
 
-  Real node does neither: older node throws `ERR_REQUIRE_ESM`, and node 22
-  returns the namespace synchronously for a module with no top-level await.
-  Either is a defensible target and they are different amounts of work, so this
-  is written down rather than guessed at. The entry path is unaffected —
-  `npx create-vite` is an ES module and runs — which is exactly why nothing
-  caught this until a real package was required from real user-shaped code.
+  **The fix takes node 22's rule.** A module is wrapped async only when its OWN
+  source uses top-level await; every other ES module finishes when its body
+  returns, so `require()` answers the real namespace. A module that does suspend
+  raises node's own `ERR_REQUIRE_ASYNC_MODULE` rather than handing back a
+  promise nobody unwraps.
+
+  The lever was the transpiled import site. It used to emit
+  `if (x instanceof Promise) x = await x`, and that `await` is what forced every
+  wrapper to be async; it now calls `__esmSettle`, which is legal in a sync
+  function and an async one alike. That one change makes the same transpiled
+  text valid under either wrapper — which is what lets `node-host.js` try sync
+  and re-wrap async on a SyntaxError, so a detector mistake degrades to the old
+  behaviour instead of breaking.
+
+  What it gives up, recorded rather than hidden: a module with top-level await
+  importing ANOTHER module with top-level await now refuses instead of awaiting.
+
+  **`hasTopLevelAwait` is the delicate part, and three of its bugs were found by
+  things that were not looking for them.** `jose` found the first: its
+  `const handleJWK = async (…) => cached(…, await jwkToKey(…))` is a CONCISE
+  arrow with no braces at all, so a brace-only scan called that `await`
+  top-level and refused the package. Writing the corpus found two more — `await`
+  as an object KEY (`{ await: 1 }`), and `await` inside a quoted STRING, which
+  the transpiler's mask deliberately keeps verbatim because the import patterns
+  read specifiers out of it. All three are gated now, alongside the shapes that
+  must still be detected.
+
+  On the phone: `require('./leaf.mjs')` answers `leafFn,leafConst` and the
+  function runs, a barrel re-export answers `ownFn,leafFn,leafConst`, and a
+  module with top-level await answers `ERR_REQUIRE_ASYNC_MODULE`. `jose` loads
+  all 38 of its exports with `generateKeyPair` and `SignJWT` as functions. It
+  still cannot RUN, and for an unrelated and deliberate reason: jose 6 is the
+  webapi build and needs `crypto.subtle`, which this engine does not expose so
+  that feature detection falls back. That is now the only thing between the
+  phone and JWE.
 
   **`unhandledRejection` was a sixth, and false in a more interesting way than
   the rest.** It said "a WebView exposes no equivalent hook, so nothing can
