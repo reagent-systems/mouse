@@ -57,14 +57,23 @@ import kotlin.math.abs
  */
 
 /**
- * Pixel's gesture navigation caps [systemGestureExclusion] at 200dp per edge, so on Pixels the
- * edge strips lose the fight with the system back gesture. There, ring travel moves to the
- * NEGATIVE SPACE BETWEEN CONTAINERS: a horizontal drag in a divider gap swipes the ring
- * (vertical drags in the gap still resize lanes — axis-locked detectors keep both). A one-lane
- * ring has no between-container space, so the edge strips remain its travel path.
+ * ANDROID TRAVELS RINGS IN THE GAPS, NOT AT THE EDGE. [systemGestureExclusion] is capped at
+ * 200dp per edge by the platform, so a full-height edge strip is only protected for a fraction of
+ * itself and an edge drag anywhere above that band navigates back instead: measured on
+ * sdk_gphone64_arm64, a drag at y=1200 exits the app to the launcher while the identical drag at
+ * y=2150 travels correctly. This was once believed to be a Pixel quirk and gated on the model —
+ * it is not, it is every Android device, and the model check merely hid it from the ones that
+ * were tested. So ring travel lives in the NEGATIVE SPACE BETWEEN CONTAINERS everywhere: a
+ * horizontal drag in a divider gap swipes the ring, while vertical drags there still resize lanes
+ * (axis-locked detectors keep both).
+ *
+ * iOS keeps the edge swipe — the screen edge is already the app's there, with nothing to lose it
+ * to. The two platforms differ here because the platforms differ, not by drift.
+ *
+ * A one-lane ring has no between-container space, so the edge strips remain its only travel path;
+ * that ring is the onboarding case and a freshly created one, both of which grow a second lane
+ * quickly.
  */
-private val isPixel = android.os.Build.MANUFACTURER.equals("Google", ignoreCase = true) &&
-    android.os.Build.MODEL.contains("Pixel", ignoreCase = true)
 @Composable
 fun ForegroundView(base: File) {
     val strip = remember { StripPersistence.load(base) ?: RingStrip(listOf(CarouselDeck.onboarding())) }
@@ -89,7 +98,7 @@ fun ForegroundView(base: File) {
 
         val ringDrag = remember { Animatable(0f) }
         var adjacent by remember { mutableStateOf<Pair<CarouselDeck, Boolean>?>(null) } // ring, isRight
-        // Gap ring-swipe (Pixel): unlike an edge strip, a gap drag has no built-in direction —
+        // Gap ring-swipe: unlike an edge strip, a gap drag has no built-in direction —
         // the FIRST movement locks it (leftward pulls in the right neighbor, rightward the left)
         // and it holds until the finger lifts, so a wobble mid-drag can't flip neighbors.
         var gapDirection by remember { mutableStateOf<Boolean?>(null) } // isRight
@@ -155,12 +164,12 @@ fun ForegroundView(base: File) {
                 LaneStack(ring, base, Modifier.offset { IntOffset((ringDrag.value + if (isRight) availableWidthPx else -availableWidthPx).toInt(), 0) })
             }
             LaneStack(deck, base, Modifier.offset { IntOffset(ringDrag.value.toInt(), 0) },
-                onGapRingDrag = if (isPixel) gapRingDrag else null)
+                onGapRingDrag = gapRingDrag)
         }
 
-        // Ring travel. Pixels swipe in the divider gaps (see [isPixel]); the edge strips serve
-        // everyone else — and Pixel's one-lane rings, which have no gap to swipe in.
-        if (!isPixel || deck.lanes.size == 1) {
+        // Ring travel is the divider gaps (see the file header). The edge strips survive only for
+        // a one-lane ring, which has no gap to swipe in.
+        if (deck.lanes.size == 1) {
             EdgeStrip(true, Modifier.align(Alignment.CenterEnd)) { delta, done -> ringSwipe(delta, done, isRight = true, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
             EdgeStrip(false, Modifier.align(Alignment.CenterStart)) { delta, done -> ringSwipe(delta, done, isRight = false, strip, ringDrag, availableWidthPx, scope, setAdjacent = { adjacent = it }, adjacent) }
         }
