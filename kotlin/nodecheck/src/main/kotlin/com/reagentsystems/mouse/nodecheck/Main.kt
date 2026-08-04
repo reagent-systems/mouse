@@ -1522,6 +1522,9 @@ private fun runSmoke(
     File(scratch, "stubs.js").writeText(HostBridge.deferredStubScript())
     File(scratch, "unlock.js").writeText(Bootstrap.unlockGlobalsScript(bootstrap))
     File(scratch, "globals.js").writeText(globals)
+    File(scratch, "platform.js").writeText(
+        Bootstrap.platformScript("android", "Linux", "arm64", "16"),
+    )
     File(scratch, "program.js").writeText(program)
     File(scratch, "entry-path.txt").writeText(entryPath)
     File(scratch, "driver.js").writeText(DRIVER)
@@ -2267,6 +2270,11 @@ private val DRIVER = """
     if (error) die('globals: ' + error);
     error = globalThis.__mouseEvalAsset('node-bootstrap.js');
     if (error) die('node-bootstrap.js: ' + error);
+    // The host tells the engine which machine it is on, AFTER the bootstrap has hardcoded
+    // Darwin. NodeWebView does exactly this; the driver does it from the same function with the
+    // same arguments, so the two hosts cannot answer differently and NodeSmoke can assert it.
+    error = globalThis.__mouseEval(fs.readFileSync('platform.js', 'utf8'), 'platform.js');
+    if (error) die('platform: ' + error);
 
     // ---- the loop ----
     // One turn is exactly NodeWebView.pump(): ready immediates as a batch, else the earliest due

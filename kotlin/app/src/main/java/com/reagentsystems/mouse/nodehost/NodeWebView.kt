@@ -150,6 +150,26 @@ class NodeWebView(
      * ESERVFAIL rather than inventing a public resolver, which would send a user's lookups
      * somewhere they did not choose.
      */
+    /**
+     * What this machine actually is, for [Bootstrap.platformScript].
+     *
+     * `Build.SUPPORTED_ABIS` is Android's name for the architecture and node's is different, so
+     * the first (preferred) ABI is translated rather than passed through: a package matching on
+     * `process.arch` is looking for node's spelling, not the NDK's.
+     */
+    private fun platformScript(): String = Bootstrap.platformScript(
+        platform = "android",
+        type = "Linux",
+        arch = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+            "arm64-v8a" -> "arm64"
+            "armeabi-v7a", "armeabi" -> "arm"
+            "x86_64" -> "x64"
+            "x86" -> "ia32"
+            else -> "arm64"
+        },
+        release = Build.VERSION.RELEASE ?: "",
+    )
+
     private fun platformNameservers(): List<String> = try {
         val manager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (manager == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
@@ -558,8 +578,11 @@ class NodeWebView(
                                 if (failed(bootError, ready)) return@evaluate
                                 evaluateGuardedInJs(Bootstrap.RESTORE_NATIVE_WASM, "mouse-restore-native-wasm") { wasmError ->
                                     if (failed(wasmError, ready)) return@evaluateGuardedInJs
-                                    ready(null)
-                                    runEntry(source, entryPath)
+                                    evaluateGuardedInJs(platformScript(), "mouse-platform") { platformError ->
+                                        if (failed(platformError, ready)) return@evaluateGuardedInJs
+                                        ready(null)
+                                        runEntry(source, entryPath)
+                                    }
                                 }
                             }
                         }

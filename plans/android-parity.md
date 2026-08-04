@@ -246,12 +246,17 @@ each with a screenshot:
     and nothing is written back into the field. Backspace falls out of the same
     change: a shrinking field is DEL.
 
-  One defect found by running and NOT yet fixed:
-
-  - **`process.platform` answers `darwin` on Android.** The bootstrap hardcodes
-    it and is a verbatim iOS copy under a drift gate, so the fix is a host
-    override applied after load, with a gate of its own. Packages branch on
-    this — napi-rs already does — so it is not cosmetic.
+  **`process.platform` is fixed too.** It answered `darwin`, which the bootstrap
+  hardcodes and which is TRUE on iOS. The host now corrects it after load —
+  `Bootstrap.platformScript`, alongside the wasm restore — to `android`,
+  `os.type()` to `Linux`, and the arch to node's spelling of
+  `Build.SUPPORTED_ABIS[0]`. It is not cosmetic: napi-rs's generated loader
+  reaches for `<name>.<platform>-<arch>.node` before it will consider the
+  WebAssembly build, so a wrong answer sends it hunting a darwin artifact on a
+  phone. Gated in the SHARED smoke, with the driver applying the same script
+  from the same function so the two hosts cannot answer differently; proven
+  able to fail. On device: `platform android android / type Linux arch arm64
+  arm64`.
 
 Plus: the Kotlin app builds clean, the existing carousel/git/workspace
 behaviour is unregressed, and the iOS app is untouched.

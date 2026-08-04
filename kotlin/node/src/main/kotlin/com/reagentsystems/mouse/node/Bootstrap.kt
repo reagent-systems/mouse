@@ -187,6 +187,49 @@ object Bootstrap {
     """
 
     /**
+     * Tell the engine which machine it is actually on. Evaluate AFTER the bootstrap.
+     *
+     * The bootstrap hardcodes `process.platform = 'darwin'`, `os.type() = 'Darwin'` and an
+     * `arm64` arch, and on iOS every one of those is TRUE. On Android none of them is, and this
+     * is not cosmetic: packages branch on `process.platform` to pick a binary, a path separator
+     * or a code path. napi-rs's generated loader is the one already in this tree's way — it
+     * reaches for `<name>.<platform>-<arch>.node` before it will consider the WebAssembly build.
+     * Lying about the platform is how a package ends up looking for a darwin artifact on a phone.
+     *
+     * The values come from the HOST because only the host knows them, the same rule the
+     * nameservers follow. `android` is what node itself reports when built for this platform, and
+     * a package that does not know it falls through to its POSIX branch, which is the right one —
+     * Android is Linux underneath, which is also why `os.type()` is `Linux`.
+     *
+     * Applied by `NodeWebView` on device and by `:nodecheck`'s driver off it, from the same
+     * function with the same arguments, so the two hosts cannot answer differently.
+     */
+    fun platformScript(platform: String, type: String, arch: String, release: String): String {
+        val q = HostBridge::jsString
+        return """
+            (function () {
+              var process = globalThis.process;
+              if (process) {
+                try { process.platform = ${q(platform)}; } catch (e) {}
+                try { process.arch = ${q(arch)}; } catch (e) {}
+              }
+              // `os` is a CORE MODULE built by a factory and cached on first require, so the
+              // patch has to go through the same require the program will use — reaching for a
+              // fresh factory would leave the cached copy still answering Darwin.
+              try {
+                var os = globalThis.__mouseRequire ? globalThis.__mouseRequire('os') : null;
+                if (os) {
+                  os.platform = function () { return ${q(platform)}; };
+                  os.type = function () { return ${q(type)}; };
+                  os.arch = function () { return ${q(arch)}; };
+                  os.release = function () { return ${q(release)}; };
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+    }
+
+    /**
      * Where the two texts first differ, as a human-readable line, or null when they match.
      * Reported by LABEL — line number and both texts — rather than by index into a diff, for
      * the reason AGENTS.md records: one divergence shifts every later line.

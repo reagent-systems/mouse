@@ -55,6 +55,18 @@ object NodeSmoke {
           console.log('order=' + seen.join(','));
           console.log('interval=' + ticks);
           console.log('version=' + process.version);
+        // The machine the engine says it is on. The bootstrap hardcodes Darwin — true on iOS,
+        // false here — and the HOST corrects it after load. A package picking a native artifact
+        // reads exactly these: napi-rs's loader wants `<name>.<platform>-<arch>.node` before it
+        // will consider the WebAssembly build, so a wrong answer sends it looking for a darwin
+        // file on a phone.
+        const os = globalThis.__mouseRequire('os');
+        console.log('platform=' + process.platform + ',' + os.platform());
+        console.log('ostype=' + os.type());
+        // Not pinned to a VALUE — the emulator and a real device differ, and so do the driver's
+        // arguments — but `os.arch()` and `process.arch` must be the same answer, which is what
+        // patching only one of them would break.
+        console.log('archagrees=' + (os.arch() === process.arch));
           console.log('argv=' + process.argv.join(','));
           console.log('env=' + process.env.MOUSE_CHECK);
           console.log('cwd=' + process.cwd());
@@ -84,6 +96,9 @@ object NodeSmoke {
         Triple("order", "tick,promise,immediate,timeout", "nextTick, then microtasks, then immediates, then timers"),
         Triple("interval", "3", "setInterval repeats until cleared"),
         Triple("version", "v22.22.3", "process.version is the engine's"),
+        Triple("platform", "android,android", "process.platform and os.platform() say Android, not Darwin"),
+        Triple("ostype", "Linux", "os.type() is Linux — Android is, and packages branch on it"),
+        Triple("archagrees", "true", "os.arch() and process.arch are the same answer"),
         Triple("argv", "/usr/local/bin/node,/nodecheck.js,alpha", "process.argv is the host's"),
         Triple("env", "1", "process.env is the host's"),
         Triple("cwd", "/", "process.cwd() is the host's"),
