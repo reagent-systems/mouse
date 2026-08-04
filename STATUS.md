@@ -218,6 +218,17 @@ commands.
   diagonally — and two faults that together swallowed every keystroke:
   `stdinIsComplete` handing an interactive program an already-ended stream, and
   the prompt field sending its whole composing region instead of the delta.
+- **Six Android deferral REASONS have turned out to be false, and that is now
+  the finding rather than six incidents.** brotli, ciphers, asymmetric keys,
+  `vm`, `rewriteImports`, `unhandledRejection`. Two cost real capability that
+  was buildable at the time it was refused. The partition gate proves a refusal
+  still REFUSES; nothing proves its reason is still TRUE, and that asymmetry is
+  the largest known hole in the Android suite. The newest: `unhandledRejection`
+  claimed a WebView has no hook — it has one, on the console channel, which
+  carries a string where node hands a handler the rejection's value. Exit codes
+  are now correct in both branches (no listener → print and exit 1; a listener
+  → no exit) and the listener is still never called, wired as a half rather
+  than rounded up. Verified on the emulator both ways.
 - Running an installed runtime on Android is closer than the plan assumed, and
   for a reason worth recording: the shared bootstrap reaches for the standard
   `WebAssembly.*` API rather than shipping an interpreter, so Android gets V8's

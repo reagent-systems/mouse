@@ -208,6 +208,35 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   program built at runtime, and what must not differ is what they refuse to
   touch — an `import(` inside a string, a comment, or after a dot.
 
+  **`unhandledRejection` was a sixth, and false in a more interesting way than
+  the rest.** It said "a WebView exposes no equivalent hook, so nothing can
+  call this". There IS a hook — it is simply not the one the reason went
+  looking for. Three probe programs on a device settled both halves: the DOM
+  `unhandledrejection` event is present as API surface (`addEventListener` is a
+  function, assigning `onunhandledrejection` sticks) and NEVER FIRES — four
+  rejection sites, both registration styles, native V8 promises on the real
+  window, 500 ms each, zero events. Chromium detects every one of them anyway
+  and reports it on the CONSOLE channel, which `WebChromeClient` reads.
+
+  That channel carries a formatted STRING where node hands a handler the
+  `reason` VALUE, so it serves exactly one half of node's contract, and the
+  half-capability is wired as a half rather than rounded up: **exit codes are
+  correct in both branches** — no listener prints and exits 1, a listener does
+  not exit — and **the listener is never called**, because synthesising an
+  `Error` from console text is wrong the moment a program rejects with a
+  string, a number, or an object carrying a `code`. So the bridge name stays
+  DEFERRED (the engine-internal path really is unwired) while the behaviour a
+  shell can observe is right. Verified on the emulator both ways, including
+  that the fatal case dies at the checkpoint before its own 200 ms timer.
+
+  Six reasons, found one at a time and then by reading the list. The pattern is
+  now the finding: the partition gate proves a refusal still REFUSES, and
+  nothing proves its reason is still TRUE. Two of the six cost real capability
+  (`vm` was buildable since 3a, `rewriteImports` since 3e). A reason that names
+  a platform limit deserves the same treatment as a claim in code — it should
+  be re-measured when the platform or the tree moves under it, and until
+  something gates that prose, re-reading it periodically is the only defence.
+
   Gated by `NodeVmSmoke`, the first DEVICE-ONLY program in the suite — an
   iframe needs a DOM and real node has none, so grading it in `:nodecheck` too
   would mean expecting different things of the two hosts, which is the trap the
