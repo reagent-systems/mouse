@@ -23,6 +23,12 @@ plugins {
 
 dependencies {
     implementation(project(":node"))
+    // Declared here rather than leaned on transitively. Since milestone 3c the socket, DNS and
+    // HTTP layers answer in JSON — that is the only shape `@JavascriptInterface` carries — so the
+    // harness has to READ what they produce, and it reads it with the same hand-written reader
+    // `:node` writes it with. Grading a JSON answer with a second parser would be grading two
+    // things at once.
+    implementation(project(":packages"))
 }
 
 java {

@@ -7,9 +7,18 @@ import com.reagentsystems.mouse.node.NodeCpu
 import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeFsSmoke
 import com.reagentsystems.mouse.node.NodeLoop
+import com.reagentsystems.mouse.node.NodeDns
+import com.reagentsystems.mouse.node.NodeHttp
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSmoke
+import com.reagentsystems.mouse.node.NodeSocketSmoke
+import com.reagentsystems.mouse.node.NodeSockets
+import com.reagentsystems.mouse.packages.Json
 import java.io.File
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.nio.file.Files
 import java.util.Base64
 import java.util.concurrent.TimeUnit
@@ -657,6 +666,720 @@ private fun resolverCorpus(node: String?, scratch: File) {
     }
 }
 
+// ------------------------------------------------------------------- sockets ----
+
+/**
+ * A recorder for what [NodeSockets] hands back.
+ *
+ * The table talks in `(handlerId, argsJson, final)`, which is the wire the WebView carries. Parsing
+ * it here rather than inspecting the table's internals is deliberate: what the gate must grade is
+ * what JavaScript would SEE, and an assertion against a private field would pass just as happily
+ * against a table that never delivered anything.
+ */
+private class SocketRecorder {
+    private val lock = Object()
+    private val events = ArrayList<Triple<Int, String, Any?>>()
+    var holds = 0
+        private set
+
+    /** One-shot answers — `resolve`, `sendDatagram` — which are argument lists, not socket events. */
+    private val answers = HashMap<Int, List<*>>()
+
+    val post: (Int, String, Boolean) -> Unit = { handlerId, argsJson, _ ->
+        val args = Json.parse(argsJson) as? List<*>
+        synchronized(lock) {
+            // A socket event is `(id, name, payload)`; anything else is a one-shot callback's
+            // argument list. Filing them apart rather than dropping the second shape matters —
+            // the first version of this recorder silently discarded every `resolve` answer, and
+            // the check that read them could not fail.
+            if (args != null && args.size == 3 && args[0] is Number && args[1] is String) {
+                events.add(Triple((args[0] as Number).toInt(), args[1] as String, args[2]))
+            } else if (args != null) {
+                answers[handlerId] = args
+            }
+            lock.notifyAll()
+        }
+    }
+
+    fun answer(handlerId: Int): List<*>? = synchronized(lock) { answers[handlerId] }
+
+    fun awaitAnswer(handlerId: Int, timeoutMs: Long = 10_000): List<*>? {
+        await(timeoutMs) { synchronized(lock) { answers.containsKey(handlerId) } }
+        return answer(handlerId)
+    }
+    val retain: () -> Unit = { synchronized(lock) { holds += 1; lock.notifyAll() } }
+    val release: () -> Unit = { synchronized(lock) { holds -= 1; lock.notifyAll() } }
+
+    /** Every event so far, as `id:name`, in order. */
+    fun trace(id: Int? = null): String = synchronized(lock) {
+        events.filter { id == null || it.first == id }.joinToString(",") { it.second }
+    }
+
+    fun payload(id: Int, name: String): Any? =
+        synchronized(lock) { events.lastOrNull { it.first == id && it.second == name }?.third }
+
+    /** Everything a socket received, reassembled from the base64 chunks. */
+    fun data(id: Int): String = synchronized(lock) {
+        events.filter { it.first == id && it.second == "data" }
+            .joinToString("") { String(Base64.getDecoder().decode(it.third as String), Charsets.UTF_8) }
+    }
+
+    fun dataBytes(id: Int): Int = synchronized(lock) {
+        events.filter { it.first == id && it.second == "data" }
+            .sumOf { Base64.getDecoder().decode(it.third as String).size }
+    }
+
+    /** Wait until [ready] holds, or give up. A gate that hangs is worse than one that fails. */
+    fun await(timeoutMs: Long = 5_000, ready: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        synchronized(lock) {
+            while (!ready()) {
+                val left = deadline - System.currentTimeMillis()
+                if (left <= 0) return false
+                lock.wait(left.coerceAtMost(100))
+            }
+        }
+        return true
+    }
+
+    fun has(id: Int, name: String, timeoutMs: Long = 5_000): Boolean =
+        await(timeoutMs) { synchronized(lock) { events.any { it.first == id && it.second == name } } }
+
+    /** The id a server reported for the connection it accepted. */
+    fun acceptedId(serverId: Int): Int? = synchronized(lock) {
+        val payload = events.firstOrNull { it.first == serverId && it.second == "connection" }?.third
+        ((payload as? Map<*, *>)?.get("id") as? Number)?.toInt()
+    }
+
+    fun port(id: Int, name: String): Int =
+        (((payload(id, name) as? Map<*, *>)?.get("port")) as? Number)?.toInt() ?: 0
+}
+
+/**
+ * `NodeSockets` — the Java NIO table itself — against real peers on a real wire.
+ *
+ * This is the socket layer's answer to `fsCorpus`, and it is the check the JavaScript stand-in in
+ * [DRIVER] cannot make: that stand-in is real node's own `net`, which proves the shim and the
+ * bootstrap above it and says nothing at all about the Kotlin underneath. Here the table is driven
+ * directly and the peer is a real socket — a plain JVM one for the deterministic cases, and REAL
+ * `node` for the two that matter most.
+ *
+ * AGENTS.md on this layer: "it works when both ends are ours proves nothing about the wire".
+ */
+private fun socketsCorpus(node: String?) {
+    val recorder = SocketRecorder()
+    val table = NodeSockets(recorder.post, recorder.retain, recorder.release)
+    try {
+        // --- listen, accept, echo, and each side's own event sequence ---
+        val serverId = table.listen("127.0.0.1", 0, 511)
+        check(recorder.has(serverId, "listening"), "listen(0) reports `listening`")
+        val port = recorder.port(serverId, "listening")
+        check(port > 0, "listen(0) binds an ephemeral port and names it ($port)")
+        checkEqual(
+            ((recorder.payload(serverId, "listening") as? Map<*, *>)?.get("family")).toString(),
+            "IPv4", "the listening address carries its family",
+        )
+
+        val peer = Socket()
+        peer.connect(InetSocketAddress("127.0.0.1", port), 5_000)
+        check(recorder.has(serverId, "connection"), "a connecting peer becomes a `connection`")
+        val accepted = recorder.acceptedId(serverId)
+        check(accepted != null && accepted != serverId, "the accepted socket has an id of its own")
+        if (accepted != null) {
+            // An accepted socket's events are delivered under the SERVER's handler id. That is
+            // what closes the window where a connection exists with nothing listening for it, and
+            // the recorder groups by the EVENT's id, so this also proves the two are separate.
+            peer.getOutputStream().write("ping".toByteArray())
+            peer.getOutputStream().flush()
+            check(recorder.has(accepted, "data"), "bytes from the peer arrive as `data`")
+            checkEqual(recorder.data(accepted), "ping", "and they arrive intact")
+
+            check(table.write(accepted, "echo:ping".toByteArray()), "a small write is accepted without backpressure")
+            val back = ByteArray(9)
+            peer.soTimeout = 5_000
+            var read = 0
+            while (read < back.size) {
+                val n = peer.getInputStream().read(back, read, back.size - read)
+                if (n < 0) break
+                read += n
+            }
+            checkEqual(String(back, 0, read), "echo:ping", "the peer receives what we wrote")
+
+            // EOF is not a close. The peer's FIN means no more data; the fd retires only when
+            // BOTH directions are done — so `end` must arrive without `close` behind it.
+            peer.shutdownOutput()
+            check(recorder.has(accepted, "end"), "the peer's FIN arrives as `end`")
+            check(
+                !recorder.has(accepted, "close", timeoutMs = 300),
+                "a half-closed socket is still open — EOF is not a close",
+            )
+            table.end(accepted)
+            check(recorder.has(accepted, "close"), "and it closes once both directions are done")
+            checkEqual(
+                recorder.trace(accepted), "data,end,close",
+                "an accepted socket's own event sequence",
+            )
+        }
+        peer.close()
+        table.destroy(serverId)
+        check(recorder.has(serverId, "close"), "destroying a server closes it")
+
+        // --- connect out, to a real JVM peer ---
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { listener ->
+            val clientId = table.connect("127.0.0.1", listener.localPort)
+            val incoming = listener.accept()
+            check(recorder.has(clientId, "connect"), "connect() reports `connect`")
+            checkEqual(
+                recorder.port(clientId, "connect").toString(), "0",
+                "the connect payload nests local/remote rather than carrying a bare port",
+            )
+            val remote = ((recorder.payload(clientId, "connect") as? Map<*, *>)?.get("remote")) as? Map<*, *>
+            checkEqual(
+                ((remote?.get("port")) as? Number)?.toInt().toString(), listener.localPort.toString(),
+                "a connected socket knows its peer's port",
+            )
+            table.write(clientId, "hello".toByteArray())
+            val buffer = ByteArray(5)
+            incoming.soTimeout = 5_000
+            incoming.getInputStream().read(buffer)
+            checkEqual(String(buffer), "hello", "an outbound socket writes")
+            incoming.getOutputStream().write("world".toByteArray())
+            incoming.getOutputStream().flush()
+            check(recorder.has(clientId, "data"), "and reads")
+            checkEqual(recorder.data(clientId), "world", "with the bytes intact")
+            incoming.close()
+            check(recorder.has(clientId, "end"), "the peer closing reports `end`")
+            table.end(clientId)
+            check(recorder.has(clientId, "close"), "and then `close`")
+        }
+
+        // --- the error paths, which real code branches on ---
+        val refused = table.connect("127.0.0.1", 1)
+        check(recorder.has(refused, "error"), "a refused connect reports an error")
+        checkEqual(
+            ((recorder.payload(refused, "error") as? Map<*, *>)?.get("code")).toString(),
+            "ECONNREFUSED", "with node's own code",
+        )
+        check(recorder.has(refused, "close"), "and closes afterwards — an error with no close is a hang")
+
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { taken ->
+            val clash = table.listen("127.0.0.1", taken.localPort, 511)
+            check(recorder.has(clash, "error"), "binding a taken port reports an error rather than throwing")
+            checkEqual(
+                ((recorder.payload(clash, "error") as? Map<*, *>)?.get("code")).toString(),
+                "EADDRINUSE", "and the code is EADDRINUSE",
+            )
+        }
+        val missing = table.connect("this-name-does-not-exist-mouse.invalid", 80)
+        check(recorder.has(missing, "error", timeoutMs = 15_000), "connecting to an unresolvable host reports an error")
+        checkEqual(
+            ((recorder.payload(missing, "error") as? Map<*, *>)?.get("code")).toString(),
+            "ENOTFOUND", "and the code is ENOTFOUND — a hang is a worse bug than an error",
+        )
+
+        // --- backpressure, and that no byte is lost through it ---
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { sink ->
+            val id = table.connect("127.0.0.1", sink.localPort)
+            val incoming = sink.accept()
+            check(recorder.has(id, "connect"), "the backpressure socket connected")
+            val megabyte = ByteArray(1024 * 1024) { 'a'.code.toByte() }
+            // The peer is not reading, so the kernel queue fills and `write` must eventually say
+            // so. A table that always answered true would look identical until a real transfer.
+            var refusedOnce = false
+            for (chunk in 0 until 16) {
+                if (!table.write(id, megabyte.copyOfRange(chunk * 65536, (chunk + 1) * 65536))) {
+                    refusedOnce = true
+                }
+            }
+            check(refusedOnce, "a write past the high-water mark answers false")
+            var total = 0
+            val buffer = ByteArray(65536)
+            incoming.soTimeout = 10_000
+            while (total < 1024 * 1024) {
+                val n = incoming.getInputStream().read(buffer)
+                if (n < 0) break
+                total += n
+            }
+            checkEqual(total.toString(), (1024 * 1024).toString(), "and every byte still arrives")
+            check(recorder.has(id, "drain"), "the queue emptying reports `drain`")
+            incoming.close()
+            table.destroy(id)
+        }
+
+        // --- pause and resume must not lose bytes ---
+        ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { listener ->
+            val id = table.connect("127.0.0.1", listener.localPort)
+            val incoming = listener.accept()
+            check(recorder.has(id, "connect"), "the pause socket connected")
+            table.pause(id)
+            Thread.sleep(50)
+            incoming.getOutputStream().write(ByteArray(4096) { 'x'.code.toByte() })
+            incoming.getOutputStream().flush()
+            Thread.sleep(200)
+            checkEqual(
+                recorder.dataBytes(id).toString(), "0",
+                "a paused socket delivers nothing — `http` pauses between requests",
+            )
+            table.resume(id)
+            check(recorder.await { recorder.dataBytes(id) == 4096 }, "resume replays every buffered byte")
+            incoming.close()
+            table.destroy(id)
+        }
+
+        // --- ref/unref: whether a handle is a reason to stay alive ---
+        val held = table.listen("127.0.0.1", 0, 511)
+        check(recorder.has(held, "listening"), "the unref server bound")
+        val before = recorder.holds
+        table.setRef(held, false)
+        check(recorder.await { recorder.holds == before - 1 }, "unref() gives the loop handle back without closing")
+        table.setRef(held, true)
+        check(recorder.await { recorder.holds == before }, "and ref() takes it again")
+        table.destroy(held)
+
+        // --- getaddrinfo, which is what `dns.lookup` is ---
+        val lookup = table.claimExternalId()
+        table.resolve(lookup, "localhost", 0)
+        val resolved = recorder.awaitAnswer(lookup)
+        check(resolved != null, "dns.lookup answers for `localhost`")
+        @Suppress("UNCHECKED_CAST")
+        val addresses = (resolved?.firstOrNull() as? List<Map<String, Any?>>).orEmpty()
+        checkEqual((resolved?.getOrNull(1) as? String) ?: "<none>", "", "and reports no error")
+        check(
+            addresses.any { it["address"] == "127.0.0.1" || it["address"] == "0:0:0:0:0:0:0:1" || it["address"] == "::1" },
+            "and the address is a loopback one (${addresses.map { it["address"] }})",
+        )
+        check(
+            addresses.all { (it["family"] as? Number)?.toInt() == 4 || (it["family"] as? Number)?.toInt() == 6 },
+            "each address carries family 4 or 6, as dns.lookup reports it",
+        )
+        val nowhere = table.claimExternalId()
+        table.resolve(nowhere, "this-name-does-not-exist-mouse.invalid", 0)
+        checkEqual(
+            (recorder.awaitAnswer(nowhere)?.getOrNull(1) as? String) ?: "<none>", "ENOTFOUND",
+            "an unresolvable name answers ENOTFOUND rather than an empty list",
+        )
+
+        // --- UDP ---
+        val udp = table.bindDatagram("127.0.0.1", 0, false)
+        check(recorder.has(udp, "listening"), "a datagram socket binds")
+        val udpPort = recorder.port(udp, "listening")
+        val sender = table.claimExternalId()
+        table.sendDatagram(sender, udp, "udp-hello".toByteArray(), "127.0.0.1", udpPort)
+        // The empty string is SUCCESS here, and that is the iOS rule this layer paid for once:
+        // coalescing "no problem" to a code reported every successful send as a failure.
+        checkEqual(
+            (recorder.awaitAnswer(sender)?.firstOrNull() as? String) ?: "<none>", "",
+            "dgram.send reports success as the EMPTY string, not as a code",
+        )
+        check(recorder.has(udp, "datagram"), "a datagram arrives whole")
+        val datagram = recorder.payload(udp, "datagram") as? Map<*, *>
+        checkEqual(
+            String(Base64.getDecoder().decode(datagram?.get("data") as? String ?: ""), Charsets.UTF_8),
+            "udp-hello", "with its content intact",
+        )
+        check(
+            (((datagram?.get("from") as? Map<*, *>)?.get("port")) as? Number)?.toInt() ?: 0 > 0,
+            "and with its sender's port — UDP has no connection to hang it on",
+        )
+        table.destroy(udp)
+
+        // --- the error-code map, which is what real code branches on ---
+        checkEqual(table.codeFor(java.net.ConnectException("Connection refused")), "ECONNREFUSED", "ConnectException maps to ECONNREFUSED")
+        checkEqual(table.codeFor(java.net.BindException("Address already in use")), "EADDRINUSE", "BindException maps to EADDRINUSE")
+        checkEqual(table.codeFor(java.net.UnknownHostException("nope")), "ENOTFOUND", "UnknownHostException maps to ENOTFOUND")
+        checkEqual(table.codeFor(java.io.IOException("Broken pipe")), "EPIPE", "a broken pipe maps to EPIPE")
+        checkEqual(table.codeFor(java.io.IOException("Connection reset by peer")), "ECONNRESET", "a reset maps to ECONNRESET")
+
+        crossEngineCorpus(node, table, recorder)
+    } finally {
+        table.closeAll()
+    }
+}
+
+/**
+ * The two cases that matter most: a REAL node client against our server, and our client against a
+ * REAL node server.
+ *
+ * "It works when both ends are ours" proves nothing about the wire. These are the socket-table
+ * equivalents of `verify/net`'s two cross-engine sections.
+ */
+private fun crossEngineCorpus(node: String?, table: NodeSockets, recorder: SocketRecorder) {
+    if (node == null) {
+        println("  SKIP: no `node` — the cross-engine socket checks need one")
+        return
+    }
+    val scratch = Files.createTempDirectory("socketcross").toFile()
+    try {
+        // 1. Our server, node's client.
+        val serverId = table.listen("127.0.0.1", 0, 511)
+        if (!recorder.has(serverId, "listening")) {
+            check(false, "the cross-engine server bound")
+            return
+        }
+        val port = recorder.port(serverId, "listening")
+        val client = File(scratch, "client.js")
+        client.writeText(
+            """
+            const net = require('net');
+            const socket = net.connect(Number(process.argv[2]), '127.0.0.1');
+            let seen = '';
+            socket.on('connect', () => socket.write('HELLO'));
+            socket.on('data', (chunk) => { seen += chunk.toString(); });
+            socket.on('end', () => { console.log('client saw: ' + JSON.stringify(seen)); });
+            socket.on('error', (e) => console.log('client error: ' + e.code));
+            """.trimIndent(),
+        )
+        // Reply and half-close from the accepted socket the moment its bytes arrive.
+        Thread {
+            if (recorder.has(serverId, "connection", timeoutMs = 10_000)) {
+                val accepted = recorder.acceptedId(serverId)
+                if (accepted != null && recorder.has(accepted, "data", timeoutMs = 10_000)) {
+                    table.write(accepted, "ACK:${recorder.data(accepted)}".toByteArray())
+                    table.end(accepted)
+                }
+            }
+        }.also { it.isDaemon = true }.start()
+        val (status, text) = run(listOf(node, client.path, port.toString()), scratch, 30)
+        checkEqual(
+            text.trim(), """client saw: "ACK:HELLO"""",
+            "a real node CLIENT cannot tell our server from node's (exit $status)",
+        )
+        table.destroy(serverId)
+
+        // 2. Node's server, our client. Node prints its port so nothing has to guess one.
+        val server = File(scratch, "server.js")
+        server.writeText(
+            """
+            const net = require('net');
+            const server = net.createServer((socket) => {
+              socket.on('data', (chunk) => socket.end('ACK:' + chunk.toString()));
+            });
+            server.listen(0, '127.0.0.1', () => {
+              console.log('PORT ' + server.address().port);
+            });
+            setTimeout(() => process.exit(0), 20000).unref();
+            """.trimIndent(),
+        )
+        val process = ProcessBuilder(node, server.path).directory(scratch)
+            .redirectErrorStream(true).start()
+        try {
+            val reader = process.inputStream.bufferedReader()
+            val line = reader.readLine()
+            val nodePort = line?.removePrefix("PORT ")?.trim()?.toIntOrNull()
+            if (nodePort == null) {
+                check(false, "the real node server announced its port (said: $line)")
+            } else {
+                val id = table.connect("127.0.0.1", nodePort)
+                check(recorder.has(id, "connect", timeoutMs = 10_000), "our client reached a real node server")
+                table.write(id, "HELLO".toByteArray())
+                check(recorder.has(id, "end", timeoutMs = 10_000), "node's server half-closed after answering")
+                checkEqual(
+                    recorder.data(id), "ACK:HELLO",
+                    "a real node SERVER cannot tell our client from node's",
+                )
+                table.end(id)
+                check(recorder.has(id, "close", timeoutMs = 10_000), "and our socket closes cleanly")
+            }
+        } finally {
+            process.destroyForcibly()
+        }
+    } finally {
+        scratch.deleteRecursively()
+    }
+}
+
+// ----------------------------------------------------------------------- dns ----
+
+/**
+ * `NodeDns` — the wire format, and then the answers, against real node's own resolvers.
+ *
+ * The parse half is graded against a message built HERE, byte by byte, with compression pointers
+ * in it. That is not a convenience: `res_9_dn_expand` is what the iOS side uses and no JVM has an
+ * equivalent, so name expansion is the one piece of this file with no reference implementation to
+ * lean on — and a plain byte scan reads a compressed name as garbage without ever failing.
+ *
+ * The live half is `verify/dnsres`'s own record types, asked of a real nameserver and compared with
+ * real node asking for the same thing. It skips rather than fails when there is no resolver or no
+ * network: a gate that goes red on a train is a gate nobody reads.
+ */
+private fun dnsCorpus(node: String?, scratch: File) {
+    val dns = NodeDns { _, _, _ -> }
+    try {
+        checkEqual(dns.typeNumber("MX").toString(), "15", "record types carry their wire numbers")
+        checkEqual(dns.typeNumber("CAA").toString(), "257", "including the ones past a byte")
+        check(dns.typeNumber("DNSKEY") == null, "an unsupported type answers null — the bootstrap's ENOTIMP")
+
+        checkEqual(
+            dns.reverseName("8.8.8.8") ?: "<null>", "8.8.8.8.in-addr.arpa",
+            "dns.reverse builds the in-addr.arpa name",
+        )
+        checkEqual(
+            dns.reverseName("::1") ?: "<null>",
+            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
+            "and the ip6.arpa nibble form",
+        )
+        check(dns.reverseName("not-an-address") == null, "a hostname is not an address — EINVAL, not a wrong lookup")
+        check(dns.reverseName("999.1.1.1") == null, "and neither is an out-of-range quad")
+        checkEqual(dns.serviceName(443), "https", "lookupService names a well-known port")
+        checkEqual(dns.serviceName(64999), "64999", "and answers the number for one with no name")
+
+        // A response with A, CNAME (behind a pointer), MX, TXT and SOA records, hand-built so the
+        // expected shapes are known exactly.
+        val message = dnsAnswer()
+        val a = dns.parse(message, 1)
+        checkEqual(a.size.toString(), "1", "the parser finds the A record")
+        checkEqual(a.firstOrNull()?.get("value").toString(), "93.184.216.34", "and reads its address")
+        checkEqual(a.firstOrNull()?.get("ttl").toString(), "3600", "and its ttl")
+        val mx = dns.parse(message, 15)
+        checkEqual(mx.firstOrNull()?.get("priority").toString(), "10", "MX carries its priority")
+        checkEqual(
+            mx.firstOrNull()?.get("exchange").toString(), "mail.example.com",
+            "and expands its exchange through a COMPRESSION POINTER — a plain byte scan reads this as garbage",
+        )
+        val txt = dns.parse(message, 16)
+        @Suppress("UNCHECKED_CAST")
+        checkEqual(
+            (txt.firstOrNull()?.get("chunks") as? List<String>)?.joinToString("|") ?: "<none>",
+            "v=spf1|-all",
+            "TXT keeps its chunks SEPARATE — DKIM and SPF records rely on it",
+        )
+        val cname = dns.parse(message, 5)
+        checkEqual(cname.firstOrNull()?.get("value").toString(), "example.com", "CNAME is a single name")
+        val soa = dns.parse(message, 6)
+        checkEqual(soa.firstOrNull()?.get("nsname").toString(), "ns.example.com", "SOA names its primary")
+        checkEqual(soa.firstOrNull()?.get("refresh").toString(), "7200", "and its refresh interval")
+        check(dns.parse(message, 33).isEmpty(), "a type the answer does not carry yields nothing")
+        check(dns.parse(ByteArray(4), 1).isEmpty(), "a truncated message yields nothing rather than throwing")
+
+        liveDnsCorpus(node, scratch)
+    } finally {
+        dns.close()
+    }
+}
+
+/**
+ * One DNS response, assembled here: two questions' worth of header, then five answers, with the
+ * MX exchange and the SOA names written as COMPRESSION POINTERS back into the message. That is the
+ * shape a real answer has and the reason `expand` exists.
+ */
+private fun dnsAnswer(): ByteArray {
+    val out = java.io.ByteArrayOutputStream()
+    fun u16(value: Int) { out.write(value shr 8); out.write(value and 0xff) }
+    fun u32(value: Long) {
+        out.write((value shr 24).toInt() and 0xff); out.write((value shr 16).toInt() and 0xff)
+        out.write((value shr 8).toInt() and 0xff); out.write(value.toInt() and 0xff)
+    }
+    fun name(vararg labels: String) {
+        for (label in labels) { out.write(label.length); out.write(label.toByteArray()) }
+        out.write(0)
+    }
+    u16(0x1234); u16(0x8180); u16(1); u16(5); u16(0); u16(0)
+    val questionAt = out.size()          // 12 — where "example.com" begins
+    name("example", "com"); u16(255); u16(1)
+
+    fun record(type: Int, ttl: Long, body: ByteArray) {
+        out.write(0xc0); out.write(questionAt)       // the owner name, by pointer
+        u16(type); u16(1); u32(ttl); u16(body.size); out.write(body)
+    }
+    record(1, 3600, byteArrayOf(93.toByte(), 184.toByte(), 216.toByte(), 34))
+    record(5, 300, ByteArray(2) { if (it == 0) 0xc0.toByte() else questionAt.toByte() })
+
+    // MX: priority, then "mail" followed by a pointer to "example.com" — the compressed form.
+    val mx = java.io.ByteArrayOutputStream()
+    mx.write(0); mx.write(10)
+    mx.write(4); mx.write("mail".toByteArray()); mx.write(0xc0); mx.write(questionAt)
+    record(15, 900, mx.toByteArray())
+
+    val txt = java.io.ByteArrayOutputStream()
+    txt.write(6); txt.write("v=spf1".toByteArray())
+    txt.write(4); txt.write("-all".toByteArray())
+    record(16, 60, txt.toByteArray())
+
+    val soa = java.io.ByteArrayOutputStream()
+    soa.write(2); soa.write("ns".toByteArray()); soa.write(0xc0); soa.write(questionAt)
+    soa.write(9); soa.write("hostmaster".toByteArray().copyOf(9)); soa.write(0xc0); soa.write(questionAt)
+    for (value in listOf(2024L, 7200L, 3600L, 604800L, 300L)) {
+        soa.write((value shr 24).toInt() and 0xff); soa.write((value shr 16).toInt() and 0xff)
+        soa.write((value shr 8).toInt() and 0xff); soa.write(value.toInt() and 0xff)
+    }
+    record(6, 1800, soa.toByteArray())
+    return out.toByteArray()
+}
+
+/** The live half: our resolver's answers against real node's, for the same names. */
+private fun liveDnsCorpus(node: String?, scratch: File) {
+    if (node == null) {
+        println("  SKIP: no `node` — the live DNS cross-check needs one")
+        return
+    }
+    val answers = HashMap<String, String>()
+    val latch = java.util.concurrent.CountDownLatch(4)
+    val live = NodeDns { id, argsJson, _ ->
+        answers[id.toString()] = argsJson
+        latch.countDown()
+    }
+    if (live.servers.isEmpty()) {
+        println("  SKIP: no nameserver in /etc/resolv.conf — the live DNS cross-check needs one")
+        live.close()
+        return
+    }
+    // Names chosen for the same reason `verify/dnsres` chose them: stable, publicly documented,
+    // and answered the same way by every resolver.
+    live.resolve(1, "example.com", "TXT")
+    live.resolve(2, "gmail.com", "MX")
+    live.resolve(3, "example.com", "NS")
+    live.resolve(4, "this-name-does-not-exist-mouse.invalid", "TXT")
+    if (!latch.await(30, TimeUnit.SECONDS)) {
+        println("  SKIP: the network did not answer within 30s — the live DNS cross-check needs it")
+        live.close()
+        return
+    }
+    live.close()
+
+    val probe = File(scratch, "dnsprobe.js")
+    probe.writeText(
+        """
+        const dns = require('dns');
+        const [, , kind] = process.argv;
+        const done = (value) => { console.log(value); process.exit(0); };
+        if (kind === 'txt') dns.resolveTxt('example.com', (e, r) => done(e ? 'err' : JSON.stringify(r.map(c => c.join('')).sort())));
+        if (kind === 'mx') dns.resolveMx('gmail.com', (e, r) => done(e ? 'err' : JSON.stringify(r.map(x => x.priority + ':' + x.exchange).sort())));
+        if (kind === 'ns') dns.resolveNs('example.com', (e, r) => done(e ? 'err' : JSON.stringify(r.sort())));
+        """.trimIndent(),
+    )
+
+    fun ours(id: Int, shape: (Map<*, *>) -> String): String {
+        val parsed = Json.parse(answers[id.toString()] ?: "[]") as? List<*> ?: return "<none>"
+        val records = parsed.firstOrNull() as? List<*> ?: return "<none>"
+        if ((parsed.getOrNull(1) as? String).orEmpty().isNotEmpty()) return "err"
+        return records.mapNotNull { (it as? Map<*, *>)?.let(shape) }.sorted().let {
+            "[" + it.joinToString(",") { entry -> "\"$entry\"" } + "]"
+        }
+    }
+
+    val cases = listOf(
+        Triple("txt", 1, { record: Map<*, *> ->
+            @Suppress("UNCHECKED_CAST")
+            (record["chunks"] as? List<String>).orEmpty().joinToString("")
+        }),
+        Triple("mx", 2, { record: Map<*, *> -> "${record["priority"]}:${record["exchange"]}" }),
+        Triple("ns", 3, { record: Map<*, *> -> record["value"].toString() }),
+    )
+    for ((kind, id, shape) in cases) {
+        val (status, text) = run(listOf(node, probe.path, kind), scratch, 30)
+        if (status != 0 || text.trim() == "err") {
+            println("  SKIP: real node could not resolve $kind — the live DNS cross-check needs the network")
+            continue
+        }
+        checkEqual(ours(id, shape), text.trim(), "dns.resolve$kind agrees with real node for the same name")
+    }
+    // A name that does not exist must SAY so. The bootstrap turns the code into node's error, and
+    // an empty list where a code belongs reads as "no records" — a different fact entirely.
+    val missing = Json.parse(answers["4"] ?: "[]") as? List<*>
+    check(
+        (missing?.getOrNull(1) as? String).orEmpty().isNotEmpty(),
+        "a name that does not exist reports a CODE, not an empty list",
+    )
+}
+
+// ---------------------------------------------------------------------- http ----
+
+/**
+ * `NodeHttp` against a real node HTTP server.
+ *
+ * The head must be reported BEFORE the body — that is the whole difference between this transport
+ * and a buffering one, and AGENTS.md records that a fixture comparing only the concatenated body
+ * passes just as happily against a transport that buffers everything. So the ORDER of the events
+ * is what is asserted, not only their contents.
+ */
+private fun httpCorpus(node: String?, scratch: File) {
+    if (node == null) {
+        println("  SKIP: no `node` — the HTTP transport check needs a server to talk to")
+        return
+    }
+    val server = File(scratch, "httpserver.js")
+    server.writeText(
+        """
+        const http = require('http');
+        const server = http.createServer((request, response) => {
+          let body = '';
+          request.on('data', (c) => { body += c; });
+          request.on('end', () => {
+            if (request.url === '/slow') {
+              response.writeHead(200, { 'Content-Type': 'text/plain' });
+              response.write('one');
+              setTimeout(() => response.end('two'), 150);
+              return;
+            }
+            if (request.url === '/missing') { response.writeHead(404); response.end('nope'); return; }
+            response.writeHead(201, { 'X-Made': 'thing', 'Content-Type': 'text/plain' });
+            response.end('got:' + request.method + ':' + body);
+          });
+        });
+        server.listen(0, '127.0.0.1', () => console.log('PORT ' + server.address().port));
+        setTimeout(() => process.exit(0), 30000).unref();
+        """.trimIndent(),
+    )
+    val process = ProcessBuilder(node, server.path).directory(scratch).redirectErrorStream(true).start()
+    try {
+        val line = process.inputStream.bufferedReader().readLine()
+        val port = line?.removePrefix("PORT ")?.trim()?.toIntOrNull()
+        if (port == null) {
+            check(false, "the real node HTTP server announced its port (said: $line)")
+            return
+        }
+        val events = java.util.Collections.synchronizedList(ArrayList<Pair<String, String>>())
+        val done = java.util.concurrent.CountDownLatch(3)
+        val http = NodeHttp(
+            post = { id, argsJson, final ->
+                events.add(id.toString() to argsJson)
+                if (final) done.countDown()
+            },
+            retain = {}, release = {},
+        )
+        http.request(1, "http://127.0.0.1:$port/thing", "POST", """{"X-Try":"1"}""", base64("payload"))
+        http.stream(2, "http://127.0.0.1:$port/slow", "GET", "{}", "")
+        http.request(3, "http://127.0.0.1:$port/missing", "GET", "{}", "")
+        check(done.await(30, TimeUnit.SECONDS), "every HTTP request settled within 30s")
+        http.close()
+
+        val whole = Json.parse(events.first { it.first == "1" }.second) as? List<*>
+        val answer = whole?.firstOrNull() as? Map<*, *>
+        checkEqual(answer?.get("status").toString(), "201", "httpRequest reports the status")
+        checkEqual(
+            String(Base64.getDecoder().decode(answer?.get("body") as? String ?: ""), Charsets.UTF_8),
+            "got:POST:payload", "and carries the request body through and the response body back",
+        )
+        @Suppress("UNCHECKED_CAST")
+        val headers = answer?.get("headers") as? Map<String, String>
+        checkEqual(headers?.get("x-made") ?: "<absent>", "thing", "response headers arrive, lowercased as node reports them")
+
+        val streamed = events.filter { it.first == "2" }.map {
+            ((Json.parse(it.second) as? List<*>)?.firstOrNull() as? String).orEmpty()
+        }
+        checkEqual(
+            streamed.joinToString(","), "head,data,data,end",
+            "httpStream reports the HEAD first and each chunk as it arrives — a buffering " +
+                "transport would report head,data,end and look identical in the body",
+        )
+        val body = events.filter { it.first == "2" }
+            .mapNotNull { (Json.parse(it.second) as? List<*>) }
+            .filter { it.firstOrNull() == "data" }
+            .joinToString("") { String(Base64.getDecoder().decode(it[1] as String), Charsets.UTF_8) }
+        checkEqual(body, "onetwo", "and the streamed chunks reassemble to the whole body")
+
+        val notFound = (Json.parse(events.first { it.first == "3" }.second) as? List<*>)
+            ?.firstOrNull() as? Map<*, *>
+        checkEqual(notFound?.get("status").toString(), "404", "a 404 is an answer, not a failure")
+        checkEqual(
+            String(Base64.getDecoder().decode(notFound?.get("body") as? String ?: ""), Charsets.UTF_8),
+            "nope", "and its body arrives — node's fetch resolves a 404 with its content",
+        )
+    } finally {
+        process.destroyForcibly()
+    }
+}
+
 // ------------------------------------------------------------------ real node ----------
 
 private fun nodeBinary(): String? {
@@ -671,11 +1394,36 @@ private fun nodeBinary(): String? {
     return null
 }
 
-private fun run(command: List<String>, directory: File): Pair<Int, String> {
+/**
+ * Run a command and collect its output.
+ *
+ * The output is drained on its OWN thread and the wait is bounded. Reading the stream inline
+ * looks equivalent and is not: `readText()` returns at EOF, which for a child that hangs never
+ * comes — so a socket the child forgot to close turned a 120-second timeout into an indefinite
+ * one, and the harness looked hung rather than failing. AGENTS.md: a hang is a worse bug than an
+ * error. A child that overruns is killed and reports a non-zero status with whatever it managed
+ * to say.
+ */
+private fun run(command: List<String>, directory: File, timeoutSeconds: Long = 120): Pair<Int, String> {
     val process = ProcessBuilder(command).directory(directory).redirectErrorStream(true).start()
-    val text = process.inputStream.bufferedReader().readText()
-    process.waitFor(120, TimeUnit.SECONDS)
-    return process.exitValue() to text
+    val collected = StringBuilder()
+    val reader = Thread {
+        try {
+            process.inputStream.bufferedReader().forEachLine { collected.appendLine(it) }
+        } catch (_: Exception) {
+        }
+    }
+    reader.isDaemon = true
+    reader.start()
+    val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+    if (!finished) {
+        process.destroyForcibly()
+        process.waitFor(5, TimeUnit.SECONDS)
+        reader.join(2_000)
+        return -1 to (collected.toString() + "\n[killed after ${timeoutSeconds}s]")
+    }
+    reader.join(5_000)
+    return process.exitValue() to collected.toString()
 }
 
 /**
@@ -793,7 +1541,86 @@ private fun nodeCorpus(bootstrap: String, scratch: File) {
         for (failure in loaderFailures) println("  FAIL: $failure")
     }
 
+    // 3c's: net, http, dns and dgram through the shim, the job queue and the bootstrap's own
+    // modules. The SAME program the device gate runs — which is what makes an on-device MISMATCH
+    // mean the WebView rather than the corpus.
+    val socketRun = runSmoke(
+        node, bootstrap, scratch, "sockets",
+        NodeSocketSmoke.CONFIG.globalsScript(), NodeSocketSmoke.PROGRAM, NodeSocketSmoke.ENTRY_PATH,
+    )
+    if (socketRun != null) {
+        val socketFailures = NodeSocketSmoke.grade(socketRun.stdout, socketRun.stderr, socketRun.exit)
+        checks += NodeSocketSmoke.CHECK_COUNT
+        failures += socketFailures.size
+        for (failure in socketFailures) println("  FAIL: $failure")
+    }
+
     fsParityCorpus(node, bootstrap, scratch)
+    netFixtureCorpus(node, bootstrap, scratch)
+}
+
+/**
+ * `verify/neterrors` and `verify/reqsock`, run through the Android bridge and graded against the
+ * SAME checked-in `node.txt` iOS is graded against.
+ *
+ * Read straight out of `verify/` rather than copied, exactly as `:screencheck` reads its corpus and
+ * as `fsParityCorpus` reads `verify/fsparity`. A fixture that has been copied is a fixture that can
+ * drift, and a parity claim gated against a different file from the one the other platform is
+ * gated against is unfalsifiable.
+ *
+ * What these prove that [NodeSocketSmoke] does not is the ERROR family and the socket's reported
+ * STATE: EADDRINUSE from a second listen, `HPE_INVALID_METHOD` from a request that is not HTTP, an
+ * idle `setTimeout` firing, the 400 a bad request gets when nobody is listening for `clientError`,
+ * ECONNREFUSED — and `socket.server`, `bufferSize`, `localFamily`, `resetAndDestroy` reading back
+ * what node reports for the same socket.
+ */
+private fun netFixtureCorpus(node: String, bootstrap: String, scratch: File) {
+    // reqsock compares by LABEL, neterrors by position — each fixture's own rule, kept.
+    val cases = listOf(
+        Triple("neterrors", "probe.js", false),
+        Triple("reqsock", "probe.js", true),
+    )
+    for ((name, scriptName, byLabel) in cases) {
+        val script = File(repoRoot, "verify/$name/$scriptName")
+        val expectedFile = File(repoRoot, "verify/$name/node.txt")
+        check(script.exists() && expectedFile.exists(), "verify/$name is where the harness reads it from")
+        if (!script.exists() || !expectedFile.exists()) continue
+
+        val run = runSmoke(
+            node, bootstrap, scratch, name,
+            NodeProcessConfig(argv = listOf("node", "/probe.js"), cwd = "/").globalsScript(),
+            script.readText(), "/probe.js",
+        ) ?: continue
+
+        val expected = expectedFile.readText().trim().lines().filter { it.isNotBlank() }
+        val ours = run.stdout.trim().lines().filter { it.isNotBlank() }
+        var wrong = 0
+        if (byLabel) {
+            // reqsock keys on the text before the first ": " — extra lines on our side are
+            // ignored and a missing label reports itself, which is the harness's own rule.
+            val mine = ours.associate { it.substringBefore(": ") to it.substringAfter(": ", "") }
+            for (line in expected) {
+                val label = line.substringBefore(": ")
+                val want = line.substringAfter(": ", "")
+                val got = mine[label]
+                if (got != want) {
+                    wrong += 1
+                    println("  FAIL: $name [$label]\n      node: $want\n      ours: ${got ?: "<missing>"}")
+                }
+            }
+        } else {
+            for (i in 0 until maxOf(expected.size, ours.size)) {
+                val want = expected.getOrNull(i) ?: "<missing>"
+                val got = ours.getOrNull(i) ?: "<missing>"
+                if (want != got) {
+                    wrong += 1
+                    println("  FAIL: $name line ${i + 1}\n      node: $want\n      ours: $got")
+                }
+            }
+        }
+        checks += expected.size
+        failures += wrong
+    }
 }
 
 /**
@@ -870,6 +1697,7 @@ private val DRIVER = """
     // — a driver that had not saved these would be reporting into the thing it is testing.
     const realProcess = process;
     const realSetImmediate = setImmediate;
+    const realSetTimeout = setTimeout;
 
     // `process.exit()` unwinds by throwing a sentinel, AFTER `bridge.exit` has already recorded
     // the code. Thrown from a synchronous frame the shim catches it; thrown from an async
@@ -889,26 +1717,39 @@ private val DRIVER = """
     let nextId = 1;
     const timers = new Map();       // id -> { due, interval, refed }
     let immediates = [];
+    let jobs = [];                  // [handlerId, argsJson, final] — the iOS enqueueJob queue
     let exitCode = null;
     let holds = 0, stdinActive = false;
-    let clock = 0;                  // virtual milliseconds
     let stdout = '', stderr = '';
+
+    // A REAL clock, not a virtual one. The driver stands in for NodeWebView, and NodeWebView runs
+    // on a Handler with wall time under it; the socket half cannot be driven any other way, because
+    // its events arrive from the OS when the OS decides. A virtual clock that jumped to the next
+    // due time would fire a program's watchdog before its first packet had left.
+    const started = Date.now();
+    const now = () => Date.now() - started;
+
+    // Every completion the host hands back — socket events, DNS answers, HTTP chunks. Kotlin frames
+    // these with HostBridge.job; the shape is the contract and it is spelled the same here.
+    const postJob = (handlerId, args, final) => {
+      jobs.push([handlerId, JSON.stringify(args), final ? 1 : 0]);
+    };
 
     globalThis.__mouseHost = {
       asset: (name) => fs.readFileSync(name, 'utf8'),
       stdout: (text) => { stdout += text; },
       stderr: (text) => { stderr += text; },
       exit: (code) => { if (exitCode === null) exitCode = code; },
-      monotonicNanos: () => String(clock * 1000000),
+      monotonicNanos: () => realProcess.hrtime.bigint().toString(),
       setTimer: (delay, repeat) => {
         const id = nextId++;
         const ms = Math.max(1, delay);
-        timers.set(id, { due: clock + ms, interval: repeat ? ms : null, refed: true });
+        timers.set(id, { due: now() + ms, interval: repeat ? ms : null, refed: true });
         return id;
       },
       clearTimer: (id) => { timers.delete(id); },
       timerRef: (id, refed) => { const t = timers.get(id); if (t) t.refed = refed; },
-      timerRefresh: (id) => { const t = timers.get(id); if (t) t.due = clock + (t.interval || 1); },
+      timerRefresh: (id) => { const t = timers.get(id); if (t) t.due = now() + (t.interval || 1); },
       setImmediate: () => { const id = nextId++; immediates.push(id); return id; },
       clearImmediate: (id) => { const at = immediates.indexOf(id); if (at >= 0) immediates.splice(at, 1); },
       loopHold: (on) => { holds += on ? 1 : -1; },
@@ -950,9 +1791,293 @@ private val DRIVER = """
       // ENGINE's, whose cpuUsage() calls straight back into this method. The stack overflow that
       // produced was the only symptom.
       cpuUsage: () => { const u = realProcess.cpuUsage(); return JSON.stringify({ user: u.user, system: u.system }); },
-      loopUtilization: () => JSON.stringify({ idle: clock, active: 0 }),
+      loopUtilization: () => JSON.stringify({ idle: now(), active: 0 }),
       setRawMode: () => {},
+
+      // ---- sockets, dns and the TLS transport ----
+      //
+      // Real node's own `net`, `dns`, `dgram` and `https`, exactly as the filesystem half of this
+      // stand-in is real node's own `fs`. That is deliberate and it is the same disposition
+      // milestone 3b took for the module loader: the thing under test here is `node-host.js` and
+      // the bootstrap above it — the marshalling, the handler registry, the job queue, the `net`
+      // and `http` modules — and grading those against a JavaScript re-implementation of
+      // `NodeSockets` would prove nothing about either. The KOTLIN table is graded separately and
+      // more strictly, against real node PEERS on a real wire (`socketsCorpus`). The two meet for
+      // the first time on a device.
+      netConnect: (host, port) => openSocket(realNet.connect({ host, port, allowHalfOpen: true })),
+      netListen: (host, port, backlog) => openServer(host, port, backlog),
+      netWrite: (id, base64) => {
+        const entry = handles.get(id);
+        if (!entry || entry.closed) return true;
+        return entry.socket.write(Buffer.from(base64, 'base64'));
+      },
+      netEnd: (id) => { const e = handles.get(id); if (e && !e.closed) e.socket.end(); },
+      netDestroy: (id) => {
+        const e = handles.get(id);
+        if (!e || e.closed) return;
+        // Three kinds of handle answer to one bridge name, as they do in the Kotlin table: a
+        // listening server, a stream socket, and a datagram socket — `dgram`'s close() lands here
+        // too, which is what the first version of this stand-in missed.
+        if (e.server) {
+          try { e.server.close(); } catch (err) {}
+          retire(id);
+          postJob(id, [id, 'close', null], lastForOwner(id, id));
+        } else if (e.datagram) {
+          try { e.datagram.close(); } catch (err) { retire(id); postJob(id, [id, 'close', null], lastForOwner(id, id)); }
+        } else {
+          e.socket.destroy();
+        }
+      },
+      netPause: (id) => { const e = handles.get(id); if (e && e.socket) e.socket.pause(); },
+      netResume: (id) => { const e = handles.get(id); if (e && e.socket) e.socket.resume(); },
+      netRef: (id, refed) => {
+        const e = handles.get(id);
+        if (!e || e.refed === refed) return;
+        e.refed = refed;
+        holds += refed ? 1 : -1;
+        const handle = e.server || e.socket;
+        if (handle) { if (refed) handle.ref(); else handle.unref(); }
+      },
+      netNoDelay: (id, on) => { const e = handles.get(id); if (e && e.socket && e.socket.setNoDelay) e.socket.setNoDelay(on); },
+      netKeepAlive: (id, on, delay) => { const e = handles.get(id); if (e && e.socket && e.socket.setKeepAlive) e.socket.setKeepAlive(on, delay); },
+      netResolve: (host, family) => {
+        const id = nextId++;
+        holds += 1;
+        realDns.lookup(host, { all: true, family: family || 0 }, (error, found) => {
+          const list = (found || []).map((entry) => ({ address: entry.address, family: entry.family }));
+          postJob(id, [list, list.length ? '' : 'ENOTFOUND'], true);
+          holds -= 1;
+        });
+        return id;
+      },
+
+      // The dns.resolve* family. `dnsDone` gives the handle back, so it is taken by the QUERY —
+      // the iOS `pendingLookups` pair, and the bootstrap calls it exactly once per answer.
+      dnsResolve: (name, type) => resolveRecords(name, type),
+      dnsReverse: (address) => {
+        const id = nextId++;
+        holds += 1;
+        realDns.reverse(address, (error, names) => {
+          postJob(id, [names || [], error ? (error.code || 'ENOTFOUND') : ''], true);
+        });
+        return id;
+      },
+      dnsService: (address, port) => {
+        const id = nextId++;
+        holds += 1;
+        realDns.lookupService(address, port, (error, host, service) => {
+          postJob(id, [host || '', service || '', error ? (error.code || 'ENOTFOUND') : ''], true);
+        });
+        return id;
+      },
+      dnsDone: () => { holds -= 1; },
+
+      httpRequest: (url, method, headersJson, bodyBase64) => transport(url, method, headersJson, bodyBase64, false),
+      httpStream: (url, method, headersJson, bodyBase64) => transport(url, method, headersJson, bodyBase64, true),
+
+      dgramBind: (host, port, broadcast) => bindDatagram(host, port, broadcast),
+      dgramSend: (id, base64, host, port) => {
+        const cb = nextId++;
+        const entry = handles.get(id);
+        if (!entry || !entry.datagram) { postJob(cb, ['EBADF'], true); return cb; }
+        entry.datagram.send(Buffer.from(base64, 'base64'), port, host, (error) => {
+          postJob(cb, [error ? (error.code || 'EBADF') : ''], true);
+        });
+        return cb;
+      },
+      dgramMembership: (id, group, iface, join) => {
+        const entry = handles.get(id);
+        if (!entry || !entry.datagram) return 'EBADF';
+        try {
+          if (join) entry.datagram.addMembership(group, iface || undefined);
+          else entry.datagram.dropMembership(group, iface || undefined);
+          return '';
+        } catch (e) { return e.code || 'EINVAL'; }
+      },
+      dgramOption: (id, ttl, loopback, iface) => {
+        const entry = handles.get(id);
+        if (!entry || !entry.datagram) return;
+        try {
+          if (ttl >= 0) entry.datagram.setMulticastTTL(ttl);
+          if (loopback >= 0) entry.datagram.setMulticastLoopback(loopback === 1);
+          if (iface) entry.datagram.setMulticastInterface(iface);
+        } catch (e) {}
+      },
     };
+
+    // ---- the socket stand-in's own bookkeeping ----
+    const realNet = require('net');
+    const realDns = require('dns');
+    const realDgram = require('dgram');
+    const realHttp = require('http');
+    const realHttps = require('https');
+    const { URL: RealURL } = require('url');
+
+    const handles = new Map();   // id -> { socket|server|datagram, ownerId, refed, closed }
+
+    const place = (address) => ({
+      address: (address && address.address) || '',
+      port: (address && address.port) || 0,
+      family: (address && String(address.family).indexOf('6') >= 0) ? 'IPv6' : 'IPv4',
+    });
+
+    function retire(id) {
+      const entry = handles.get(id);
+      if (!entry || entry.closed) return;
+      entry.closed = true;
+      handles.delete(id);
+      if (entry.refed) holds -= 1;
+    }
+
+    // A handler may be dropped only when the OWNER and every socket routed through it are gone.
+    // `server.close()` retires the listener while its connections are still finishing, so
+    // "this entry is its own owner" is not enough — dropping there loses their remaining events,
+    // and a `server.close(cb)` whose callback never fires is the symptom. Same rule as
+    // NodeSockets.teardown; this stand-in has to keep it or it would grade a different contract.
+    function lastForOwner(id, ownerId) {
+      if (id !== ownerId && handles.has(ownerId)) return false;
+      for (const entry of handles.values()) if (entry.ownerId === ownerId) return false;
+      return true;
+    }
+
+    // Every event of a socket goes to the handler its OWNER was registered under, which for an
+    // accepted socket is the SERVER's — the rule that closes the window where a connection exists
+    // with nothing listening for it. `final` is true only for the owner's own close.
+    function wire(id, ownerId, socket) {
+      socket.on('data', (chunk) => postJob(ownerId, [id, 'data', chunk.toString('base64')], false));
+      socket.on('end', () => postJob(ownerId, [id, 'end', null], false));
+      socket.on('drain', () => postJob(ownerId, [id, 'drain', null], false));
+      socket.on('error', (e) => postJob(ownerId, [id, 'error', { message: e.message, code: e.code || 'ECONNRESET' }], false));
+      socket.on('close', () => {
+        retire(id);
+        postJob(ownerId, [id, 'close', null], lastForOwner(id, ownerId));
+      });
+    }
+
+    function openSocket(socket) {
+      const id = nextId++;
+      holds += 1;
+      handles.set(id, { socket, ownerId: id, refed: true, closed: false });
+      socket.on('connect', () => postJob(id, [id, 'connect', {
+        local: place({ address: socket.localAddress, port: socket.localPort, family: socket.localFamily }),
+        remote: place({ address: socket.remoteAddress, port: socket.remotePort, family: socket.remoteFamily }),
+      }], false));
+      wire(id, id, socket);
+      return id;
+    }
+
+    function openServer(host, port, backlog) {
+      const id = nextId++;
+      holds += 1;
+      const server = realNet.createServer({ allowHalfOpen: true });
+      handles.set(id, { server, ownerId: id, refed: true, closed: false });
+      server.on('listening', () => postJob(id, [id, 'listening', place(server.address())], false));
+      server.on('error', (e) => {
+        postJob(id, [id, 'error', { message: e.message, code: e.code || 'EADDRINUSE' }], false);
+        retire(id);
+        postJob(id, [id, 'close', null], lastForOwner(id, id));
+      });
+      server.on('connection', (socket) => {
+        const accepted = nextId++;
+        holds += 1;
+        handles.set(accepted, { socket, ownerId: id, refed: true, closed: false });
+        wire(accepted, id, socket);
+        postJob(id, [id, 'connection', {
+          id: accepted,
+          local: place({ address: socket.localAddress, port: socket.localPort, family: socket.localFamily }),
+          remote: place({ address: socket.remoteAddress, port: socket.remotePort, family: socket.remoteFamily }),
+        }], false);
+      });
+      server.listen(port, host || '0.0.0.0', backlog || 511);
+      return id;
+    }
+
+    function bindDatagram(host, port, broadcast) {
+      const id = nextId++;
+      holds += 1;
+      const datagram = realDgram.createSocket({ type: 'udp4', reuseAddr: true });
+      handles.set(id, { datagram, ownerId: id, refed: true, closed: false });
+      datagram.on('listening', () => {
+        if (broadcast) { try { datagram.setBroadcast(true); } catch (e) {} }
+        postJob(id, [id, 'listening', place(datagram.address())], false);
+      });
+      datagram.on('message', (message, from) => postJob(id, [id, 'datagram', {
+        data: message.toString('base64'), from: place(from),
+      }], false));
+      datagram.on('error', (e) => postJob(id, [id, 'error', { message: e.message, code: e.code || 'EBADF' }], false));
+      datagram.on('close', () => { retire(id); postJob(id, [id, 'close', null], lastForOwner(id, id)); });
+      datagram.bind(port, host || '0.0.0.0');
+      return id;
+    }
+
+    function resolveRecords(name, type) {
+      const id = nextId++;
+      const method = 'resolve' + type;
+      if (typeof realDns[method] !== 'function') { postJob(id, [[], 'ENOTIMP'], true); return id; }
+      realDns[method](name, (error, records) => {
+        if (error) { postJob(id, [[], error.code || 'ENOTFOUND'], true); return; }
+        postJob(id, [reshape(type, records), ''], true);
+      });
+      return id;
+    }
+
+    // node's dns module hands back its PUBLIC shapes; the bridge contract is the RAW record shape
+    // the iOS host produces, which the bootstrap then reshapes into the public one. So this turns
+    // node's answers back into raw records — the inverse of what the bootstrap does, which is what
+    // makes the round trip through the bootstrap a real test of it.
+    function reshape(type, records) {
+      if (type === 'Txt') return records.map((chunks) => ({ chunks }));
+      if (type === 'Ns' || type === 'Cname' || type === 'Ptr') return records.map((value) => ({ value }));
+      if (type === 'Soa') return [records];
+      if (type === 'Caa') return records.map((entry) => {
+        const tag = Object.keys(entry).filter((k) => k !== 'critical')[0];
+        return { critical: entry.critical, tag, value: entry[tag] };
+      });
+      if (type === 'Tlsa') return records.map((r) => ({
+        certUsage: r.certUsage, selector: r.selector, match: r.match,
+        data: Array.from(new Uint8Array(r.data || new ArrayBuffer(0))),
+      }));
+      return records;
+    }
+
+    function transport(urlText, method, headersJson, bodyBase64, streaming) {
+      const id = nextId++;
+      holds += 1;
+      let target;
+      try { target = new RealURL(urlText); }
+      catch (e) {
+        postJob(id, streaming ? ['error', 'invalid URL: ' + urlText] : [{ error: 'invalid URL: ' + urlText }], true);
+        holds -= 1;
+        return id;
+      }
+      const client = target.protocol === 'https:' ? realHttps : realHttp;
+      const body = bodyBase64 ? Buffer.from(bodyBase64, 'base64') : null;
+      const request = client.request(urlText, {
+        method: method || 'GET',
+        headers: JSON.parse(headersJson || '{}'),
+      }, (response) => {
+        const headers = {};
+        for (const key of Object.keys(response.headers)) headers[key] = String(response.headers[key]);
+        const chunks = [];
+        if (streaming) postJob(id, ['head', { status: response.statusCode, headers }], false);
+        response.on('data', (chunk) => {
+          if (streaming) postJob(id, ['data', chunk.toString('base64')], false);
+          else chunks.push(chunk);
+        });
+        response.on('end', () => {
+          if (streaming) postJob(id, ['end', null], true);
+          else postJob(id, [{ status: response.statusCode, headers, body: Buffer.concat(chunks).toString('base64') }], true);
+          holds -= 1;
+        });
+      });
+      request.on('error', (e) => {
+        postJob(id, streaming ? ['error', e.message] : [{ error: e.message }], true);
+        holds -= 1;
+      });
+      if (body) request.write(body);
+      request.end();
+      return id;
+    }
 
     // ---- workspace-virtual paths, the one rule the stand-in must copy exactly ----
     // Through realpath: on macOS the temporary directory is a symlink, and node reports resolved
@@ -1086,8 +2211,20 @@ private val DRIVER = """
     // One turn is exactly NodeWebView.pump(): ready immediates as a batch, else the earliest due
     // timer, else advance to the next due time — and quiescence (no ref'd timer, no hold, no
     // stdin listener) ends it.
+    // JOBS FIRST, then immediates, then the earliest due timer. That is `runEventLoop`'s own
+    // sequence and `NodeWebView.pump`'s: an I/O completion outranks work that was merely
+    // scheduled, which is what makes a socket's data reach its handler ahead of a timer set after
+    // it. Both queues are snapshotted before they run — anything queued DURING a batch belongs to
+    // the next turn, or timers starve forever.
+    const parked = { until: 0 };
     const turn = () => {
       if (exitCode !== null) return false;
+      if (jobs.length) {
+        const batch = jobs;
+        jobs = [];
+        globalThis.__mouseDispatch.jobs(batch);
+        return true;
+      }
       if (immediates.length) {
         const batch = immediates;
         immediates = [];
@@ -1096,20 +2233,23 @@ private val DRIVER = """
       }
       let due = null;
       for (const [id, t] of timers) {
-        if (t.due <= clock && (due === null || t.due < timers.get(due).due)) due = id;
+        if (t.due <= now() && (due === null || t.due < timers.get(due).due)) due = id;
       }
       if (due !== null) {
         const t = timers.get(due);
-        if (t.interval !== null) t.due = clock + t.interval; else timers.delete(due);
+        if (t.interval !== null) t.due = now() + t.interval; else timers.delete(due);
         globalThis.__mouseDispatch.timer(due);
         return true;
       }
       const quiet = holds === 0 && !stdinActive && ![...timers.values()].some((t) => t.refed);
       if (quiet) return false;
+      // Not quiet, nothing ready: PARK. `holds` here is an open socket or an in-flight lookup, and
+      // the answer arrives when the OS says so — the branch the iOS loop spends in
+      // `wakeup.wait(timeout: .now() + 60)`. Waiting a real millisecond is what lets node's own
+      // event loop run and deliver it.
       let soonest = null;
       for (const t of timers.values()) if (soonest === null || t.due < soonest) soonest = t.due;
-      if (soonest === null) return false;
-      clock = soonest;
+      parked.until = soonest === null ? now() + 2 : Math.min(soonest, now() + 20);
       return true;
     };
 
@@ -1118,27 +2258,45 @@ private val DRIVER = """
     // spun synchronously would never let a promise reaction run and would grade the ordering
     // wrong, in the engine's favour.
     const yieldTurn = () => new Promise((resolve) => realSetImmediate(resolve));
+    const realSleep = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
 
     (async () => {
       const result = JSON.parse(globalThis.__mouseDispatch.entry(
         fs.readFileSync('program.js', 'utf8'), fs.readFileSync('entry-path.txt', 'utf8').trim()));
       if (!result.ok) fs.writeFileSync('entry-error.txt', String(result.error));
-      let n = 0;
-      while (n++ < 2000) {
+      // Bounded by WALL TIME rather than turn count: with real sockets a turn can be a park, and a
+      // program waiting on the network legitimately takes thousands of them.
+      while (Date.now() - started < 90000) {
+        parked.until = 0;
         await yieldTurn();
         if (!turn()) break;
+        if (parked.until > now()) await realSleep(Math.max(1, parked.until - now()));
       }
       globalThis.__mouseDispatch.finish();
       fs.writeFileSync('out.txt', stdout);
       fs.writeFileSync('err.txt', stderr);
       fs.writeFileSync('exit.txt', String(exitCode));
+      // Close every handle the stand-in opened and LEAVE. This is `SocketTable.closeAll()` — a
+      // program that forgot its server must not outlive itself — and here it is also what lets the
+      // process end at all: node's own loop stays awake for a listening socket, so without this
+      // the driver finishes its work and then hangs forever with nothing to do, which the harness
+      // reading its stdout would wait on indefinitely.
+      for (const entry of handles.values()) {
+        try { (entry.server || entry.socket || entry.datagram).destroy ? (entry.server || entry.socket || entry.datagram).destroy() : (entry.server || entry.datagram).close(); }
+        catch (e) {}
+      }
+      realProcess.exit(0);
     })();
 """.trimIndent()
 
 
 // -------------------------------------------------------------------------- main ----------
 
+/** `--keep-scratch`: do not delete the smokes' directories, so a failure can be read afterwards. */
+private var keepScratch = false
+
 fun main(args: Array<String>) {
+    keepScratch = args.contains("--keep-scratch")
     val sync = args.contains("--sync")
     if (sync) {
         val extracted = Bootstrap.extract(swiftFile.readText())
@@ -1164,16 +2322,25 @@ fun main(args: Array<String>) {
         val node = nodeBinary()
         fsCorpus(node, scratch)
         resolverCorpus(node, scratch)
+        socketsCorpus(node)
+        dnsCorpus(node, scratch)
+        httpCorpus(node, scratch)
         nodeCorpus(bootstrap, scratch)
     } finally {
-        scratch.deleteRecursively()
+        // `--args=--keep-scratch` leaves the smoke's directories in place. A smoke that fails is
+        // graded on files it wrote (out.txt, err.txt, entry-error.txt) and deleting them is
+        // deleting the evidence — the same reason `verify/unixsock` leaves its temp dir on
+        // failure.
+        if (!keepScratch) scratch.deleteRecursively() else println("  scratch kept at ${scratch.path}")
     }
 
     if (failures == 0) {
         println(
             "NODE LAYER: $checks checks — bootstrap drift vs swift/Mouse/NodeEngine.swift, bridge " +
                 "partition, process globals, event loop, cpu time, filesystem and module " +
-                "resolution vs real node, node --check, load smoke, verify/fsparity — MATCH",
+                "resolution vs real node, sockets vs real node peers on a real wire, the DNS wire " +
+                "format and resolvers vs real node, the TLS transport's streaming, node --check, " +
+                "load smoke, verify/fsparity, verify/neterrors, verify/reqsock — MATCH",
         )
     } else {
         println("NODE LAYER: $failures of $checks checks failed — MISMATCH")

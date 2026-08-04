@@ -38,10 +38,15 @@ object NodeSmoke {
         let requireCode = 'no-throw';
         try { requireCode = typeof globalThis.__mouseRequire('fs').readFileSync; }
         catch (e) { requireCode = e.code || e.message; }
-        // A surface with no Android host binding must still refuse BY NAME. `netConnect` is one
-        // of the generated stubs; `NodeFsSmoke` probes the whole list, both directions.
+        // A surface with no Android host binding must still refuse BY NAME. `cryptoHash` is one of
+        // the generated stubs; `NodeFsSmoke` probes the whole list, both directions.
+        //
+        // This used to probe `netConnect`, and 3c is what made that wrong: the moment sockets were
+        // real, a check asserting they refuse became a check asserting a regression. That is the
+        // partition doing its job — it went red and named the line, rather than the capability
+        // quietly disagreeing with the record.
         let refusal = 'no-throw';
-        try { globalThis.__mouse.netConnect('127.0.0.1', 1); }
+        try { globalThis.__mouse.cryptoHash('sha256', ''); }
         catch (e) { refusal = e.code || e.message; }
 
         setTimeout(function(){

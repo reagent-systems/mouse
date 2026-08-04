@@ -2,6 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        The Node layer's `dns.resolve*` family asks a nameserver directly, and the only way to
+        learn which nameserver is the active network's LinkProperties. Android has no
+        /etc/resolv.conf, so without this the record resolvers have nothing to ask and say so
+        (ESERVFAIL) rather than guessing a public resolver. `dns.lookup` is unaffected — that is
+        getaddrinfo, which needs no permission.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:label="@string/app_name"

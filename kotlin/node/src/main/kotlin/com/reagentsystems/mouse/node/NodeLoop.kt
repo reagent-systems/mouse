@@ -46,6 +46,7 @@ class NodeLoop {
     private var nextId = 1
     private val timers = LinkedHashMap<Int, Timer>()
     private val immediates = ArrayList<Int>()
+    private val jobs = ArrayList<String>()
     private var holds = 0
 
     /** True while JavaScript has a live stdin listener. Holds the loop open, as on iOS. */
@@ -132,6 +133,35 @@ class NodeLoop {
         batch
     }
 
+    // ---------------------------------------------------------------------- jobs ----
+
+    /**
+     * An I/O completion waiting to re-enter JavaScript — a socket event, a DNS answer, an HTTP
+     * chunk. This is the iOS `enqueueJob` queue, and the loop drains it FIRST, before immediates
+     * and before timers, exactly as `runEventLoop` does.
+     *
+     * The entry is opaque here on purpose: it is the framing `HostBridge.job` produced, and this
+     * object holds no JavaScript values and makes no decisions about them. What it owns is the
+     * ORDER — and the fact that a queued job is work, so a program with one pending is not
+     * finished.
+     *
+     * Posted from the socket, resolver and HTTP threads; drained on the thread that owns the
+     * WebView. Hence the lock every other member here already takes.
+     */
+    fun postJob(entry: String) = lock.withLock { jobs.add(entry); Unit }
+
+    /**
+     * Take the whole job queue as one batch. A job posted WHILE the batch runs belongs to the next
+     * turn — the same snapshot rule immediates follow, and for the same reason: draining a live
+     * queue starves everything behind it.
+     */
+    fun takeJobs(): List<String> = lock.withLock {
+        if (jobs.isEmpty()) return@withLock emptyList()
+        val batch = ArrayList(jobs)
+        jobs.clear()
+        batch
+    }
+
     // ------------------------------------------------------------------ handles ----
 
     /** `bridge.loopHold`. An open handle keeps the process alive with nothing else scheduled. */
@@ -150,7 +180,8 @@ class NodeLoop {
      * work already queued.
      */
     fun isQuiescent(): Boolean = lock.withLock {
-        immediates.isEmpty() && holds == 0 && !stdinActive && timers.values.none { it.refed }
+        jobs.isEmpty() && immediates.isEmpty() && holds == 0 && !stdinActive &&
+            timers.values.none { it.refed }
     }
 
     /**
@@ -159,7 +190,7 @@ class NodeLoop {
      * or ends the run, per [isQuiescent]).
      */
     fun nextWaitMillis(nowNanos: Long): Long? = lock.withLock {
-        if (immediates.isNotEmpty()) return@withLock 0L
+        if (jobs.isNotEmpty() || immediates.isNotEmpty()) return@withLock 0L
         val next = timers.values.minByOrNull { it.dueNanos } ?: return@withLock null
         ((next.dueNanos - nowNanos + 999_999L) / 1_000_000L).coerceAtLeast(0L)
     }
