@@ -200,18 +200,24 @@ commands.
   sockets, the `cluster` descriptor handoff and the `WebSocket` global, each
   refusing by name with its own reason; and `npm`/`npx`/`npm run` in Kotlin
   msh, which wait on G because they exist to run what they install.
-- **Two of the three Android stop-condition legs now pass on an emulator,
-  each with a screenshot.** (a) `pkg install python` then `python hello.py`
+- **All three Android stop-condition legs now pass on an emulator, each with a
+  screenshot.** (a) `pkg install python` then `python hello.py`
   prints `python says 42`; (b) a `node server.js` dev server inside the app
-  answers a real `curl` from the host machine over `adb forward`. Getting
+  answers a real `curl` from the host machine over `adb forward`; (c) `npx
+  create-vite` renders its prompts on the phase-T grid, takes a typed project
+  name, and moves its framework selection by taps on the key strip. Getting
   there took the msh→engine launch path (`MouseShell.NodeRun` → `NodeRunner` →
   `NodeWebView`) plus three walls that are this platform's alone: V8 refuses a
   synchronous `WebAssembly.Module` over 8 MB on the main thread, the shared
   bootstrap REPLACES V8's async wasm API with the synchronous one for a
   JavaScriptCore reason that inverts here, and `randomBytes` was deferred
-  while CPython asks for entropy before `main`. Leg (c) — `npx create-vite`
-  driven by touch — waits on 3d for `npm`/`npx` and on the backspace routing
-  the plan already records.
+  while CPython asks for entropy before `main`. Leg (c) additionally needed the
+  ES module transpiler ported (`EsmTranspiler`, from `rewriteImportForms` and
+  `transpileESM`, gated differentially against real node), the T↔G join so a
+  program can own the phase-T screen, ONLCR — without which every frame sheared
+  diagonally — and two faults that together swallowed every keystroke:
+  `stdinIsComplete` handing an interactive program an already-ended stream, and
+  the prompt field sending its whole composing region instead of the delta.
 - Running an installed runtime on Android is closer than the plan assumed, and
   for a reason worth recording: the shared bootstrap reaches for the standard
   `WebAssembly.*` API rather than shipping an interpreter, so Android gets V8's

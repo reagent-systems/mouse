@@ -308,6 +308,13 @@ class TerminalSession(val root: File) {
                                 // one of them takes its default and the menu never appears — which
                                 // is exactly what `npx create-vite` did before this.
                                 isTty = interactive,
+                                // An interactive program's stdin is NOT complete: more is coming,
+                                // from the keyboard. The default says the opposite — correct for
+                                // 3a, where nothing was attached and a reader had to reach EOF
+                                // rather than wait forever — and leaving it there hands a TUI a
+                                // stream that has already ended, so every keystroke pushed into
+                                // it afterwards lands on a finished pipe.
+                                stdinIsComplete = !interactive,
                                 ttyRows = gridRows,
                                 ttyColumns = gridColumns,
                             ),
@@ -483,22 +490,38 @@ fun TerminalContainer(deck: CarouselDeck) {
                 value = field,
                 onValueChange = { new ->
                     when {
-                        // A program owns the keyboard: every character is a keystroke to it, and
-                        // the field stays empty so it never accumulates a line the program has
-                        // already consumed.
+                        // A program owns the keyboard. Every change becomes keystrokes by
+                        // DIFFING against what the field held before, and the field is left
+                        // exactly as the IME wrote it.
                         //
-                        // BACKSPACE DOES NOT REACH THE PROGRAM, and the fix is not the obvious
-                        // one. An empty field has nothing to delete, so Compose fires no
-                        // `onValueChange` for the key. Parking an invisible sentinel character
-                        // here to make every deletion an edit was tried and REVERTED: with the
-                        // field rewritten on each change the IME and the field's own state
-                        // disagree, and typed text stopped arriving at the program altogether —
-                        // arrows still worked, because the key strip never touches this field.
-                        // Trading a capability that works for one that was never demonstrated is
-                        // a bad trade, so this stays as it is until the IME path is understood.
+                        // Sending `new.text` outright — what this did — sends the whole COMPOSING
+                        // REGION each time the IME revises it, so typing "mouse-app" reached the
+                        // program as "m" + "mo" + "mou" + … concatenated. That was visible on
+                        // screen the moment stdin was left open: `mmomoumousmousemouse-mouse-app`.
+                        //
+                        // Nothing is written back into the field, which is the other half. iOS
+                        // vetoes the edit instead (`shouldChangeCharactersIn` returns false, so
+                        // UITextField never changes); Compose has no veto, and a value the IME did
+                        // not ask for, applied while it owns a composing region, desyncs the
+                        // connection.
+                        //
+                        // A shrinking field is backspace: DEL, once per character removed, which
+                        // is how every terminal encodes it. The field is invisible while a
+                        // program runs — see the text style below.
                         terminal.program != null -> {
-                            if (new.text.isNotEmpty()) terminal.sendKey(new.text)
-                            field = TextFieldValue("")
+                            val before = field.text
+                            val after = new.text
+                            if (after.length > before.length && after.startsWith(before)) {
+                                terminal.sendKey(after.substring(before.length))
+                            } else if (after.length < before.length && before.startsWith(after)) {
+                                repeat(before.length - after.length) { terminal.sendKey("\u007f") }
+                            } else if (after != before) {
+                                // A replacement the IME made in one step (autocorrect, a
+                                // suggestion): delete what was there, then type what is now.
+                                repeat(before.length) { terminal.sendKey("\u007f") }
+                                if (after.isNotEmpty()) terminal.sendKey(after)
+                            }
+                            field = new
                         }
                         // While a command runs, any keypress interrupts it (input is refused anyway).
                         terminal.isRunning -> terminal.interrupt()
@@ -506,12 +529,23 @@ fun TerminalContainer(deck: CarouselDeck) {
                     }
                 },
                 singleLine = true,
-                textStyle = TextStyle(fontFamily = mono, fontSize = Theme.codeSize, color = Theme.onContainer),
-                cursorBrush = SolidColor(Theme.onContainer),
+                // Invisible while a program owns the keyboard: the field still holds what the
+                // IME wrote — it must, or the diff above has nothing to diff against — but the
+                // program has already drawn those characters where it wants them.
+                textStyle = TextStyle(
+                    fontFamily = mono,
+                    fontSize = Theme.codeSize,
+                    color = if (terminal.program != null) Color.Transparent else Theme.onContainer,
+                ),
+                cursorBrush = SolidColor(if (terminal.program != null) Color.Transparent else Theme.onContainer),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = {
                     // Return is Enter to a program, and "run this line" at the prompt.
-                    if (terminal.sendKey("\r")) return@KeyboardActions
+                    if (terminal.sendKey("\r")) {
+                        // The line belongs to the program now; the field starts the next one empty.
+                        field = TextFieldValue("")
+                        return@KeyboardActions
+                    }
                     if (terminal.run(field.text, scope, workspace)) field = TextFieldValue("")
                 }),
                 modifier = Modifier.padding(start = 6.dp).fillMaxWidth(),

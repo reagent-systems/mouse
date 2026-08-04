@@ -253,31 +253,23 @@ each with a screenshot:
   `onValueChange` is losing keystrokes, which makes the missing backspace one
   symptom of a bigger fault rather than the whole of it.
 
-  Two candidate fixes have been tried and BOTH REVERTED, which narrows it:
+  **FIXED, and it was two faults wearing one coat:**
 
-  - an invisible sentinel in the field, so a deletion is always an edit. Did
-    not restore typed input, so "an empty field has nothing to delete" is not
-    the cause.
-  - routing by DIFF against the field's previous value and never writing a
-    value the IME did not produce — the closest Compose analogue to iOS's
-    `shouldChangeCharactersIn` returning false, which is how the Swift side
-    avoids this entirely. Exercised against a running create-vite and the
-    characters still did not arrive.
+  - `stdinIsComplete` defaulted to TRUE, which is right for 3a — nothing
+    attached, so a reader must reach EOF rather than wait forever — and hands
+    an interactive program a stream that has ALREADY ENDED. Every keystroke
+    pushed into it afterwards landed on a finished pipe. Now `!interactive`.
+  - the field sent `new.text` outright, which is the whole COMPOSING REGION
+    each time the IME revises it: typing `mouse-app` arrived as `m` + `mo` +
+    `mou` + … concatenated, visible on screen as
+    `mmomoumousmousemouse-mouse-app` the moment stdin was open. Keystrokes are
+    now the DIFF against the field's previous value, and nothing is written
+    back into the field — iOS vetoes the edit instead
+    (`shouldChangeCharactersIn` returns false), which Compose cannot do.
 
-  So the fault is NOT the field fighting the IME, which is where both attempts
-  aimed. `sendKey` reaching `NodeProgram.input` has not yet been observed
-  directly — every probe run was lost to the intermittency below — and that is
-  the next measurement to take, before another fix.
-
-  **`npx create-vite` starts nothing at all on roughly half its runs**, most
-  often the first after a fresh launch; a retry in the same app instance then
-  works. No output, no error, no console message — the command simply returns.
-  Seen four times. This blocks measuring anything else about the program, so it
-  is the first thing to chase, and its silence is its own defect: a command
-  that fails must say so.
-
-  The original note, kept because its reasoning still stands:
-  **backspace does not reach a running program.** While a program owns
+  Backspace comes with it: a shrinking field is DEL, once per character
+  removed. Two earlier attempts aimed only at the field and were reverted;
+  neither could have worked, because stdin was closed underneath them. While a program owns
   the keyboard the prompt field is held empty, so Compose fires no
   `onValueChange` for a deletion and the keystroke is lost. `create-vite` asks
   for a project name, so the leg cannot pass without it. The fix is the usual
