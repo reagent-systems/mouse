@@ -4,6 +4,8 @@ import com.reagentsystems.mouse.terminal.AnsiColor
 import com.reagentsystems.mouse.terminal.AnsiParser
 import com.reagentsystems.mouse.terminal.CellStyle
 import com.reagentsystems.mouse.terminal.PagerProgram
+import com.reagentsystems.mouse.terminal.TerminalEngagement
+import com.reagentsystems.mouse.terminal.TranscriptBuffer
 import com.reagentsystems.mouse.terminal.TerminalKey
 import com.reagentsystems.mouse.terminal.TerminalProgram
 import com.reagentsystems.mouse.terminal.TerminalProgramIO
@@ -836,19 +838,108 @@ private fun ttyCorpus() {
     }
 }
 
+
+// ------------------------------------------- the engagement rule (NodeProgram's static half) --
+
+/**
+ * The three cases verify/tuinline asserts through a real engine, asserted here against the rule
+ * itself. tuinline is the INTEGRATION gate and needs the Node layer's launch path, which Android
+ * does not have yet; this is the decision logic, which does not.
+ */
+private fun engagementRule() {
+    // -- rule 1: the alt screen engages --
+    check(TerminalEngagement.asksForScreen("\u001B[?1049h"), "the alt screen engages the grid")
+    check(TerminalEngagement.asksForScreen("\u001B[?1047h"), "the older alt-screen form engages too")
+    check(TerminalEngagement.asksForScreen("\u001B[?47h"), "and the oldest one")
+
+    // -- rule 3: upward cursor motion engages, whatever its count --
+    check(TerminalEngagement.asksForScreen("\u001B[A"), "CUU with no count engages")
+    check(TerminalEngagement.asksForScreen("\u001B[1A"), "CUU with a count engages")
+    check(TerminalEngagement.asksForScreen("\u001B[12A"), "CUU with a two-digit count engages")
+    check(TerminalEngagement.asksForScreen("\u001B[3F"), "CPL engages")
+    check(TerminalEngagement.asksForScreen("\u001BM"), "RI engages")
+    check(
+        TerminalEngagement.asksForScreen("frame one\u001B[2Kframe two\n\u001B[1A"),
+        "an inline repaint engages even when the motion arrives late in the chunk",
+    )
+
+    // -- what must NOT engage: this is the half that keeps a build log in the scrollback --
+    check(!TerminalEngagement.asksForScreen("plain output\n"), "plain text does not engage")
+    check(!TerminalEngagement.asksForScreen("\u001B[2J"), "clearing the screen does not engage - watchers clear and stream on")
+    check(!TerminalEngagement.asksForScreen("\u001B[J"), "clearScreenDown does not engage")
+    check(!TerminalEngagement.asksForScreen("50%\r"), "a CR-only spinner does not engage")
+    check(!TerminalEngagement.asksForScreen("\u001B[B"), "cursor DOWN does not engage")
+    check(!TerminalEngagement.asksForScreen("\u001B[10C"), "cursor forward does not engage")
+    check(!TerminalEngagement.asksForScreen("\u001B[31mred\u001B[0m"), "colour does not engage")
+
+    // -- clearsScreen --
+    check(TerminalEngagement.clearsScreen("\u001B[2J"), "ED 2 clears the transcript")
+    check(TerminalEngagement.clearsScreen("\u001B[3J"), "ED 3 clears the transcript")
+    check(TerminalEngagement.clearsScreen("\u001Bc"), "RIS clears the transcript")
+    check(TerminalEngagement.clearsScreen("\u001B[J"), "clearScreenDown clears the transcript - this is how vite clears")
+    check(!TerminalEngagement.clearsScreen("\u001B[K"), "erase-in-LINE does not clear the transcript")
+
+    // -- strippingEscapes --
+    checkEqual(TerminalEngagement.strippingEscapes("\u001B[31mred\u001B[0m"), "red", "SGR is stripped")
+    checkEqual(TerminalEngagement.strippingEscapes("a\u001B[2Kb"), "ab", "CSI is stripped")
+    checkEqual(TerminalEngagement.strippingEscapes("a\u001B]0;title\u0007b"), "ab", "OSC to \u0007 is stripped")
+    checkEqual(TerminalEngagement.strippingEscapes("a\u001B]0;title\u001B\\b"), "ab", "OSC to ST is stripped")
+    checkEqual(TerminalEngagement.strippingEscapes("a\u001B=b"), "ab", "a two-byte \u001B form is stripped")
+    checkEqual(TerminalEngagement.strippingEscapes("a\rb"), "ab", "carriage returns are dropped")
+    checkEqual(TerminalEngagement.strippingEscapes("plain"), "plain", "plain text survives intact")
+
+    // -- the transcript buffer --
+    run {
+        val lines = ArrayList<String>()
+        var clears = 0
+        val buffer = TranscriptBuffer(emit = { text, _ -> lines.add(text) }, clear = { clears += 1 })
+        buffer.receive("one\ntwo\n", false)
+        check(lines == listOf("one", "two"), "complete lines emit as they arrive (got $lines)")
+        buffer.receive("part", false)
+        check(lines.size == 2, "a line without its newline waits")
+        buffer.receive("ial\n", false)
+        check(lines.size == 3 && lines[2] == "partial", "and completes when the rest arrives")
+        buffer.receive("tail with no newline", false)
+        buffer.flush()
+        check(lines.size == 4 && lines[3] == "tail with no newline", "flush emits the unterminated tail")
+    }
+    run {
+        val lines = ArrayList<String>()
+        var clears = 0
+        val buffer = TranscriptBuffer(emit = { text, _ -> lines.add(text) }, clear = { clears += 1 })
+        // A line that is ENTIRELY escapes is not a blank line - the vite-banner bug.
+        buffer.receive("\u001B[2J\nVITE ready\n", false)
+        check(clears == 1, "a clear-screen line clears the transcript")
+        check(lines == listOf("VITE ready"), "and emits no blank line for the escapes (got $lines)")
+        buffer.receive("\n", false)
+        check(lines.size == 2 && lines[1] == "", "a genuinely blank line still emits")
+    }
+    run {
+        val seen = ArrayList<Pair<String, Boolean>>()
+        val buffer = TranscriptBuffer(emit = { text, isError -> seen.add(text to isError) })
+        buffer.receive("out", false)
+        buffer.receive("err\n", true)
+        check(
+            seen.size == 2 && seen[0] == ("out" to false) && seen[1] == ("err" to true),
+            "switching stream flushes what the other stream had pending (got $seen)",
+        )
+    }
+}
+
 fun main() {
     println("screencheck — the iOS phase-T corpus, ported (fixtures from ${repoRoot.path}/verify)")
     screenCorpus()
     keyCorpus()
     programContract()
     pagerProgram()
+    engagementRule()
     altScreenCorpus()
     widthCorpus()
     wideTuiCorpus()
     ttyCorpus()
 
     if (failures == 0) {
-        println("SCREEN CORPUS: $checks checks — grid, parser, widths, keys, program contract, pager, pyte frame — MATCH")
+        println("SCREEN CORPUS: $checks checks — grid, parser, widths, keys, program contract, pager, engagement, pyte frame — MATCH")
     } else {
         println("SCREEN CORPUS: $failures of $checks checks disagree with the iOS gate — MISMATCH")
         exitProcess(1)

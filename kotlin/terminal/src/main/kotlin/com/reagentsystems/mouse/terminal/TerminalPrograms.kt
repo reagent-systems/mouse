@@ -312,3 +312,165 @@ class PagerProgram(text: String, override val title: String) : TerminalProgram {
         io?.exit()
     }
 }
+
+/**
+ * THE ENGAGEMENT RULE - when a streaming program becomes a screen program.
+ *
+ * A port of the static half of `NodeProgram` in swift/Mouse/TerminalPrograms.swift. It lives
+ * here, in the platform-free module, for the same reason the screen does: it is the decision a
+ * terminal makes about its own two surfaces, it is subtle enough to have caused a real bug on
+ * iOS, and a harness must be able to drive it without an engine underneath.
+ *
+ * The rule (architecture - the two-surface terminal depends on it): output stays in the
+ * SCROLLBACK until the program does something only a screen-oriented program does -
+ *   1. switches to the alternate screen (`ESC[?1049h` and friends - vim, less), or
+ *   2. asks for raw keystrokes (`stdin.setRawMode(true)` - every TUI framework), or
+ *   3. moves the cursor UP over output it already wrote (CUU `ESC[nA`, CPL `ESC[nF`,
+ *      RI `ESC M`) - the inline-repaint idiom of ink and logUpdate, which never touch the alt
+ *      screen and may repaint before enabling raw mode.
+ * From that moment the grid takes over. A line-streaming command never does any of the three,
+ * so its output belongs to - and stays in - the scrollback.
+ *
+ * Rule 3 is the one that was missing on iOS, and its absence is what drew an ink UI as a pile of
+ * text at the bottom of the phone's terminal while keystrokes repainted an invisible screen.
+ *
+ * Rule 2 is NOT decided here: raw mode is reported by the engine, not read out of the output
+ * stream, so it belongs to the runtime half. That half - the engine's delivery channel, its
+ * ordering contract, and the live grid shadow kept while still in transcript mode - arrives with
+ * the Node layer's launch path, and `verify/tuinline` is the integration gate for it. What is
+ * here is the decision logic, gated on its own.
+ */
+object TerminalEngagement {
+    /**
+     * The output half of the rule: an alt-screen switch, or upward cursor motion. Going back UP
+     * to rewrite rows already written is repainting, and repainting is what a screen is for.
+     *
+     * Deliberately NOT triggers: clear-screen forms (watchers clear the transcript and stream
+     * on), CR-only spinners (single line, no motion), and cursor-forward/down (progress
+     * formatting within a line).
+     */
+    fun asksForScreen(text: String): Boolean {
+        if (text.contains("\u001B[?1049h") || text.contains("\u001B[?1047h") ||
+            text.contains("\u001B[?47h")
+        ) {
+            return true
+        }
+        // A tiny CSI walk rather than `contains`: the count parameter is arbitrary
+        // (`ESC[A`, `ESC[1A`, `ESC[12A`), so the FINAL byte is what identifies the sequence.
+        var index = 0
+        while (index < text.length) {
+            val character = text[index]
+            index += 1
+            if (character != '\u001B' || index >= text.length) continue
+            val kind = text[index]
+            index += 1
+            if (kind == 'M') return true // RI - reverse index
+            if (kind != '[') continue
+            while (index < text.length) {
+                val byte = text[index]
+                index += 1
+                if (byte.code < 0x40 || byte.code > 0x7e) continue // still parameters
+                if (byte == 'A' || byte == 'F') return true // CUU / CPL
+                break
+            }
+        }
+        return false
+    }
+
+    /**
+     * `ESC[2J` / `ESC[3J` (erase display, and the scrollback with it), `ESC c` (full reset), and
+     * `ESC[J` / `ESC[0J` - erase from the cursor DOWN, which is how readline's `clearScreenDown`
+     * clears and therefore how vite, nodemon and every watcher clear: home the cursor, erase
+     * below. In a transcript there is nothing below, so it means the same thing.
+     */
+    fun clearsScreen(text: String): Boolean =
+        text.contains("\u001B[2J") || text.contains("\u001B[3J") || text.contains("\u001Bc") ||
+            text.contains("\u001B[0J") || text.contains("\u001B[J")
+
+    /**
+     * Drop ANSI escape sequences (CSI, OSC, and two-byte ESC forms) and carriage returns - the
+     * scrollback is plain text.
+     */
+    fun strippingEscapes(text: String): String {
+        val result = StringBuilder(text.length)
+        var index = 0
+        while (index < text.length) {
+            val character = text[index]
+            index += 1
+            if (character == '\r') continue
+            if (character != '\u001B') { result.append(character); continue }
+            if (index >= text.length) break
+            val kind = text[index]
+            index += 1
+            if (kind == '[') {
+                // CSI: parameters and intermediates end at a final byte @-~.
+                while (index < text.length) {
+                    val byte = text[index]
+                    index += 1
+                    if (byte.code in 0x40..0x7e) break
+                }
+            } else if (kind == ']') {
+                // OSC: runs to BEL or ESC backslash.
+                var previous = kind
+                while (index < text.length) {
+                    val byte = text[index]
+                    index += 1
+                    if (byte.code == 0x7) break
+                    if (previous == '\u001B' && byte == '\\') break
+                    previous = byte
+                }
+            }
+            // Two-byte forms (ESC =, ESC >, ...): the kind byte itself is consumed.
+        }
+        return result.toString()
+    }
+}
+
+/**
+ * The scrollback side of a streaming program: line-buffers its output and emits complete lines
+ * with escapes stripped.
+ *
+ * Ported from `NodeProgram`'s transcript machinery. Two behaviours here are not obvious and both
+ * were bugs on iOS first:
+ *  - a line that was ENTIRELY escapes is NOT a blank line. A cursor move is not something a
+ *    terminal prints, and dropping the distinction put two dozen empty rows above vite's banner,
+ *    which clears the screen before writing it.
+ *  - a clear-screen escape CLEARS the transcript. Every watcher clears before each run, and a
+ *    terminal that ignores it shows the old output above the new.
+ */
+class TranscriptBuffer(
+    private val emit: (text: String, isError: Boolean) -> Unit,
+    private val clear: () -> Unit = {},
+) {
+    private val pending = StringBuilder()
+    private var pendingIsError = false
+
+    /** Feed one chunk of program output. */
+    fun receive(text: String, isError: Boolean) {
+        if (pendingIsError != isError) flush()
+        pendingIsError = isError
+        pending.append(text)
+        while (true) {
+            val newline = pending.indexOf("\n")
+            if (newline < 0) break
+            val line = pending.substring(0, newline)
+            pending.delete(0, newline + 1)
+            emitLine(line, isError)
+        }
+    }
+
+    /** Emit whatever is still waiting for its newline - at engagement, and at exit. */
+    fun flush() {
+        if (pending.isEmpty()) return
+        val line = pending.toString()
+        pending.setLength(0)
+        emitLine(line, pendingIsError)
+    }
+
+    private fun emitLine(line: String, isError: Boolean) {
+        if (TerminalEngagement.clearsScreen(line)) clear()
+        val text = TerminalEngagement.strippingEscapes(line)
+        if (text.isEmpty() && line.isNotEmpty() && line.contains('\u001B')) return
+        emit(text, isError)
+    }
+}
