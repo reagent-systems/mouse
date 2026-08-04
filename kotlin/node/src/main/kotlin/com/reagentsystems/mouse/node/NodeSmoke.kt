@@ -44,11 +44,13 @@ object NodeSmoke {
         // This used to probe `netConnect`, then `cryptoHash`, and each time the milestone that
         // implemented the surface turned the check into an assertion that a REGRESSION had
         // happened — which is the gate working, and why the name here is expected to keep moving.
-        // 3c did it to sockets, 3d to the digests. `zlibOpen` is the current one. That is the
+        // 3c did it to sockets, 3d to the digests and then to zlib. `brotliOpen` is the current
+        // one, and it is the LAST of its kind on this surface — brotli has no Android counterpart
+        // at all, so unlike the others its refusal is not waiting on a milestone. That is the
         // partition doing its job — it went red and named the line, rather than the capability
         // quietly disagreeing with the record.
         let refusal = 'no-throw';
-        try { globalThis.__mouse.zlibOpen('deflate', {}); }
+        try { globalThis.__mouse.brotliOpen('compress', {}); }
         catch (e) { refusal = e.code || e.message; }
 
         setTimeout(function(){

@@ -15,6 +15,7 @@ import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSmoke
 import com.reagentsystems.mouse.node.NodeSocketSmoke
 import com.reagentsystems.mouse.node.NodeSockets
+import com.reagentsystems.mouse.node.NodeZlib
 import com.reagentsystems.mouse.packages.Json
 import java.io.File
 import java.io.IOException
@@ -2393,6 +2394,7 @@ fun main(args: Array<String>) {
         fsCorpus(node, scratch)
         resolverCorpus(node, scratch)
         cryptoCorpus(node, scratch)
+        zlibCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2701,4 +2703,117 @@ private fun cryptoCorpus(node: String?, parent: File) {
         "randomUUID is a lower-case v4 UUID ($uuid)",
     )
     check(NodeCrypto.randomUUID() != uuid, "randomUUID does not repeat itself")
+}
+
+// --------------------------------------------------------------------------- zlib ----
+
+/**
+ * Compression, graded BOTH DIRECTIONS against real node.
+ *
+ * One direction is not enough and the reason is the framing. `java.util.zip` gives DEFLATE and
+ * nothing else, so gzip's header, its CRC32/ISIZE trailer and the gzip-or-zlib auto-detect are
+ * written by hand here — and a codec that is wrong in a self-consistent way round-trips through
+ * ITSELF perfectly while producing bytes no other implementation accepts. So node decompresses
+ * what we compress, and we decompress what node compressed.
+ */
+private fun zlibCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "zlib corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "zlib").also { it.mkdirs() }
+    val samples = listOf(
+        "" to "empty",
+        "a" to "one byte",
+        "hello world" to "a short string",
+        "ab".repeat(5000) to "10 KB that compresses hard",
+        (0..2000).joinToString(" ") { it.toString() } to "2 KB of numbers",
+    )
+    val deflaters = listOf("gzip" to "gunzip", "deflate" to "inflate", "deflateRaw" to "inflateRaw")
+
+    for ((text, label) in samples) {
+        val plain = Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))
+        for ((deflate, inflate) in deflaters) {
+            // 1. ours in, ours out.
+            val ours = NodeZlib.transform(deflate, plain, -1)
+            val back = ours?.let { NodeZlib.transform(inflate, it, -1) }
+            checkEqual(back ?: "<null>", plain, "zlib $deflate/$inflate round-trips here: $label")
+
+            // 2. ours in, NODE out — this is what catches a self-consistent wrong frame.
+            if (ours != null) {
+                File(scratch, "in.b64").writeText(ours)
+                File(scratch, "run.js").writeText(
+                    """
+                    const fs = require('fs'), zlib = require('zlib');
+                    const input = Buffer.from(fs.readFileSync('in.b64', 'utf8'), 'base64');
+                    process.stdout.write(zlib.${inflate}Sync(input).toString('base64'));
+                    """.trimIndent(),
+                )
+                val (status, out) = run(listOf(node, "run.js"), scratch)
+                checkEqual(
+                    if (status == 0) out.trim() else "<exit $status: ${out.trim().take(200)}>",
+                    plain,
+                    "real node $inflate accepts what we $deflate: $label",
+                )
+            }
+
+            // 3. NODE in, ours out.
+            File(scratch, "plain.b64").writeText(plain)
+            File(scratch, "make.js").writeText(
+                """
+                const fs = require('fs'), zlib = require('zlib');
+                const input = Buffer.from(fs.readFileSync('plain.b64', 'utf8'), 'base64');
+                process.stdout.write(zlib.${deflate}Sync(input).toString('base64'));
+                """.trimIndent(),
+            )
+            val (madeStatus, made) = run(listOf(node, "make.js"), scratch)
+            if (madeStatus == 0) {
+                checkEqual(
+                    NodeZlib.transform(inflate, made.trim(), -1) ?: "<null>",
+                    plain,
+                    "we $inflate what real node $deflate: $label",
+                )
+            }
+        }
+    }
+
+    // The streaming path is a SEPARATE implementation of the same framing, so it gets the same
+    // treatment: chunks in, and real node must accept the result.
+    for ((deflate, inflate) in deflaters) {
+        val handle = NodeZlib.open(deflate)
+        check(handle != 0, "zlibOpen($deflate) answers a handle")
+        if (handle == 0) continue
+        val chunks = listOf("streaming ", "in ", "several ", "pieces")
+        val body = StringBuilder()
+        for ((i, chunk) in chunks.withIndex()) {
+            val piece = NodeZlib.push(
+                handle,
+                Base64.getEncoder().encodeToString(chunk.toByteArray(Charsets.UTF_8)),
+                i == chunks.lastIndex,
+            )
+            if (piece != null && piece.isNotEmpty()) {
+                body.append(String(Base64.getDecoder().decode(piece), Charsets.ISO_8859_1))
+            }
+        }
+        NodeZlib.close(handle)
+        val whole = Base64.getEncoder().encodeToString(body.toString().toByteArray(Charsets.ISO_8859_1))
+        File(scratch, "in.b64").writeText(whole)
+        File(scratch, "run.js").writeText(
+            """
+            const fs = require('fs'), zlib = require('zlib');
+            const input = Buffer.from(fs.readFileSync('in.b64', 'utf8'), 'base64');
+            process.stdout.write(zlib.${inflate}Sync(input).toString('utf8'));
+            """.trimIndent(),
+        )
+        val (status, out) = run(listOf(node, "run.js"), scratch)
+        checkEqual(
+            if (status == 0) out.trimEnd('\n') else "<exit $status: ${out.trim().take(200)}>",
+            chunks.joinToString(""),
+            "real node $inflate accepts a STREAMED $deflate",
+        )
+    }
+
+    check(NodeZlib.open("nope") == 0, "an unknown zlib mode answers handle 0")
+    check(NodeZlib.transform("nope", "", -1) == null, "an unknown one-shot mode answers null")
+    check(NodeZlib.push(999999, "", true) == null, "pushing to a handle that was never open answers null")
 }

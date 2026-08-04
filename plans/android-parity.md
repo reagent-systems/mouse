@@ -160,10 +160,21 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   `SHA-256` and `HmacSHA256`; an empty HMAC key is legal to node and rejected
   by the JCA), and every one of them shows up as a different digest. 53 checks.
 
-  Still deferred, and the line is not arbitrary: what remains needs KEY
+  **zlib too.** `NodeZlib`, on `java.util.zip`. iOS drives zlib's own `z_stream`
+  and gets the framing free from `windowBits` — 15 is the zlib wrapper, −15 raw,
+  15+16 gzip, 15+32 auto-detect — and `java.util.zip` exposes exactly ONE of
+  those as `nowrap`. So gzip's 10-byte header, its CRC32/ISIZE trailer and the
+  gzip-or-zlib auto-detect are written here, one-shot and streaming sharing the
+  same framing rather than two implementations that could disagree. 50 checks,
+  graded BOTH DIRECTIONS against real node, because a codec wrong in a
+  self-consistent way round-trips through itself perfectly.
+
+  Still deferred, and the line is not arbitrary: the rest of crypto needs KEY
   MANAGEMENT — ciphers, EC/RSA/Ed25519 signing, ECDH, key generation — where
-  iOS rides Security framework and the JCA has no one-to-one counterpart, so
-  it is a port rather than a translation. Compression, `vm`, workers and child
+  iOS rides Security framework and the JCA has no one-to-one counterpart, so it
+  is a port rather than a translation. Brotli has no Android route at all: the
+  platform decodes it inside its HTTP stack and exposes nothing to an app, and
+  a third-party artifact is what invariant #4 forbids. `vm`, workers and child
   processes are untouched.
 
   `npm`/`npx`/`npm run` in Kotlin msh landed earlier, with the launch path.

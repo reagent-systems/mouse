@@ -21,6 +21,7 @@ import com.reagentsystems.mouse.node.NodeHttp
 import com.reagentsystems.mouse.node.NodeLoop
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSockets
+import com.reagentsystems.mouse.node.NodeZlib
 import java.io.File
 import java.util.Base64
 
@@ -241,6 +242,20 @@ class NodeWebView(
          * and it is seeded by the OS, which is the property that matters. Base64 out, because the
          * bridge carries strings and the bootstrap already does `Buffer.from(…, 'base64')`.
          */
+        @JavascriptInterface
+        fun zlibTransform(mode: String, base64: String, level: Int): String? =
+            NodeZlib.transform(mode, base64, level)
+
+        @JavascriptInterface
+        fun zlibOpen(mode: String): Int = NodeZlib.open(mode)
+
+        @JavascriptInterface
+        fun zlibPush(handle: Int, base64: String, finish: Boolean): String? =
+            NodeZlib.push(handle, base64, finish)
+
+        @JavascriptInterface
+        fun zlibClose(handle: Int) = NodeZlib.close(handle)
+
         @JavascriptInterface
         fun randomUUID(): String = NodeCrypto.randomUUID()
 

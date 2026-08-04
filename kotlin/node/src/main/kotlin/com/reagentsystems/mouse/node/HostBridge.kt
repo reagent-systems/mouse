@@ -136,6 +136,14 @@ object HostBridge {
         "cryptoHmac",
         "pbkdf2",
         "randomUUID",
+        // 3d — zlib. `java.util.zip` is the JDK's own, so no dependency; what it does NOT give is
+        // zlib's `windowBits`, which on iOS selects the framing for free. gzip's header and
+        // trailer, and the gzip-or-zlib auto-detect the `gunzip`/`inflate`/`unzip` modes need,
+        // are written in `NodeZlib` instead. Brotli stays deferred below, and for a real reason.
+        "zlibOpen",
+        "zlibPush",
+        "zlibClose",
+        "zlibTransform",
     )
 
     /**
@@ -187,11 +195,14 @@ object HostBridge {
             "the crypto surface rides CryptoKit, CommonCrypto and Security framework on iOS, and " +
             "nothing on Android is bound to its JCA counterparts yet",
         listOf(
-            "zlibOpen", "zlibPush", "zlibClose", "zlibTransform",
             "brotliOpen", "brotliPush", "brotliClose", "brotliTransform",
         ) to
-            "zlib rides libz and brotli rides Apple's Compression framework; the Android host " +
-            "binds neither, and `java.util.zip` covers only half of what these carry",
+            "brotli rides Apple's Compression framework, which has carried it since iOS 15. " +
+            "Android has no counterpart: the platform decodes brotli inside its HTTP stack and " +
+            "exposes no encoder or decoder to an app, `java.util.zip` is DEFLATE only, and the " +
+            "algorithm is a large one to hand-write for a static dictionary this would also have " +
+            "to carry. A third-party artifact is the only other route and invariant #4 forbids " +
+            "it. zlib itself IS bound — see `NodeZlib`",
         listOf("vmCreate", "vmRun") to
             "node's contextified sandbox is a SECOND JavaScript context sharing one virtual " +
             "machine, and a WebView gives no way to make another context reachable from this one",

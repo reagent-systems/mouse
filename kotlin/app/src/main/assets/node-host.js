@@ -142,6 +142,18 @@
   bridge.cryptoHmac = function (algorithm, keyBase64, base64) {
     return host.cryptoHmac(String(algorithm), String(keyBase64), String(base64));
   };
+  // ---- compression --------------------------------------------------------------------------
+  // Streaming AND one-shot, because `http`'s gzip responses arrive in pieces. A handle of 0 from
+  // `zlibOpen` means the mode is unknown, which is what the bootstrap branches on.
+  bridge.zlibTransform = function (mode, base64, level) {
+    return host.zlibTransform(String(mode), String(base64), Number(level) | 0);
+  };
+  bridge.zlibOpen = function (mode) { return host.zlibOpen(String(mode)); };
+  bridge.zlibPush = function (handle, base64, finish) {
+    return host.zlibPush(Number(handle) | 0, String(base64), !!finish);
+  };
+  bridge.zlibClose = function (handle) { host.zlibClose(Number(handle) | 0); };
+
   bridge.pbkdf2 = function (password, salt, iterations, keylen, digest) {
     return host.pbkdf2(String(password), String(salt), Number(iterations) | 0,
                        Number(keylen) | 0, String(digest));
