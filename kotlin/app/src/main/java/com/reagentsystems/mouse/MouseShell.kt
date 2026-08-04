@@ -359,7 +359,10 @@ class MouseShell {
             "curl", "wget" -> curl(args, context)
             "pkg" -> pkgCmd(args, context)
             "git", "npm", "pnpm", "node", "npx" -> IO(err = "$name: not built yet — the native ${if (name == "git") "git" else "package"} engine is on the roadmap", status = 127)
-            else -> IO(err = "msh: command not found: $name (type help)", status = 127)
+            // A name the CATALOG claims answers honestly, installed or not — that is why the
+            // catalog knows an uninstalled runtime's commands. "command not found" for a `python`
+            // that is sitting on disk is simply false.
+            else -> runtimeCmd(name, context) ?: IO(err = "msh: command not found: $name (type help)", status = 127)
         }
     }
 
@@ -436,6 +439,29 @@ class MouseShell {
             }
             else -> IO(err = "pkg: $action? (list, install, remove)", status = 2)
         }
+    }
+
+    /**
+     * A language runtime typed at the prompt. Returns null when no catalog entry claims the name,
+     * which is the caller's "command not found".
+     *
+     * Two honest answers, no third: not installed, or installed-but-not-runnable-yet. Running the
+     * module is the phase-G engine's `node:wasi` — the shared bootstrap reaches for the standard
+     * `WebAssembly` API, so a WebView supplies the wasm natively, but the launch path from msh
+     * into the engine is milestone 3d and does not exist here yet. Saying so is better than
+     * "command not found", which would be a lie about a 30 MB interpreter sitting on disk.
+     */
+    private fun runtimeCmd(name: String, context: Context): IO? {
+        val support = context.runtimes ?: return null
+        val entry = RuntimeCatalog.forCommand(support.catalog, name) ?: return null
+        if (support.store.installed(entry) == null) {
+            return IO(err = "$name: not installed — `pkg install ${entry.name}`", status = 127)
+        }
+        return IO(
+            err = "$name: ${entry.name} ${entry.version} is installed, but running it needs the " +
+                "Node layer's wasm host, which is not wired into msh yet",
+            status = 127,
+        )
     }
 
     private fun cd(args: List<String>, context: Context): IO {
