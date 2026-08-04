@@ -150,6 +150,12 @@ object HostBridge {
         // all of it under one `Cipher`, with the transformation string doing that job.
         "cipherSeal",
         "cipherOpen",
+        // 3d — `vm`. Implemented in the SHIM rather than in Kotlin, because the second context is
+        // a JavaScript object: an about:blank iframe is same-origin, so its `contentWindow` is
+        // reachable and has its own globals and intrinsics. The refusal here used to say a
+        // WebView could not give one; it was measured on a device and it was wrong.
+        "vmCreate",
+        "vmRun",
     )
 
     /**
@@ -215,9 +221,7 @@ object HostBridge {
             "algorithm is a large one to hand-write for a static dictionary this would also have " +
             "to carry. A third-party artifact is the only other route and invariant #4 forbids " +
             "it. zlib itself IS bound — see `NodeZlib`",
-        listOf("vmCreate", "vmRun") to
-            "node's contextified sandbox is a SECOND JavaScript context sharing one virtual " +
-            "machine, and a WebView gives no way to make another context reachable from this one",
+
         listOf(
             "shellExec", "spawnNode", "spawnWrite", "spawnEnd", "spawnKill", "spawnRef",
             "spawnMessage", "ipcSend", "ipcHold", "ipcDisconnect", "portDeliver",

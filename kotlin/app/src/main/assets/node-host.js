@@ -128,6 +128,80 @@
   // iOS block does with `tty == nil`. A faithful port of a no-op, not a stub standing in for one.
   bridge.setRawMode = function (raw) { host.setRawMode(!!raw); };
 
+  // ---- vm ------------------------------------------------------------------------------------
+  //
+  // A second JavaScript context, which the refusal here used to say a WebView could not give.
+  // It can: an `about:blank` iframe is same-origin, so its `contentWindow` is reachable from this
+  // one, and it has its OWN globals and its own intrinsics — `w.Array !== Array`. That is what
+  // `vm.createContext` needs, and it is why this lives entirely in the shim: the context is a JS
+  // object, so no Kotlin is involved at all.
+  //
+  // WHERE THIS FALLS SHORT OF NODE, stated because the difference is observable. node's
+  // contextified sandbox is a live PROXY: a global the guest sets appears on the sandbox object
+  // immediately, and a property the host sets is visible to code already running. Here the
+  // sandbox is copied IN before a run and copied back OUT after, so the two agree at every
+  // `runInContext` boundary and can disagree in the middle of one. Code that reads a sandbox
+  // property from inside an async callback that outlives the run sees the value as it was.
+  var vmContexts = Object.create(null);
+  var vmNextHandle = 1;
+
+  bridge.vmCreate = function (sandbox) {
+    var doc = globalThis.document;
+    if (!doc || !doc.documentElement) return 0;
+    var frame;
+    try {
+      frame = doc.createElement('iframe');
+      // Never displayed and never loaded from anywhere: the frame exists only to own a global
+      // object. `about:blank` is what keeps it same-origin, which is what keeps it reachable.
+      frame.style.display = 'none';
+      doc.documentElement.appendChild(frame);
+    } catch (e) {
+      return 0;
+    }
+    var w = frame.contentWindow;
+    if (!w) return 0;
+    var handle = vmNextHandle++;
+    vmContexts[handle] = { window: w, frame: frame, sandbox: sandbox || {} };
+    return handle;
+  };
+
+  bridge.vmRun = function (handle, code, filename) {
+    var entry = vmContexts[Number(handle) | 0];
+    if (!entry) return { __vmThrow: new Error('vm: no such context') };
+    var w = entry.window;
+    var sandbox = entry.sandbox;
+    for (var key in sandbox) {
+      try { w[key] = sandbox[key]; } catch (e) {}
+    }
+    // What the guest ADDS has to come back too, not only what it changes, so the names present
+    // before the run are recorded and diffed after it.
+    var before = Object.create(null);
+    try {
+      var names = Object.getOwnPropertyNames(w);
+      for (var i = 0; i < names.length; i++) before[names[i]] = true;
+    } catch (e) {}
+    var result;
+    var threw = null;
+    try {
+      result = w.eval(String(code) + '\n//# sourceURL=' + String(filename));
+    } catch (e) {
+      threw = e;
+    }
+    for (var back in sandbox) {
+      try { sandbox[back] = w[back]; } catch (e) {}
+    }
+    try {
+      var after = Object.getOwnPropertyNames(w);
+      for (var j = 0; j < after.length; j++) {
+        var name = after[j];
+        if (before[name]) continue;
+        try { sandbox[name] = w[name]; } catch (e) {}
+      }
+    } catch (e) {}
+    if (threw !== null) return { __vmThrow: threw };
+    return result;
+  };
+
   // ---- crypto ------------------------------------------------------------------------------
   // Only entropy so far. It is bound ahead of the rest of the crypto surface because CPython's
   // WASI start asks for it before a script's first line runs — see HostBridge.DEFERRED for what

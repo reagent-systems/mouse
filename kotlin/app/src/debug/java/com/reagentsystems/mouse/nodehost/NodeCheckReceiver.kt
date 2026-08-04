@@ -10,6 +10,7 @@ import com.reagentsystems.mouse.node.NodeFsSmoke
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSmoke
 import com.reagentsystems.mouse.node.NodeSocketSmoke
+import com.reagentsystems.mouse.node.NodeVmSmoke
 import java.io.File
 
 /**
@@ -38,13 +39,20 @@ import java.io.File
  * which runs the same sources under real `node`. That is what makes an on-device MISMATCH mean the
  * WebView: the corpus itself is already gated on the JVM.
  *
- * Three programs run in sequence, each in its own engine:
+ * FOUR programs run in sequence, each in its own engine. The last is the only one `:nodecheck`
+ * does NOT also run, and deliberately so — see [NodeVmSmoke]: its second context is an iframe, so
+ * it needs a DOM that real node has not got. Every other program here is graded twice, by both
+ * hosts, from the same source.
+ *
+ * The programs:
  *
  *  - [NodeSmoke] — console, `process`, timers and the tick order. It must be the FIRST thing its
  *    engine runs, because `__leaveEntryFrame` flips `hostFrame` false for good afterwards.
  *  - [NodeFsSmoke] — the filesystem and `require` over `node_modules`, which is the half no JVM
  *    harness can reach at all: `:nodecheck` grades `NodeFs` and `ModuleResolver` directly and
  *    grades the JavaScript loader against a stand-in host, and only here do the two meet.
+ *  - [NodeVmSmoke] — `vm`: a second JavaScript context, its own globals and its own intrinsics.
+ *    DEVICE-ONLY, for the reason above.
  *  - [NodeSocketSmoke] — `net`, `http`, `dns` and `dgram`. Off-device `:nodecheck` grades the
  *    Kotlin socket table against real `node` peers and grades the JavaScript above it against a
  *    stand-in that IS real node's `net`; here they meet, and here the platform gets a say. That
@@ -59,7 +67,8 @@ class NodeCheckReceiver : BroadcastReceiver() {
         val handler = Handler(Looper.getMainLooper())
         var settled = false
         var engine: NodeWebView? = null
-        val total = NodeSmoke.CHECK_COUNT + NodeFsSmoke.CHECK_COUNT + NodeSocketSmoke.CHECK_COUNT + 3
+        val total = NodeSmoke.CHECK_COUNT + NodeFsSmoke.CHECK_COUNT + NodeSocketSmoke.CHECK_COUNT +
+            NodeVmSmoke.CHECK_COUNT + 4
 
         fun settle(failures: List<String>, transcript: String) {
             if (settled) return
@@ -148,7 +157,16 @@ class NodeCheckReceiver : BroadcastReceiver() {
                             "sockets", NodeSocketSmoke.CONFIG, NodeSocketSmoke.PROGRAM,
                             NodeSocketSmoke.ENTRY_PATH, NodeSocketSmoke::grade,
                         ) { sockets, third ->
-                            settle(sockets, first + "\n" + second + "\n" + third)
+                            if (sockets.isNotEmpty()) {
+                                settle(sockets, first + "\n" + second + "\n" + third)
+                            } else {
+                                runProgram(
+                                    "vm", NodeVmSmoke.CONFIG, NodeVmSmoke.PROGRAM,
+                                    NodeVmSmoke.ENTRY_PATH, NodeVmSmoke::grade,
+                                ) { vm, fourth ->
+                                    settle(vm, first + "\n" + second + "\n" + third + "\n" + fourth)
+                                }
+                            }
                         }
                     }
                 }
