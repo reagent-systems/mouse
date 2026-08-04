@@ -36,18 +36,21 @@ plate:
   with delta resolution, push that auto-creates the GitHub repo via
   `POST /user/repos`, and a three-way merge engine — fast-forward /
   merge-commit / diff3 conflict markers — verified against `git merge-file`
-  and a real repo). The git module toolbar (`commit · sync · branch · merge`
-  in the Graph header) drives them. Remaining: a `git clone` entry in the
-  project picker, and a non-clobbering fetch-into-tracking-ref so `sync` can
-  pull-and-merge from the remote, not only push
+  and a real repo). The git module toolbar (`commit · sync · branch · merge
+  · refresh` in the Graph header) drives them; `sync` pushes, and pulling is
+  the explicit `git pull` in the terminal (incremental fetch into the
+  tracking ref + native merge — the app never rewrites a user's files on
+  its own). Remaining: a `git clone` entry in the project picker
 - Editor upgrades: syntax highlighting + line numbers (Runestone/TextKit 2),
   find in file, font-size setting, large-file strategy
-- Terminal engines: the package engine (`pnpm install`, lockfile-driven,
-  reusing the native tar/gzip extractor) and dev-server engine
-  (statically-linked esbuild, `dev`/`build`), LAN hosting, and a Preview
-  container — projects you can *run*, not just edit
-- More terminal engines behind the switcher: ssh, and `git`/`npm` becoming
-  real commands inside `msh` as their engines land
+- ~~Terminal engines~~ **Shipped** (phases F/G/D — see STATUS.md): the
+  package engine (`npm`/`pnpm install` from the real registry, lockfiles,
+  integrity, native-binary→wasm substitution) and the dev-server engine
+  (vite/esbuild through the Node layer, HMR, serving clients outside the
+  app). Remaining: a Preview container — an in-app surface for what the
+  server serves (phase C)
+- More terminal engines behind the switcher: ssh. (`git` and `npm` are real
+  `msh` commands now)
 
 ### `cursor` — the AI pair
 
@@ -80,11 +83,45 @@ The self-hosting question: how much of building *apps for this phone* can
 happen *on* the phone — Swift syntax support, project scaffolding,
 previews, and whatever the platform's toolchain rules allow.
 
+**Full build plan: [xcode.md](xcode.md).** The short version: signing and
+installing are ours to build (a from-scratch Mach-O signer + CMS envelope,
+using the user's own Apple-issued certificate, key held in the Keychain);
+compiling is the wall, so the working loop routes compilation through a CI
+Mac and signs the artifact on device. The plan's Phase 0 (a local artifact
+server) is the same server the dev-server engine and Preview container
+need, so it pays for itself three times.
+
 ### `flutterflow` — visual app building
 
 Compose real UI by direct manipulation, generate honest code into the
 workspace. The inverse of the `figma` branch: not drawing pictures of apps,
 assembling running ones.
+
+### OpenShip Integration
+
+### Visual Intelligence
+
+### tl-draw
+
+
+### `system` — running and compiling code on the device
+
+The substrate the terminal, the Preview container, and the `xcode` branch
+all stand on: **processes, `$PATH`, packages, and Mouse as their kernel.**
+
+**Entry point: [system.md](system.md)** (the umbrella spec — platform
+physics, execution substrates, Mouse-as-kernel, the Node compatibility
+layer, and the unified phase map across every plan doc). Language-by-
+language detail: **[compile.md](compile.md)**. The short version: iOS grants
+exactly one JIT — WebKit's — so a `WKWebView` used as a compute engine is
+the fastest execution surface available to Mouse, and the JavaScript/wasm
+toolchain runs there at full speed (Mouse's current in-process `JSContext`
+is interpreter-only, 10–30× slower). An in-app wasm runtime then gives real
+processes and `$PATH`; a package manager reuses the existing tar/gzip and
+HTTP; clang-wasm compiles C on device; and everything LLVM-sized (Rust, Go,
+Swift) routes through CI and runs its artifact here. Compiling on device is
+a *substrate* question, not a per-language one — which is why
+[xcode.md](xcode.md)'s on-device compilation path is blocked on this branch.
 
 ## Foundations (serve every branch)
 

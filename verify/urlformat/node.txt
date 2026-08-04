@@ -1,0 +1,10 @@
+{"protocol":"http:","hostname":"127.0.0.1","port":80 -> http://127.0.0.1:8080
+{"protocol":"http:","hostname":"h","port":80,"pathna -> http://h:80/p
+{"protocol":"https:","host":"h:443","pathname":"/x", -> https://h:443/x?q=1
+{"protocol":"http:","hostname":"h","pathname":"/p"," -> http://h/p#f
+{"protocol":"http:","hostname":"h","port":3000} -> http://h:3000
+{"protocol":"http:","auth":"u:p","hostname":"h","por -> http://u:p@h:1/z
+{"protocol":"mailto:","pathname":"a@b.com"} -> mailto:a@b.com
+{"host":"h:9","pathname":"/n"} -> h:9/n
+{"protocol":"http:","hostname":"h","query":{"a":"1", -> http://h/q?a=1&b=two%20words
+{"protocol":"ws:","hostname":"h","port":81,"pathname -> ws://h:81/sock

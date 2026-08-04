@@ -1,0 +1,23 @@
+parse: text html text/html text/html;charset=UTF-8;boundary=x
+params: UTF-8 true null
+after set: text/html;charset=iso-8859-1;boundary=x
+after delete: text/html;charset=iso-8859-1
+entries: [["charset","iso-8859-1"]]
+after retype: application/json;charset=iso-8859-1
+case "text/plain": text/plain
+case "TEXT/PLAIN": text/plain
+case "text/plain; charset=utf-8": text/plain;charset=utf-8
+case "a/b;x=\"quoted;val\"": a/b;x="quoted;val"
+case "image/png;": image/png
+invalid "nope": TypeError
+invalid "a/": TypeError
+invalid "/b": TypeError
+invalid "": TypeError
+parseEnv: {"A":"1","B":"two words","C":"three","D":""}
+diff string: [[0,"a"],[0,"b"],[1,"c"],[-1,"d"]]
+diff array: [[0,"a"],[1,"b"],[-1,"c"]]
+diff same: []
+callSites: true column,columnNumber,functionName,lineNumber,scriptId,scriptName
+EventEmitterAsyncResource: function
+emitter half works: true type=undefined
+symbols: symbol symbol

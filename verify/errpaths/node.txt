@@ -1,0 +1,5 @@
+gunzip async err=Z_DATA_ERROR
+gunzip corrupt code=Z_DATA_ERROR
+spawn error code=ENOENT
+watch missing code=ENOENT
+worker error=Error:worker blew up

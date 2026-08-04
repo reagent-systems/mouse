@@ -392,7 +392,7 @@ struct GitModuleToolbar: View {
         guard signedIn else { return report("sync: sign in with the GitHub container first") }
         if workspace.hasLocalRepo {
             if workspace.unpushedCommits { gitPush() }
-            else { report("sync: nothing to push, up to date") }
+            else { report("sync: nothing to push (git pull in the terminal brings down remote commits)") }
         } else if workspace.hasChanges {
             commitMessage = ""; askingSyncPush = true
         } else if workspace.upstreamAvailable {
@@ -487,7 +487,9 @@ struct GitModuleToolbar: View {
         }
     }
 
-    /// Sync's native push: publish local commits to GitHub, creating the repo on first push.
+    /// Sync's native path: PUSH local commits (creating the GitHub repo on first push). Sync
+    /// never pulls — the app must not rewrite a user's files on its own; bringing down remote
+    /// commits is the explicit `git pull` in the terminal (which refuses over uncommitted edits).
     private func gitPush() {
         guard let token = GitHubAuth.shared.accessToken, let login = signedInLogin else { return }
         let branch = GitCore.currentBranch(in: workspace.root) ?? "main"
@@ -495,10 +497,15 @@ struct GitModuleToolbar: View {
         workspace.pushState = .pushing
         Task {
             do {
-                _ = try await GitRemote.push(root: workspace.root, repoFullName: repoName,
-                                             branch: branch, token: token, login: login)
+                let result = try await GitRemote.push(root: workspace.root, repoFullName: repoName,
+                                                      branch: branch, token: token, login: login)
                 workspace.pushState = .idle
                 workspace.localHistoryChanged()
+                var notes: [String] = []
+                if result.createdRepo { notes.append("created \(repoName)") }
+                notes.append(result.objectCount == 0 ? "up to date"
+                    : "pushed \(result.objectCount) object\(result.objectCount == 1 ? "" : "s")")
+                report("sync: \(notes.joined(separator: ", "))", isError: false)
             } catch {
                 syncFailed("sync", error)
             }

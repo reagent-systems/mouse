@@ -1,0 +1,102 @@
+fixture console-format: match
+fixture path-module: match
+fixture fs-roundtrip: match
+fixture modules-local: match
+fixture events-module: match
+fixture buffer-module: match
+fixture argv-env-exit: match
+fixture timers-order: match
+fixture async-await: match
+fixture throw-exits-1: match
+fixture util-module: match
+fixture assert-module: match
+fixture fs-stream-events: match
+fixture fetch-api-family: match
+fixture core-module-fillins: match
+fixture stream-state-props: match
+fixture stream-es5-inherits: match
+fixture emitter-es5-call: match
+fixture zlib-incremental: match
+fixture utf8-lenient-decode: match
+fixture stack-has-source: match
+fixture fs-async-callbacks: match
+fixture buffer-binary-methods: match
+fixture zlib-classes: match
+fixture fs-fd-as-path: match
+fixture events-lazy-mixin: match
+fixture callsite-protocol: match
+fixture microtask-only-tla: match
+fixture dynamic-import-cjs: match
+fixture filename-shadow-esm: match
+fixture circular-live-exports: match
+fixture styletext-als-pipe: match
+fixture readdir-dirent: match
+fixture realpath-webcrypto: match
+fixture assert-more: match
+fixture uncaught-handled: match
+fixture uncaught-handler-exits: match
+fixture events-error-throw: match
+fixture timer-objects: match
+fixture fs-fd-sync: match
+fixture stream-readable: match
+fixture stream-writable: match
+fixture stream-transform: match
+fixture stream-pipeline: match
+fixture stream-pipeline-promises: match
+fixture stream-async-iter: match
+fixture fs-streams: match
+fixture crypto-module: match
+fixture zlib-module: match
+fixture zlib-streams: match
+fixture readline-file: match
+fixture stream-error-pipeline: match
+fixture node-modules: match
+fixture mkdirp-bin: our engine ran the installed bin and created the directory
+fixture esm-local: match
+fixture esm-chalk: match
+fixture esm-tla: match
+fixture commander-cli: match
+fixture anthropic-sdk: match
+fixture tsc-cli: match
+fixture yargs-cli: match
+fixture child-process: match
+fixture core-surface: match
+fixture url-resolution: match
+fixture ciphers-and-kdfs: match (identical ciphertext, tags and derived keys)
+cross-engine crypto: what we seal real node opens, and what node seals we open
+cross-engine signing: real node verifies our ECDSA and Ed25519 signatures, and we verify node's
+fixture signing-shape: match
+key types with no system implementation refuse by name (dsa, dh, x448)
+fixture fetch-streaming: match (chunks arrive as they are sent, like node)
+fixture buffer-over-arraybuffer: match (wasm memory is shared, not copied)
+fixture dot-require: match
+cross-engine ECDH: the same shared secret on both sides, for every curve
+fixture refusal-truth: every refusal names a reason and none is stale
+fixture stream-state: autoDestroy, and every flag true when node says so
+fixture stream-surface: unpipe stops the flow, and the getters report reality
+fixture console: table box-drawing, group indentation, count/time, and stream routing
+fixture inspect-format: Maps, Sets, cycles, getters and console.log's own rules
+fixture encodings: every named encoding, both directions, and a held split character
+fixture event-sequences: nine lifecycles, and two named ordering divergences
+fixture error-codes: codes, syscalls, and refusing what node refuses
+fixture abort-signals: ten cancellable APIs all cancel
+fixture options-third: byte ranges, inspect depth, authTagLength, once+signal
+fixture options-second: an AbortSignal aborts, and what msh cannot do says so
+fixture options-honoured: flags, modes, recursion, backpressure and zlib levels
+fixture text-streams: a character split across chunks survives the decode
+fixture http-close: idle connections drop, in-flight ones survive until told not to
+fixture stream-operators: map/filter/take/drop/reduce and the empty-stream cases
+fixture crypto-streams: hashes pipe, and read() keeps bytes intact
+fixture buffer-numerics: floats, BigInt64, variable-width ints, swaps and aliases
+fixture dns-resolvers: the family is present, and TLSA still names its reason
+fixture brotli: round trips, streams in pieces, and zstd still refuses
+fixture diffie-hellman: X25519 and EC agreement, finite-field still refused
+fixture glob: node's exact file lists, and the two refusals name measured reasons
+fixture scrypt: RFC 7914 vectors byte for byte, and node's parameter rules
+fixture host-event-ticks: nextTick beats promises on every route out of the host
+fixture loop-order: ticks beat promises, and ports are their own phase
+fixture broadcast-channel: same-name fan-out, and a port queue that drains
+fixture http-hangup: a dead connection errors and leaves the pool
+fixture dns-lookup: match
+fixture fetch-http: match
+PHASE G: ALL PASS

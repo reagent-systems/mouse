@@ -1,0 +1,24 @@
+map: true
+set: true
+nested map: true
+map object key: true
+set of objects: true
+date: true
+regexp: true
+buffer: true
+uint8array: true
+float64array: true
+undefined: true
+undefined in object: true
+null: true
+bigint: true
+NaN: true
+Infinity: true
+negative zero: true
+nested arrays: true
+sparse-ish object: true
+cycle: true
+shared identity: true
+haste-like: true
+empty containers: true
+returns Buffer: true

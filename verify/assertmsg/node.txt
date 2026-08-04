@@ -1,0 +1,18 @@
+strictEqual num -> AssertionError | code=ERR_ASSERTION | op=strictEqual | gen=true | Expected values to be strictly equal:
+strictEqual str -> AssertionError | code=ERR_ASSERTION | op=strictEqual | gen=true | Expected values to be strictly equal:
+strictEqual type -> AssertionError | code=ERR_ASSERTION | op=strictEqual | gen=true | Expected values to be strictly equal:
+equal -> AssertionError | code=ERR_ASSERTION | op=== | gen=true | 1 == 2
+notStrictEqual -> AssertionError | code=ERR_ASSERTION | op=notStrictEqual | gen=true | Expected "actual" to be strictly unequal to: 3
+deepStrictEqual -> AssertionError | code=ERR_ASSERTION | op=deepStrictEqual | gen=true | Expected values to be strictly deep-equal:
+deepEqual arrays -> AssertionError | code=ERR_ASSERTION | op=deepEqual | gen=true | Expected values to be loosely deep-equal:
+notDeepStrictEqual -> AssertionError | code=ERR_ASSERTION | op=notDeepStrictEqual | gen=true | Expected "actual" not to be strictly deep-equal to:
+ok false -> AssertionError | code=ERR_ASSERTION | op=== | gen=true | The expression evaluated to a falsy value:
+ok undefined -> AssertionError | code=ERR_ASSERTION | op=== | gen=true | The expression evaluated to a falsy value:
+assert(0) -> AssertionError | code=ERR_ASSERTION | op=== | gen=true | The expression evaluated to a falsy value:
+fail -> AssertionError | code=ERR_ASSERTION | op=fail | gen=true | Failed
+fail message -> AssertionError | code=ERR_ASSERTION | op=fail | gen=false | custom
+custom message -> AssertionError | code=ERR_ASSERTION | op=strictEqual | gen=false | my message
+throws no throw -> AssertionError | code=ERR_ASSERTION | op=throws | gen=false | Missing expected exception.
+match -> AssertionError | code=ERR_ASSERTION | op=match | gen=true | The input did not match the regular expression /xyz/. Input:
+doesNotMatch -> AssertionError | code=ERR_ASSERTION | op=doesNotMatch | gen=true | The input was expected to not match the regular expression /b/. Input:
+ifError -> AssertionError | code=ERR_ASSERTION | op=ifError | gen=false | ifError got unwanted exception: inner

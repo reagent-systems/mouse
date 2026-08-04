@@ -1,0 +1,84 @@
+[2J[1;3H
+  3 passing (44ms)
+  2 pending
+  6 failing
+
+  1) sync
+       fails on a value:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+4 !== 5
+
+      + expected - actual
+
+      -4
+      +5
+      
+      at Context.<anonymous> (test/suite.js:6:47)
+
+  2) sync
+       fails on a throw:
+     Error: deliberate
+      at Context.<anonymous> (test/suite.js:7:46)
+
+  3) async
+       rejects:
+     Error: async boom
+      at Context.<anonymous> (test/suite.js:14:58)
+      at process.processImmediate (node:internal/timers:484:21)
+
+  4) async
+       callback reports an error:
+     Error: cb boom
+      at Immediate._onImmediate (test/suite.js:16:77)
+      at process.processImmediate (node:internal/timers:484:21)
+
+  5) async
+       times out:
+     Error: Timeout of 30ms exceeded. For async tests and hooks, ensure "done()" is called; if returning a Promise, ensure it resolves. (/private/tmp/claude-501/-Users-thyfriendlyfox-Projects-mouse/f1ee49c6-93f4-4a63-9c10-51994e47370d/scratchpad/term/mocha/test/suite.js)
+      at listOnTimeout (node:internal/timers:585:17)
+      at process.processTimers (node:internal/timers:521:7)
+
+  6) deep equality
+       compares objects:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+
+  {
+    a: [
+      1,
++     2
+-     3
+    ]
+  }
+
+      + expected - actual
+
+       {
+         "a": [
+           1
+      -    2
+      +    3
+         ]
+       }
+      
+      at Context.<anonymous> (test/suite.js:20:47)
+      at process.processImmediate (node:internal/timers:484:21)
+
+
+
+pass    sync passes
+fail    sync fails on a value | Expected values to be strictly equal:
+fail    sync fails on a throw | deliberate
+pending sync is pending
+pending sync is skipped
+pass    async resolves
+fail    async rejects | async boom
+pass    async callback style
+fail    async callback reports an error | cb boom
+fail    async times out | Timeout of 30ms exceeded. For async tests and hooks, ensure "done()" is called; 
+fail    deep equality compares objects | Expected values to be strictly deep-equal:
+failures: 6
+exit=1

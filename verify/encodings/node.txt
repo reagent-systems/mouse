@@ -1,0 +1,30 @@
+isEncoding: [true,true,true,true,true,true,true,true,true,true,true]
+roundtrip utf8: 68c3a96c6c6fe282ac -> "héllo€"
+roundtrip utf-8: 68c3a96c6c6fe282ac -> "héllo€"
+roundtrip utf16le: 6800e9006c006c006f00ac20 -> "héllo€"
+roundtrip ucs2: 6800e9006c006c006f00ac20 -> "héllo€"
+roundtrip ucs-2: 6800e9006c006c006f00ac20 -> "héllo€"
+roundtrip latin1: 68e96c6c6fac -> "héllo¬"
+roundtrip binary: 68e96c6c6fac -> "héllo¬"
+roundtrip ascii: 68e96c6c6fac -> "hillo,"
+roundtrip hex: deadbeef -> "deadbeef"
+roundtrip base64: 68656c6c6f -> "aGVsbG8="
+roundtrip base64url: 68656c6c6f -> "aGVsbG8"
+base64 vs base64url: +/++/w== | -_--_w
+base64url decodes -_: fbffbf
+base64 decodes +/: fbffbf
+utf16le of a surrogate pair: 34d81edd
+utf16le back: 𝄞
+latin1 high bytes: 255,128
+ascii high bytes: 127,0
+toString hex range: 0203
+fs write+read utf8: 4139 -> A9
+fs write+read latin1: 4139 -> A9
+fs write+read hex: a9 -> a9
+fs write+read base64: 03 -> Aw==
+StringDecoder split utf8: ""+"€"
+StringDecoder utf16le split: ""+"𝄞"
+stream setEncoding utf8: "é"
+stream setEncoding latin1: "Ã©"
+stream setEncoding hex: "c3a9"
+stream setEncoding base64: "w6k="

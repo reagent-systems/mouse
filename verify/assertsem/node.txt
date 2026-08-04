@@ -1,0 +1,37 @@
+NaN deep: pass
+key order: pass
+undef vs missing: THROW Expected values to be strictly deep-equal:
+map: pass
+map differs: THROW Expected values to be strictly deep-equal:
+map object key: pass
+set: pass
+set differs: THROW Expected values to be strictly deep-equal:
+date: pass
+date differs: THROW Expected values to be strictly deep-equal:
+regex: pass
+regex flags differ: THROW Expected values to be strictly deep-equal:
+buffer: pass
+buffer differs: THROW Expected values to be strictly deep-equal:
+circular: pass
+proto differs: THROW Expected values to be strictly deep-equal:
+loose 1 vs str: pass
+strict 1 vs str: THROW Expected values to be strictly deep-equal:
+nested arrays: pass
+array length: THROW Expected values to be strictly deep-equal:
+throws regex match: pass
+throws regex miss: THROW The input did not match the regular expression
+throws class match: pass
+throws class miss: THROW The error is expected to be an instance of "Ra
+throws object match: pass
+throws object miss: THROW Expected values to be strictly deep-equal:
+doesNotThrow clean: pass
+isDeepStrictEqual T: pass
+isDeepStrictEqual F: pass
+isDeep key order: pass
+strictEqual MSG "Expected values to be strictly equal:\n\n4 !== 5\n"
+deepStrictEqual MSG "Expected values to be strictly deep-equal:\n+ actual - expected\n\n  {\n    a: [\n      1,\n+     2\n-     3\n    ]\n  }\n"
+deepEqual MSG "Expected values to be loosely deep-equal:\n\n[\n  1,\n  2\n]\n\nshould loosely deep-equal\n\n[\n  1,\n  2,\n  3\n]"
+notDeepStrictEqual MSG "Expected \"actual\" not to be strictly deep-equal to:\n\n{\n  a: 1\n}\n"
+nestedDiff MSG "Expected values to be strictly deep-equal:\n+ actual - expected\n\n  {\n    a: 1,\n    b: {\n+     c: 2\n-     c: 9\n    }\n  }\n"
+throwsClass MSG "The error is expected to be an instance of \"RangeError\". Received \"TypeError\"\n\nError message:\n\nx"
+doesNotThrow MSG "Got unwanted exception.\nActual message: \"z\""

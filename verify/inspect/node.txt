@@ -1,0 +1,41 @@
+empty object: {}
+empty array: []
+nested: { a: [ 1, { b: 2 } ] }
+string in object: { s: 'hi' }
+bare string: 'hi'
+number-ish: [ 1, -0, NaN, Infinity, -Infinity, 1e+21 ]
+bigint: 10n
+symbol: Symbol(tag)
+undefined and null: [ undefined, null ]
+function: [Function: named]
+arrow: [Function (anonymous)]
+class: [class Thing]
+class instance: Point { x: 1 }
+date: 1970-01-01T00:00:00.000Z
+regexp: /ab+c/gi
+error first line: Error: boom
+error with code: Error: x
+map: Map(2) { 'a' => 1, 2 => 'b' }
+empty map: Map(0) {}
+set: Set(2) { 1, 'two' }
+empty set: Set(0) {}
+buffer: <Buffer 01 02 ff>
+typed array: Uint16Array(2) [ 1, 2 ]
+promise: Promise { <pending> }
+sparse array: [ 1, <1 empty item>, 3 ]
+array with extra props: [ 1, 2, extra: true ]
+nested depth 3: { a: { b: { c: [Object] } } }
+long array: [ 0, 1, 2 ]
+long array truncates: true
+circular: <ref *1> { name: 'loop', self: [Circular *1] }
+object with symbol key: { normal: 2, [Symbol(k)]: 1 }
+getter: { lazy: [Getter] }
+null prototype: [Object: null prototype] {}
+boxed primitives: [ [Number: 3], [String: 's'], [Boolean: true] ]
+format %s: a|5
+format %d %i: 42.9 42
+format %j: {"a":1}
+format %%: 100%%
+format extras: one two 3
+format object arg: { a: 1 }
+format no spec: { a: 1 } tail

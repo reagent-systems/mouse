@@ -154,13 +154,17 @@ enum GitRemote {
     static func clone(into root: URL, repoFullName: String, token: String) async throws -> FetchResult {
         try GitCore.initRepo(root)
         try? GitCore.setRemote(url(for: repoFullName), in: root)
-        let result = try await fetch(root: root, repoFullName: repoFullName, token: token, checkout: true)
+        let result = try await fetch(root: root, repoFullName: repoFullName, token: token, integrate: true)
         return result
     }
 
-    /// Fetch the default branch's history into the object store; optionally checkout.
+    /// Fetch the remote default branch's history into the object store. By default this is a
+    /// TRUE fetch: objects land in the store and only refs/remotes/origin/<branch> moves — the
+    /// local branch, HEAD, and worktree are untouched (integration is merge's job, per the
+    /// gospel). `integrate: true` is the clone path: additionally set the local branch ref +
+    /// HEAD and materialize the worktree.
     @discardableResult
-    static func fetch(root: URL, repoFullName: String, token: String, checkout: Bool) async throws -> FetchResult {
+    static func fetch(root: URL, repoFullName: String, token: String, integrate: Bool = false) async throws -> FetchResult {
         guard let advertised = try await discover(service: "git-upload-pack", repoFullName: repoFullName, token: token) else {
             throw RemoteError("git: repository not found")
         }
@@ -169,47 +173,55 @@ enum GitRemote {
             throw RemoteError("git: empty repository")
         }
 
-        // upload-pack request: want (with caps on the first line), flush, done.
-        let caps = "multi_ack_detailed side-band-64k ofs-delta agent=mouse"
-        var body = GitCore.pktLine("want \(wantSha) \(caps)\n")
-        body.append(GitCore.pktFlush)
-        body.append(GitCore.pktLine("done\n"))
+        // Skip the network when the remote tip is already in our store (we pushed it, or a
+        // prior fetch brought it) — only the tracking ref needs to move.
+        var count = 0
+        if (try? GitCore.readObject(wantSha, in: root)) == nil {
+            let body = uploadPackBody(want: wantSha, haves: Array(GitCore.branches(in: root).values))
+            var request = URLRequest(url: URL(string: "\(url(for: repoFullName))/git-upload-pack")!)
+            request.httpMethod = "POST"
+            request.setValue(basicAuth(token), forHTTPHeaderField: "Authorization")
+            request.setValue("application/x-git-upload-pack-request", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200 else { throw RemoteError("git: fetch failed (\(code))") }
+            count = try GitCore.readPackfile(extractPack(data), into: root)
+        }
 
-        var request = URLRequest(url: URL(string: "\(url(for: repoFullName))/git-upload-pack")!)
-        request.httpMethod = "POST"
-        request.setValue(basicAuth(token), forHTTPHeaderField: "Authorization")
-        request.setValue("application/x-git-upload-pack-request", forHTTPHeaderField: "Content-Type")
-        request.httpBody = body
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else { throw RemoteError("git: fetch failed (\(code))") }
-
-        let pack = try demuxSideBand(data)
-        let count = try GitCore.readPackfile(pack, into: root)
-
-        try GitCore.setRef(branch, to: wantSha, in: root)
-        try GitCore.setHead(branch: branch, in: root)
         GitCore.rememberRemote(branch: branch, sha: wantSha, in: root)
-        if checkout { try GitCore.checkout(branch, in: root) }
+        if integrate {
+            try GitCore.setRef(branch, to: wantSha, in: root)
+            try GitCore.setHead(branch: branch, in: root)
+            try GitCore.checkout(branch, in: root)
+        }
         return FetchResult(branch: branch, sha: wantSha, objectCount: count)
     }
 
-    /// Extract the packfile from a side-band-64k response: after an initial "NAK" pkt-line, each
-    /// pkt-line's first byte is the channel (1 = pack data, 2 = progress, 3 = error).
-    private static func demuxSideBand(_ data: Data) throws -> Data {
+    /// The upload-pack request: want (caps on the first line), flush, our haves, done. Single-
+    /// round negotiation: the server ACKs the haves it recognizes and builds the pack against
+    /// them, so a fetch transfers only what's new (an empty haves list fetches everything).
+    static func uploadPackBody(want: String, haves: [String]) -> Data {
+        let caps = "multi_ack_detailed side-band-64k ofs-delta agent=mouse"
+        var body = GitCore.pktLine("want \(want) \(caps)\n")
+        body.append(GitCore.pktFlush)
+        for sha in haves { body.append(GitCore.pktLine("have \(sha)\n")) }
+        body.append(GitCore.pktLine("done\n"))
+        return body
+    }
+
+    /// Extract the packfile from an upload-pack response. Negotiation pkt-lines ("ACK <sha> …",
+    /// "NAK") pass through un-banded and are skipped — unambiguous because a side-band channel
+    /// byte is 1/2/3, never ASCII 'A'/'N'. Banded lines: 1 = pack data, 2 = progress, 3 = error.
+    static func extractPack(_ data: Data) throws -> Data {
         var pack = Data()
         for line in GitCore.parsePktLines(data) {
             guard let channel = line.first else { continue }
-            let payload = line.dropFirst()
             switch channel {
-            case 1: pack.append(payload)
-            case 3: throw RemoteError("git: \(String(data: payload, encoding: .utf8) ?? "remote error")")
-            default: break   // 2 = progress, and the "NAK" line (no channel byte) is ignored
+            case 1: pack.append(line.dropFirst())
+            case 3: throw RemoteError("git: \(String(data: line.dropFirst(), encoding: .utf8) ?? "remote error")")
+            default: break   // 2 = progress; anything else is an ACK/NAK negotiation line
             }
-        }
-        // The leading "NAK\n" pkt-line has no channel byte; if it slipped in, trim a stray NAK.
-        if pack.starts(with: Data("ACK".utf8)) || pack.starts(with: Data("NAK".utf8)) {
-            if let range = pack.firstRange(of: Data("PACK".utf8)) { pack = pack.subdata(in: range.lowerBound..<pack.endIndex) }
         }
         return pack
     }

@@ -21,3 +21,8 @@ node_modules/
 .env
 .env.*
 .claude/settings.local.json
+
+# Ralph-loop runtime state: an iteration counter that changes on every tick,
+# and agent worktrees. afca53e removed the loop file from tracking once already.
+.claude/ralph-loop.local.md
+.claude/worktrees/

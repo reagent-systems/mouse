@@ -1,0 +1,9 @@
+json: status=200 ok=true n=42 type=object
+headers readable: application/json
+post: method=POST body={"hello":"world"} custom=yes
+post content-type: application/json
+redirect followed: status=200 ok=true
+500 rejects: status=500 isAxiosError=true
+timeout rejects: code=ECONNABORTED
+responseType text: string {"ok":true,"n":42}
+instance: custom=inst body=raw body

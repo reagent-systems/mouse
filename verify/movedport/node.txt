@@ -1,0 +1,5 @@
+bad context: ERR_INVALID_ARG_TYPE
+both directions: true
+moved heard: {"from":"peer"}
+peer received: {"from":"moved"}
+shape: post=function on=undefined close=function start=function

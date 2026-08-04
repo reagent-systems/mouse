@@ -1,0 +1,9 @@
+read stream: open,ready,data,end,close
+write stream: open,ready,finish,close
+read stream missing file: error,close
+gzip stream: finish,data,data,end,close
+client socket: connect,ready,data,end,close
+server lifecycle: listening,connection,close
+http client request: socket,response,res-end,close
+http server side: request,res-finish,req-end
+writable end twice: finish,close

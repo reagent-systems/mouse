@@ -1,0 +1,3 @@
+lifecycle: spawn exit close
+saw data: true
+exitCode: 0

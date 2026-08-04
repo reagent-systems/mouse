@@ -1,0 +1,4 @@
+Request: method="POST" mode="cors" credentials="same-origin" cache="default" redirect="follow" referrer="about:client" referrerPolicy="" integrity="" keepalive=false destination="" duplex="half" isHistoryNavigation=false isReloadNavigation=false
+Request custom: mode="no-cors" credentials="include" keepalive=true integrity="sha256-x"
+accepted: server===listener true bufferSize=0 family=IPv4 resetAndDestroy=function
+client: server=null bufferSize=0 family=IPv4

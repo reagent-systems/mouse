@@ -1,0 +1,10 @@
+AbortSignal.timeout fires: aborted
+AbortSignal.any fires: aborted
+timers.setTimeout signal: aborted
+events.on signal: aborted
+fs.readFile signal: aborted
+fs.promises.readFile signal: aborted
+fs.watch signal closes it: closed
+stream.finished signal: aborted
+stream/promises pipeline signal: aborted
+readline signal closes: closed

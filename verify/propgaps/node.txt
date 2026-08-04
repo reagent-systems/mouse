@@ -1,0 +1,9 @@
+http defaults: httpAllowHalfOpen=false maxRequestsPerSocket=0 requireHostHeader=true rejectNonStandardBodyWrites=false connectionsCheckingInterval=30000 maxHeaderSize=undefined insecureHTTPParser=undefined joinDuplicateHeaders=undefined
+net defaults: noDelay=false keepAlive=false keepAliveInitialDelay=0 pauseOnConnect=false highWaterMark=65536
+net configured: noDelay=true keepAlive=true keepAliveInitialDelay=0 pauseOnConnect=true
+zlib initial: bytesWritten=0 allowHalfOpen=true
+decoder idle: lastNeed=0 lastTotal=0 lastChar=4
+decoder holding: lastNeed=1 lastTotal=3
+port: hasRef=false onmessageerror=null
+port after unref: hasRef=false
+zlib total after finish: bytesWritten=150

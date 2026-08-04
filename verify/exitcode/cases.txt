@@ -1,0 +1,12 @@
+process.exitCode=3
+process.exitCode=3; process.exit()
+process.exitCode=3; process.exit(0)
+process.exitCode=0
+process.exitCode=null
+setTimeout(()=>{process.exitCode=7},10)
+process.exitCode=3; process.exitCode=undefined
+process.exitCode='4'
+process.exit(5)
+process.exitCode=2; setTimeout(()=>{process.exitCode=9},5)
+process.on('exit',()=>{});process.exitCode=6
+process.exitCode=1; Promise.resolve().then(()=>{process.exitCode=8})

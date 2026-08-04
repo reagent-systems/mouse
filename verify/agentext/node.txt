@@ -1,0 +1,7 @@
+http globalAgent: http: 80
+https globalAgent: https: 443
+distinct Agent classes: true
+agent reports: protocol=http: defaultPort=80 maxTotalSockets=Infinity totalSocketCount=0
+createConnection saw the requested port: true
+body came from: REAL
+agent was used: true

@@ -16,6 +16,10 @@ targets:
           - Fonts
       - path: Mouse/Fonts/IBMPlexMono-Bold.ttf
         buildPhase: resources
+      # The language-runtime catalog is DATA, and it lives outside Mouse/ on purpose: the
+      # "language as data" proof is a grep of swift/Mouse for a language's name finding nothing.
+      - path: Runtimes.json
+        buildPhase: resources
     # UIAppFonts has no INFOPLIST_KEY_* build setting, so it must come from a real Info.plist;
     # Xcode merges this file with the generated one.
     info:
@@ -29,7 +33,8 @@ targets:
       CURRENT_PROJECT_VERSION: "1"
       # libz (system zlib) for the git engine's packfile inflate — GitCore.inflateStream needs
       # exact zlib-member delimiting, which the Compression framework can't do.
-      OTHER_LDFLAGS: "-lz"
+      # -lresolv: res_9_query for the dns.resolve* family (system library, not private API)
+      OTHER_LDFLAGS: "-lz -lresolv"
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

@@ -626,16 +626,24 @@ enum GitCore {
         return nil
     }
 
-    /// Merge `otherBranch` into the current branch. Fast-forwards when possible; otherwise a
-    /// three-way merge per file. Non-overlapping edits merge cleanly and commit; overlapping
-    /// edits are written with `<<<<<<< ======= >>>>>>>` markers and left for the user (no commit).
+    /// Merge `otherBranch` into the current branch (resolves its tip, then merges by commit).
     static func merge(_ otherBranch: String, in root: URL,
+                      author: String = "mouse <mouse@local>") throws -> MergeResult {
+        guard let theirSha = branches(in: root)[otherBranch] else {
+            throw GitError("no such branch: \(otherBranch)")
+        }
+        return try merge(commit: theirSha, label: "branch '\(otherBranch)'", in: root, author: author)
+    }
+
+    /// Merge an arbitrary commit into the current branch — branch merges and sync's pull half
+    /// (merging origin/<branch>'s fetched tip) share this path. Fast-forwards when possible;
+    /// otherwise a three-way merge per file. Non-overlapping edits merge cleanly and commit;
+    /// overlapping edits are written with `<<<<<<< ======= >>>>>>>` markers and left for the
+    /// user (no commit). `label` names the other side in the merge commit message.
+    static func merge(commit theirSha: String, label: String, in root: URL,
                       author: String = "mouse <mouse@local>") throws -> MergeResult {
         guard let branch = currentBranch(in: root), let ourSha = refSha(branch, in: root) else {
             throw GitError("no commits on the current branch")
-        }
-        guard let theirSha = branches(in: root)[otherBranch] else {
-            throw GitError("no such branch: \(otherBranch)")
         }
         if ourSha == theirSha { return .upToDate }
         let base = try mergeBase(ourSha, theirSha, in: root)
@@ -678,7 +686,7 @@ enum GitCore {
         var body = "tree \(treeSha)\n"
         body += "parent \(ourSha)\nparent \(theirSha)\n"
         body += "author \(author) \(timestamp) +0000\ncommitter \(author) \(timestamp) +0000\n"
-        body += "\nMerge branch '\(otherBranch)'\n"
+        body += "\nMerge \(label)\n"
         let sha = try writeObject(.commit, Data(body.utf8), in: root)
         try updateHead(to: sha, in: root)
         try? writeIndex(tree: treeSha, in: root)
