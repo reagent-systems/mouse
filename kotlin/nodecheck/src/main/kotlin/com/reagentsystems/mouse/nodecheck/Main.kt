@@ -3729,6 +3729,74 @@ private fun cipherCorpus(node: String?, parent: File) {
         }
     }
 
+    // ---- lengths and bytes, which the corpus above does not vary ----
+    //
+    // Everything above encrypts ONE 42-byte ASCII plaintext. That is the shape of input a person
+    // writing a check reaches for, and this suite has now been bitten twice by exactly that: the
+    // `RSA-SHA256` spelling and PBKDF2's non-ASCII password were both invisible for no other
+    // reason. So the lengths that matter to a block mode are swept here, over content that uses
+    // every byte value rather than the printable ones.
+    //
+    // 16 and 32 are the ones to watch: PKCS#7 appends a WHOLE extra block when the input is an
+    // exact multiple of the block size, and an implementation that "optimises" that away encrypts
+    // and decrypts its own output perfectly while disagreeing with everyone else.
+    val sweepKey = hex(32)
+    val sweepIv = hex(16)
+    val sweepGcmIv = hex(12)
+    val lengths = listOf(0, 1, 15, 16, 17, 31, 32, 33, 64, 255)
+    val binary = { n: Int -> ByteArray(n) { (it % 256).toByte() } }
+    val sweepPlan = StringBuilder("const crypto = require('crypto');\nconst out = [];\n")
+    for (algorithm in listOf("aes-256-cbc", "aes-256-ctr", "aes-256-gcm")) {
+        val aead = algorithm.endsWith("-gcm")
+        val ivFor = if (aead) sweepGcmIv else sweepIv
+        for (n in lengths) {
+            sweepPlan.append("{ const c = crypto.createCipheriv(${Json.write(algorithm)},")
+                .append("Buffer.from(${Json.write(sweepKey)},'base64'),")
+                .append("Buffer.from(${Json.write(ivFor)},'base64'));\n")
+            if (aead) sweepPlan.append("c.setAAD(Buffer.alloc(0));\n")
+            sweepPlan.append("const b = Buffer.concat([c.update(Buffer.from(")
+                .append(Json.write(Base64.getEncoder().encodeToString(binary(n))))
+                .append(",'base64')), c.final()]);\n")
+                .append("out.push(b.toString('base64') + '|' + ")
+                .append(if (aead) "c.getAuthTag().toString('base64')" else "''")
+                .append("); }\n")
+        }
+    }
+    sweepPlan.append("console.log(out.join('\\n'));\n")
+    File(scratch, "sweep.js").writeText(sweepPlan.toString())
+    val (sweepStatus, sweepText) = run(listOf(node, "sweep.js"), scratch)
+    if (sweepStatus != 0) {
+        check(false, "real node ran the cipher length sweep:\n${sweepText.take(400)}")
+    } else {
+        val expected = sweepText.trim().lines()
+        var at = 0
+        for (algorithm in listOf("aes-256-cbc", "aes-256-ctr", "aes-256-gcm")) {
+            val aead = algorithm.endsWith("-gcm")
+            val ivFor = if (aead) sweepGcmIv else sweepIv
+            for (n in lengths) {
+                val plainBase64 = Base64.getEncoder().encodeToString(binary(n))
+                val ours = NodeCrypto.cipherSeal(algorithm, sweepKey, ivFor, plainBase64, "")
+                val mine = if (ours == null) "<null>" else "${ours.first}|${ours.second}"
+                checkEqual(
+                    mine, expected.getOrElse(at) { "<missing>" },
+                    "$algorithm over $n bytes is byte-identical to node's",
+                )
+                // And it must come back. A cipher that agrees with node on the way out and cannot
+                // read its own output would pass the check above alone.
+                if (ours != null) {
+                    checkEqual(
+                        NodeCrypto.cipherOpen(algorithm, sweepKey, ivFor, ours.first, ours.second, "")
+                            ?: "<null>",
+                        plainBase64,
+                        "$algorithm over $n bytes round-trips",
+                    )
+                }
+                at += 1
+            }
+        }
+        check(at == expected.size, "the sweep lines up with node's — $at vs ${expected.size}")
+    }
+
     // An AEAD whose tag has been touched must FAIL, not decrypt to something. This is the one
     // check that separates authenticated encryption from encryption.
     val key = hex(32)

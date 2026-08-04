@@ -272,6 +272,28 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   spelling anywhere, and `md5` works as a side effect. On the phone, scrypt
   reproduces RFC 7914's published vector.
 
+  **OPEN, found by `jose` and reduced to three lines: `require()` of an ES
+  module from a HAND-WRITTEN CommonJS file yields `{}`.** Not a jose problem
+  and not a barrel problem — `require('./leaf.mjs')` where leaf.mjs is two
+  plain named exports answers an empty object too.
+
+  The mechanism is not a bug in the sense of broken code; it is a design
+  decision whose blast radius was not seen. `node-host.js` returns a PROMISE of
+  the exports when the required module is ESM, and says why: every transpiled
+  import site reads `if (x instanceof Promise) x = await x`, and a module with
+  top-level await genuinely is not finished yet. From a transpiled importer
+  that is right. From a CommonJS file a user wrote by hand there is no such
+  unwrapping, so `require('jose')` hands back a promise, `Object.keys` of it is
+  empty, and the failure surfaces as `jose.generateKeyPair is not a function` —
+  a message that points nowhere near the cause.
+
+  Real node does neither: older node throws `ERR_REQUIRE_ESM`, and node 22
+  returns the namespace synchronously for a module with no top-level await.
+  Either is a defensible target and they are different amounts of work, so this
+  is written down rather than guessed at. The entry path is unaffected —
+  `npx create-vite` is an ES module and runs — which is exactly why nothing
+  caught this until a real package was required from real user-shaped code.
+
   **`unhandledRejection` was a sixth, and false in a more interesting way than
   the rest.** It said "a WebView exposes no equivalent hook, so nothing can
   call this". There IS a hook — it is simply not the one the reason went
