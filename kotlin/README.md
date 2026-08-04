@@ -40,11 +40,14 @@ stop building off-device.
 | `:screencheck` | The headless gate for `:terminal` |
 | `:packages` | The package manager: semver, the npm registry client, the hoisting tree resolver, integrity-checked installs, the `node_modules` manifest, and `TarGz`. Pure Kotlin/JVM, JDK-only |
 | `:pkgcheck` | The headless gate for `:packages` |
+| `:node` | The Node layer's portable half: the bootstrap's extraction from the iOS source, the `__mouse` bridge protocol, the process globals and the event loop's bookkeeping. Pure Kotlin/JVM, JDK-only |
+| `:nodecheck` | The headless gate for `:node` — including the bootstrap-drift check |
 
-`:terminal` and `:packages` are modules rather than files in `:app` for the
-reason phase T learned on iOS: logic that shares a file with UI is logic no
-harness can reach. They run on a JVM, so the screen and the whole npm install
-path are gated without an emulator.
+`:terminal`, `:packages` and `:node` are modules rather than files in `:app` for
+the reason phase T learned on iOS: logic that shares a file with UI is logic no
+harness can reach. They run on a JVM, so the screen, the whole npm install path
+and everything about the Node layer except the WebView are gated without an
+emulator.
 
 ## Verifying the terminal screen
 
@@ -78,6 +81,65 @@ the tree and requiring out of it — a mocked registry grades the mock. Needs
 so they cache under `~/.cache/mouse-verify/npm-tarballs`; packuments are
 deliberately fetched every time, because a cached one loses a publish race
 against the live pnpm it is compared with.
+
+## Verifying the Node layer
+
+```sh
+cd kotlin
+ANDROID_HOME=~/Library/Android/sdk ./gradlew :nodecheck:run
+```
+
+Same shape, one verdict line. The load-bearing check is **drift**. The engine's
+JavaScript half — 13,993 lines, the portable 72 % measured in
+`plans/android-parity.md` — is not rewritten for Android: it is copied verbatim
+out of the Swift raw-string literal in `swift/Mouse/NodeEngine.swift` into
+`app/src/main/assets/node-bootstrap.js`. A copy that diverges silently is worse
+than no copy, because it *looks* like the gated engine, so the copy is never
+trusted: the harness re-extracts it from the shipping Swift file on every run
+and diffs. Same trick as `:screencheck` reading `verify/` fixtures instead of
+copying them.
+
+The transform is explicit and part of the comparison — Swift's own
+multiline-literal indentation stripping, and a hard failure on any `\#`
+raw-string escape, since one would mean the copy is not verbatim. `--sync`
+rewrites the asset using the *same* code that grades it:
+
+```sh
+./gradlew :nodecheck:run --args=--sync
+```
+
+Also gated there: the bridge partition (every `bridge.<name>` the shipping
+bootstrap calls is either implemented by the Android host or explicitly
+deferred, exactly once — so an iOS-side addition turns up as a red gate rather
+than as `undefined is not a function` inside 14,000 lines), the process globals
+the bootstrap reads while it loads, the event loop's bookkeeping, `node --check`
+on the extracted bootstrap, and a **load smoke**: the five scripts loaded in the
+host's order under real `node` with a JavaScript stand-in for `__mouseHost`,
+running `NodeSmoke.PROGRAM` — the same program the on-device gate runs, graded
+by the same grader.
+
+### On the device
+
+The WebView cannot be reached from a JVM, so the host itself is gated on a
+device or emulator. Debug builds carry an exported receiver for it:
+
+```sh
+adb shell am broadcast \
+  -n com.reagentsystems.mouse/com.reagentsystems.mouse.nodehost.NodeCheckReceiver \
+  -a com.reagentsystems.mouse.NODECHECK
+```
+
+`am broadcast` prints the verdict as the result data (`Broadcast completed:
+result=0, data="NODE WEBVIEW: … MATCH"`). It is also in logcat, with a line per
+failing check ahead of it:
+
+```sh
+adb logcat -d -s MouseNodeCheck
+```
+
+The app does not need to be running; the broadcast starts it. Because the
+program and its grading are shared with `:nodecheck`, an on-device MISMATCH
+means the WebView rather than the corpus.
 
 ## Running on an emulator
 
@@ -151,9 +213,28 @@ Feature parity with the iOS app, built natively in Compose:
   shell commands that drive it (`npm install`, `npx`, `npm run`) are phase G's
   job on this platform, because they need the Node layer to run what they
   install
+- **Node layer, foundation** (`:node` + `nodehost/`) — the iOS engine's
+  JavaScript bootstrap, verbatim, running in a headless WebView with a Kotlin
+  bridge under it: `console`, `process` (argv, env, cwd, version, exit code)
+  and timers with node's tick discipline. Gated by `:nodecheck` off-device and
+  by a debug broadcast on-device. `fs`, module loading, sockets, crypto,
+  workers and child processes are not wired yet and refuse by name
 
 ## Known Android nuances
 
+- **`process.platform` reports `darwin`, and will until iOS makes it a host
+  value.** It is a constant inside the shared bootstrap
+  (`platform: 'darwin'`, `arch: 'arm64'`), not something the host supplies —
+  unlike `argv`, `env` and `cwd`, which arrive through `__argv`/`__env`/`__cwd`.
+  Correcting it means adding a `__platform` global on the Swift side, and
+  `swift/` is frozen for this loop, so it is recorded rather than fixed.
+- **The WebView's global object is a `Window`, and the bootstrap assigns over
+  parts of it.** `globalThis.crypto = {…}` against an accessor with no setter
+  throws in strict mode — at line 768 of 13,993, taking the whole engine with
+  it. JavaScriptCore never sees this: its global owns almost nothing. So the
+  host redefines every global the bootstrap assigns as a plain writable
+  property first (`Bootstrap.unlockGlobalsScript`), and the list is derived
+  from the shipping bootstrap rather than written by hand.
 - **Edge-swipe vs. the system back gesture.** On gesture-navigation devices,
   Android reserves the screen edges for the back gesture. The ring edge-swipe
   claims those bands with `Modifier.systemGestureExclusion()` (the standard

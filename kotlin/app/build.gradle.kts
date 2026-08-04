@@ -40,6 +40,10 @@ dependencies {
     // The package manager, and `TarGz` with it (the workspace clone unpacks through the same
     // reader the npm installer does). Pure-JVM for the same reason — see packages/.
     implementation(project(":packages"))
+    // The Node layer's portable half: the bootstrap asset's extraction (and drift gate), the
+    // `__mouse` bridge protocol, the process globals and the event loop's bookkeeping. The
+    // WebView that runs the engine is in this module (`nodehost/`) because it is framework.
+    implementation(project(":node"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))

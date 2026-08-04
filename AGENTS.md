@@ -423,14 +423,16 @@ faithful re-implementation, file-for-file where it helps
 (`Shell.swift`↔`MouseShell.kt`, `CarouselDeck.swift`↔`Model.kt`, etc.).
 
 Android also has headless gates: `./gradlew :screencheck:run` runs the
-terminal-screen corpus and `./gradlew :pkgcheck:run` runs the package-manager
+terminal-screen corpus, `./gradlew :pkgcheck:run` runs the package-manager
 corpus — both the iOS ones, ported assertion for assertion, reading the same
-`verify/` fixtures and hitting the same live npm registry — and each prints
+`verify/` fixtures and hitting the same live npm registry — and
+`./gradlew :nodecheck:run` gates the Node layer's portable half. Each prints
 one verdict line ending in MATCH or MISMATCH. There is no JUnit
 (invariant #4); they are `main()`s, the same shape as the Swift harnesses.
-The engines they gate live in `kotlin/terminal/` and `kotlin/packages/`, pure
-Kotlin/JVM modules with no Android dependency, for the reason phase T learned
-on iOS: logic that shares a file with UI is logic no harness can reach.
+The engines they gate live in `kotlin/terminal/`, `kotlin/packages/` and
+`kotlin/node/`, pure Kotlin/JVM modules with no Android dependency, for the
+reason phase T learned on iOS: logic that shares a file with UI is logic no
+harness can reach.
 `:packages` brings its own JSON reader/writer — `org.json` is in the Android
 framework but not the JDK, so using it would cost a third-party artifact AND
 stop the module building off-device. `TarGz` lives there too, not in
@@ -441,13 +443,38 @@ integrity-checked) and never caches PACKUMENTS — a cached packument loses a
 publish race against the live `pnpm` it is graded against, which is the same
 trap `verify/pkg` documents from the other side.
 **Phases T and F are ported (terminal screen, package manager); phase G — the
-Node layer — is still iOS-only by a recorded decision, not an oversight** —
-see "Android parity" in system.md for the measured split (the Node engine is
-72 % portable JS bootstrap, 28 % host bridge) and why WebView +
-`@JavascriptInterface` is the parity path that keeps invariant #4. Because
-`npm install` is real on Android but `node` is not yet, the msh commands that
-drive the installer (`npm`/`npx`/`npm run`) stay unported — they exist to run
-what they install.
+Node layer — is UNDER WAY on the WebView path** (`plans/android-parity.md`
+milestone 3), which is the measured split: the engine is 72 % portable JS
+bootstrap, 28 % host bridge, and WebView + `@JavascriptInterface` is the
+parity route that keeps invariant #4. Milestone 3a is in — the bootstrap,
+`console`, `process` and timers. Because `node` is only a foundation there,
+the msh commands that drive the installer (`npm`/`npx`/`npm run`) stay
+unported: they exist to run what they install.
+**The Android bootstrap is a COPY, and the gate is what keeps it honest.**
+`kotlin/app/src/main/assets/node-bootstrap.js` is `NodeEngine.swift`'s raw
+string, verbatim; `:nodecheck` re-extracts it from the shipping Swift file on
+every run and fails on any difference, and `--args=--sync` regenerates it with
+the same code that grades it. Do NOT hand-edit the asset, and do not "port"
+the bootstrap — a divergent copy is worse than none, because it reads as the
+gated engine. Every `bridge.<name>` the bootstrap calls is partitioned in
+`HostBridge` into implemented or deferred, and the gate fails on an
+unaccounted one, so adding a bridge method on the iOS side turns up as a red
+Android gate rather than as `undefined is not a function` inside 14,000 lines.
+**The Android bridge cannot pass a function.** `@JavascriptInterface` carries
+only primitives and strings, so `bridge.setTimer(fn, …)` — which on iOS hands
+JavaScriptCore the callback itself — becomes a JS-side registry keyed by an id
+the host returns (`node-host.js`), and the host re-enters through
+`__mouseDispatch`. Keep callbacks in JS; only ids cross.
+**A WebView's global object is a `Window`, and some of what the bootstrap
+installs is already an accessor there** — `globalThis.crypto = {…}` throws in
+strict mode and kills the engine at line 768 of 13,993, a failure JSC never
+sees because its global owns almost nothing. `Bootstrap.unlockGlobalsScript`
+redefines every global the bootstrap assigns as writable first, and derives
+the list from the bootstrap so it cannot rot.
+The WebView itself is not JVM-gateable, so debug builds carry an
+adb-triggerable check (`NodeCheckReceiver`, `kotlin/README.md`) running the
+same program `:nodecheck` runs under real `node` — which is what makes an
+on-device MISMATCH mean the WebView rather than the corpus.
 
 ## Invariants
 

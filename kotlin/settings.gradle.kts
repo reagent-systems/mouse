@@ -29,3 +29,9 @@ include(":screencheck")
 // same reason — see packages/build.gradle.kts.
 include(":packages")
 include(":pkgcheck")
+// The Node layer's portable half — the bootstrap extraction and its drift gate, the `__mouse`
+// bridge protocol, the process globals and the event loop's bookkeeping — and its headless gate.
+// The WebView that actually runs the engine is framework, so it lives in `:app`; see
+// node/build.gradle.kts for where the line is drawn and why.
+include(":node")
+include(":nodecheck")
