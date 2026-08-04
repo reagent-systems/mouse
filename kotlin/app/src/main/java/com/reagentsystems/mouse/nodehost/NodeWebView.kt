@@ -246,6 +246,14 @@ class NodeWebView(
          * and it is seeded by the OS, which is the property that matters. Base64 out, because the
          * bridge carries strings and the bootstrap already does `Buffer.from(…, 'base64')`.
          */
+        @JavascriptInterface
+        fun hkdf(digest: String, key: String, salt: String, info: String, length: Int): String? =
+            NodeCrypto.hkdf(digest, key, salt, info, length)
+
+        @JavascriptInterface
+        fun scrypt(password: String, salt: String, n: Int, r: Int, p: Int, length: Int): String? =
+            NodeCrypto.scrypt(password, salt, n, r, p, length)
+
         // ---------------------------------------------------------- asymmetric keys ----
         //
         // Fourteen methods over one parser, per `NodeKeys`. Everything travels as PEM or base64

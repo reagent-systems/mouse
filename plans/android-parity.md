@@ -252,11 +252,25 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   token refused. ES256 goes through `ecdsa-sig-formatter`, so a real library
   exercised the `ieee-p1363` conversion rather than a check that knew to ask.
 
-  `scrypt` and `hkdf` keep the entry the asymmetric surface used to share, with
-  a reason of their own now: `SecretKeyFactory` covers PBKDF2 and nothing else
-  here, scrypt is not a JCA algorithm at any API level, and HKDF reached the JDK
-  only at 24 against a platform that has never shipped it. Both are short
-  constructions over `Mac`, so they are unwritten rather than unavailable.
+  **`scrypt` and `hkdf` are DONE too, and writing them found a bug in the code
+  beside them.** Their reason had just been rewritten to say they were unwritten
+  rather than unavailable — short constructions over `Mac` — which by this
+  loop's own pattern is an invitation. Both are written now, graded BYTE FOR
+  BYTE against real node (they are deterministic, so a round trip would prove
+  nothing: a KDF's whole job is to agree with other implementations of the same
+  RFC), and the deferral entry is gone rather than reworded.
+
+  What that turned up: `pbkdf2`, already shipped and already gated, was WRONG
+  for any password byte over 0x7f. It went through `SecretKeyFactory`, whose
+  `PBEKeySpec` takes chars, and the comment defending it claimed a latin-1
+  mapping round-trips. The JDK encodes those chars as UTF-8. Measured against
+  real node for the password `ff fe 41`, the two disagreed completely. Every
+  case in the corpus used an ASCII password, where the two encodings agree —
+  the same blind spot that hid the `RSA-SHA256` normaliser, and for the same
+  reason: a check written by hand uses the input the writer had in mind. All
+  three KDFs are now computed over BYTES with no charset and no provider
+  spelling anywhere, and `md5` works as a side effect. On the phone, scrypt
+  reproduces RFC 7914's published vector.
 
   **`unhandledRejection` was a sixth, and false in a more interesting way than
   the rest.** It said "a WebView exposes no equivalent hook, so nothing can

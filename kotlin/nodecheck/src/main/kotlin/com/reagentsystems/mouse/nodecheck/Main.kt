@@ -2664,10 +2664,20 @@ private fun cryptoCorpus(node: String?, parent: File) {
                 .append(".update(Buffer.from('hello world','utf8')).digest('base64'));\n")
         }
     }
-    for (digest in listOf("sha1", "sha256", "sha512")) {
+    for (digest in listOf("md5", "sha1", "sha256", "sha512")) {
         plan.append("out.push(crypto.pbkdf2Sync(Buffer.from('password','utf8'),")
             .append("Buffer.from('salt','utf8'),1000,32,${Json.write(digest)}).toString('base64'));\n")
     }
+    // PASSWORDS THAT ARE NOT ASCII. Every case above is, and that is exactly why the old
+    // `PBEKeySpec` route passed the corpus while disagreeing with node for any byte over 0x7f:
+    // the JDK encodes those chars as UTF-8, not latin-1. An accented passphrase is ordinary input.
+    for (password in listOf("[255,254,65]", "[0]", "[]", "[195,169,110]")) {
+        plan.append("out.push(crypto.pbkdf2Sync(Buffer.from($password),")
+            .append("Buffer.from('salt','utf8'),1000,32,'sha256').toString('base64'));\n")
+    }
+    // And a key length that is not a whole number of blocks, which exercises the block loop.
+    plan.append("out.push(crypto.pbkdf2Sync(Buffer.from('password','utf8'),")
+        .append("Buffer.from('salt','utf8'),17,70,'sha256').toString('base64'));\n")
     plan.append("console.log(out.join('\\n'));\n")
     File(scratch, "plan.js").writeText(plan.toString())
     val (status, text) = run(listOf(node, "plan.js"), scratch)
@@ -2692,20 +2702,113 @@ private fun cryptoCorpus(node: String?, parent: File) {
             label.add("hmac-$digest with a ${key.length}-byte key")
         }
     }
-    for (digest in listOf("sha1", "sha256", "sha512")) {
+    for (digest in listOf("md5", "sha1", "sha256", "sha512")) {
         ours.add(NodeCrypto.pbkdf2(b64("password"), b64("salt"), 1000, 32, digest) ?: "<null>")
         label.add("pbkdf2-$digest, 1000 rounds, 32 bytes")
     }
+    for ((name, bytes) in listOf(
+        "a high-byte password" to byteArrayOf(-1, -2, 65),
+        "a NUL password" to byteArrayOf(0),
+        "an EMPTY password" to ByteArray(0),
+        "a UTF-8 accented password" to byteArrayOf(-61, -87, 110),
+    )) {
+        ours.add(
+            NodeCrypto.pbkdf2(
+                Base64.getEncoder().encodeToString(bytes), b64("salt"), 1000, 32, "sha256",
+            ) ?: "<null>",
+        )
+        label.add("pbkdf2 with $name")
+    }
+    ours.add(NodeCrypto.pbkdf2(b64("password"), b64("salt"), 17, 70, "sha256") ?: "<null>")
+    label.add("pbkdf2 over a partial final block — 70 bytes")
 
     checkEqual(ours.size.toString(), expected.size.toString(), "the crypto corpus lines up with node's")
     if (ours.size != expected.size) return
     for (i in ours.indices) checkEqual(ours[i], expected[i], "crypto: ${label[i]}")
 
+    // ---- the two KDFs the JCA has no factory for ----
+    //
+    // Both are DETERMINISTIC, so this asks for the strongest thing available: byte-identical
+    // output, not a round trip. A KDF that round-trips through itself proves nothing at all, since
+    // there is nothing to trip against — its whole job is to agree with the other implementations
+    // of the same RFC.
+    val kdfPlan = StringBuilder("const crypto = require('crypto');\nconst out = [];\n")
+    val hkdfCases = listOf(
+        // digest, key, salt, info, length. The empty salt is RFC 5869's own default and reaches
+        // the zero-length-key branch in the HMAC underneath.
+        listOf("sha256", "key material", "salt", "info", "32"),
+        listOf("sha256", "k", "", "", "42"),
+        listOf("sha1", "key material", "salt", "context", "20"),
+        listOf("sha512", "key material", "salt", "context", "128"),
+        // Longer than one block, to exercise the counter and the final partial block.
+        listOf("sha256", "key material", "salt", "info", "100"),
+    )
+    for (case in hkdfCases) {
+        kdfPlan.append("out.push(crypto.hkdfSync(${Json.write(case[0])},")
+            .append("Buffer.from(${Json.write(case[1])},'utf8'),")
+            .append("Buffer.from(${Json.write(case[2])},'utf8'),")
+            .append("Buffer.from(${Json.write(case[3])},'utf8'),${case[4]}));\n")
+    }
+    kdfPlan.append("out.forEach((v,i)=>{out[i]=Buffer.from(v).toString('base64')});\n")
+    val scryptCases = listOf(
+        // password, salt, N, r, p, length. RFC 7914's own vectors are among these.
+        listOf("password", "NaCl", "1024", "8", "16", "64"),
+        listOf("", "", "16", "1", "1", "64"),
+        listOf("pleaseletmein", "SodiumChloride", "16384", "8", "1", "64"),
+        // p > 1 is the case that exercises ROMix being applied per block rather than once.
+        listOf("secret", "salt", "256", "4", "3", "48"),
+    )
+    for (case in scryptCases) {
+        kdfPlan.append("out.push(crypto.scryptSync(Buffer.from(${Json.write(case[0])},'utf8'),")
+            .append("Buffer.from(${Json.write(case[1])},'utf8'),${case[5]},")
+            .append("{N:${case[2]},r:${case[3]},p:${case[4]},maxmem:512*1024*1024})")
+            .append(".toString('base64'));\n")
+    }
+    kdfPlan.append("console.log(out.join('\\n'));\n")
+    File(scratch, "kdf.js").writeText(kdfPlan.toString())
+    val (kdfStatus, kdfText) = run(listOf(node, "kdf.js"), scratch)
+    if (kdfStatus != 0) {
+        check(false, "real node computed the KDF corpus:\n${kdfText.take(600)}")
+    } else {
+        val expectedKdf = kdfText.trim().lines()
+        val ourKdf = ArrayList<Pair<String, String>>()
+        for (case in hkdfCases) {
+            ourKdf.add(
+                (NodeCrypto.hkdf(case[0], b64(case[1]), b64(case[2]), b64(case[3]), case[4].toInt())
+                    ?: "<null>") to "hkdf-${case[0]}, ${case[4]} bytes, info ${case[3].length} long",
+            )
+        }
+        for (case in scryptCases) {
+            ourKdf.add(
+                (NodeCrypto.scrypt(
+                    b64(case[0]), b64(case[1]),
+                    case[2].toInt(), case[3].toInt(), case[4].toInt(), case[5].toInt(),
+                ) ?: "<null>") to "scrypt N=${case[2]} r=${case[3]} p=${case[4]}, ${case[5]} bytes",
+            )
+        }
+        checkEqual(
+            ourKdf.size.toString(), expectedKdf.size.toString(),
+            "the KDF corpus lines up with node's",
+        )
+        if (ourKdf.size == expectedKdf.size) {
+            for (i in ourKdf.indices) checkEqual(ourKdf[i].first, expectedKdf[i], ourKdf[i].second)
+        }
+        // Parameters scrypt is not defined for must refuse, not approximate. N must be a power of
+        // two above 1 because ROMix indexes its table with `mod N`.
+        check(NodeCrypto.scrypt(b64("p"), b64("s"), 1000, 8, 1, 32) == null, "scrypt refuses N=1000, not a power of two")
+        check(NodeCrypto.scrypt(b64("p"), b64("s"), 1, 8, 1, 32) == null, "scrypt refuses N=1")
+        check(NodeCrypto.scrypt(b64("p"), b64("s"), 16, 0, 1, 32) == null, "scrypt refuses r=0")
+        check(NodeCrypto.hkdf("sha3-256", b64("k"), b64("s"), b64("i"), 32) == null, "hkdf refuses a digest with no Mac")
+        // RFC 5869 caps expansion at 255 blocks because the counter is one byte.
+        check(NodeCrypto.hkdf("sha256", b64("k"), b64("s"), b64("i"), 255 * 32 + 1) == null, "hkdf refuses beyond 255 blocks")
+    }
+
     // An algorithm we do not know must answer NULL, because that is what the bootstrap branches on
     // to raise node's own error. Answering an empty string would be a wrong digest, not a refusal.
     check(NodeCrypto.hash("sha3-256", b64("x")) == null, "an unknown digest answers null, not a value")
     check(NodeCrypto.hmac("nope", b64("k"), b64("x")) == null, "an unknown HMAC answers null")
-    check(NodeCrypto.pbkdf2(b64("p"), b64("s"), 1, 16, "md5") == null, "pbkdf2 refuses a digest the JCA has no factory for")
+    check(NodeCrypto.pbkdf2(b64("p"), b64("s"), 1, 16, "sha3-256") == null, "pbkdf2 refuses a digest with no Mac")
+    check(NodeCrypto.pbkdf2(b64("p"), b64("s"), 0, 16, "sha256") == null, "pbkdf2 refuses zero rounds")
 
     val uuid = NodeCrypto.randomUUID()
     check(

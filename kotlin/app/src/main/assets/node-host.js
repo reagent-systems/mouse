@@ -226,6 +226,14 @@
   // `{data, tag}` — an OBJECT, which @JavascriptInterface cannot carry, so it crosses as JSON.
   // An empty tag means the mode has none (the block ciphers), and the bootstrap tests `result.tag`
   // for truthiness, so '' is exactly the right answer rather than a missing key.
+  bridge.hkdf = function (digest, key, salt, info, length) {
+    return host.hkdf(String(digest), String(key), String(salt), String(info), Number(length) | 0);
+  };
+  bridge.scrypt = function (password, salt, n, r, p, length) {
+    return host.scrypt(String(password), String(salt), Number(n) | 0, Number(r) | 0,
+                       Number(p) | 0, Number(length) | 0);
+  };
+
   // Asymmetric keys. `keyIdentify` and the three generators answer OBJECTS, which
   // @JavascriptInterface cannot carry, so they cross as JSON like `cipherSeal` does. Everything
   // else is a string or a boolean and needs no unwrapping.

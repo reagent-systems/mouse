@@ -150,6 +150,13 @@ object HostBridge {
         // all of it under one `Cipher`, with the transformation string doing that job.
         "cipherSeal",
         "cipherOpen",
+        // 3d — the two KDFs with no JCA factory. scrypt is not a JCA algorithm at any level and
+        // HKDF reached the JDK only at 24, against a platform that has never shipped it; both are
+        // short constructions over `Mac`, so `NodeCrypto` writes them out. PBKDF2 beside them is
+        // now written out too, after the factory route was found to disagree with node for any
+        // password byte over 0x7f.
+        "scrypt",
+        "hkdf",
         // 3d — asymmetric keys, all fourteen over the one parser in `NodeKeys`. The JCA had the
         // primitives all along, exactly as the refusal that stood here said; the work was getting a
         // key IN, since `KeyFactory` reads PKCS#8 and SPKI and node's callers hold PEM in five
@@ -219,14 +226,6 @@ object HostBridge {
             "framework ships a WebSocket client at all, so the choices are a third-party artifact " +
             "(invariant #4) or a hand-written RFC 6455 client that still could not do `wss://`. " +
             "The `ws` PACKAGE is unaffected — it rides these sockets for `ws://` and works",
-        listOf("scrypt", "hkdf") to
-            "the two KDFs the JCA has no factory for. `SecretKeyFactory` covers PBKDF2 and " +
-            "nothing else here: scrypt is not a JCA algorithm at any API level, and HKDF arrived " +
-            "in the JDK only at 24, against an Android platform that has never shipped it. Both " +
-            "are short constructions over `Mac`, which `NodeCrypto` already drives — HKDF is " +
-            "extract-then-expand, scrypt is PBKDF2 wrapped around ROMix — so this is unwritten " +
-            "rather than unavailable, and the reason must not pretend otherwise. The asymmetric " +
-            "surface that used to share this entry is IMPLEMENTED; see `NodeKeys`",
         listOf(
             "brotliOpen", "brotliPush", "brotliClose", "brotliTransform",
         ) to

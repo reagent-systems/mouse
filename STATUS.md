@@ -234,6 +234,18 @@ commands.
   and this had not ported — invisible to every check written by hand, because a
   hand-written check passes the digest node's short way. A corpus proves the
   maths, a device program proves the platform, a real package proves the API.
+- **A shipped correctness bug in `pbkdf2`, found by writing the thing next to
+  it.** The old implementation went through `SecretKeyFactory`, and the comment
+  defending it claimed a latin-1 char mapping round-trips so any password byte
+  survives. It does not: the JDK encodes those chars as UTF-8, so every byte
+  from 0x80 up became two and the derived key silently disagreed with node's.
+  The corpus could not see it because every case in it used an ASCII password.
+  PBKDF2, HKDF and scrypt are all written out over `Mac` now, so no charset and
+  no provider spelling enters any of them; `md5` works as a side effect, which
+  the factory route could not offer and node does. `scrypt` and `hkdf` are
+  IMPLEMENTED — that deferral entry is gone, not reworded. On the phone, scrypt
+  reproduces RFC 7914's published vector and pbkdf2 now agrees with node on the
+  exact input where it used to differ.
 - **Six Android deferral REASONS have turned out to be false, and that is now
   the finding rather than six incidents.** brotli, ciphers, asymmetric keys,
   `vm`, `rewriteImports`, `unhandledRejection`. Two cost real capability that
