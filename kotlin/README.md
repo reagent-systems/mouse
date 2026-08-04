@@ -256,6 +256,22 @@ Feature parity with the iOS app, built natively in Compose:
 
 ## Known Android nuances
 
+- **`statfs` cannot use `Files.getFileStore` on Android, and the JVM gate
+  cannot see that.** Resolving a `FileStore` means matching the path against
+  the mount table, and an app cannot read enough of `/proc/mounts` to do it —
+  so it throws, `statfs` returned null, and the bootstrap raised
+  `ENOENT: statfs '/'`, which killed the program on its first fs call and took
+  30 downstream device checks with it while the desktop harness stayed green.
+  `NodeFs.statfs` now falls back to `File`'s space methods, which need no mount
+  table. The block size is the one casualty: 4096 as a fallback rather than a
+  measurement.
+- **An app's private files are `0600`, so `4 & stats.mode` is false on
+  Android.** The mode is real and correctly reported; the others-read bit is
+  genuinely clear. The practical consequence is that **chokidar hides every
+  file in a watched tree**, because it gates each entry on exactly that bit.
+  Reporting a `0644` the file does not have would fix chokidar by lying to
+  everything else, so it is recorded here instead. Anything that needs to know
+  whether *this process* can read a file should test owner-read (`0o400`).
 - **`process.platform` reports `darwin`, and will until iOS makes it a host
   value.** It is a constant inside the shared bootstrap
   (`platform: 'darwin'`, `arch: 'arm64'`), not something the host supplies —

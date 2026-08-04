@@ -289,21 +289,38 @@ class NodeFs(root: Path) {
      *
      * `type`, `files` and `ffree` have no JDK spelling and answer 0 — recorded in
      * kotlin/README.md rather than faked into something that looks measured.
+     *
+     * TWO PATHS, and the second one is why this works on a phone at all.
+     * `Files.getFileStore` reports a real block size, so it is tried first and is what the JVM
+     * gate measures. On Android it throws: resolving a `FileStore` means matching the path against
+     * the mount table, and an app cannot read enough of `/proc/mounts` to do it. Returning null
+     * there made the bootstrap raise `ENOENT: statfs '/'` — which killed the whole program on the
+     * first fs call and took 30 downstream device checks with it, while the desktop harness stayed
+     * green. `File`'s space methods need no mount table and work everywhere.
+     *
+     * A MISSING path still returns null, so a genuine ENOENT stays a genuine ENOENT — the
+     * existence check is what separates "no such directory" from "this platform has no FileStore".
      */
-    fun statfs(path: String): Map<String, Any?>? = try {
-        val store = Files.getFileStore(realPath(path))
-        val blockSize = store.blockSize.takeIf { it > 0 } ?: 4096L
-        mapOf(
+    fun statfs(path: String): Map<String, Any?>? {
+        val resolved = try { realPath(path) } catch (_: Exception) { return null }
+        val file = resolved.toFile()
+        if (!file.exists()) return null
+        val store = try { Files.getFileStore(resolved) } catch (_: Exception) { null }
+        // 4096 is the fallback, not a measurement: it is what the JDK itself reports for every
+        // filesystem Android ships, and the alternative is refusing to answer at all.
+        val blockSize = store?.blockSize?.takeIf { it > 0 } ?: 4096L
+        val total = store?.totalSpace ?: file.totalSpace
+        val free = store?.unallocatedSpace ?: file.freeSpace
+        val usable = store?.usableSpace ?: file.usableSpace
+        return mapOf(
             "type" to 0,
             "bsize" to blockSize.toDouble(),
-            "blocks" to (store.totalSpace / blockSize).toDouble(),
-            "bfree" to (store.unallocatedSpace / blockSize).toDouble(),
-            "bavail" to (store.usableSpace / blockSize).toDouble(),
+            "blocks" to (total / blockSize).toDouble(),
+            "bfree" to (free / blockSize).toDouble(),
+            "bavail" to (usable / blockSize).toDouble(),
             "files" to 0.0,
             "ffree" to 0.0,
         )
-    } catch (_: Exception) {
-        null
     }
 
     // ------------------------------------------------------------------ marshalling ----

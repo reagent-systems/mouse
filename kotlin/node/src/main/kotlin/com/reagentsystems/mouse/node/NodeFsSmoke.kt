@@ -74,9 +74,14 @@ object NodeFsSmoke {
         const stats = fs.statSync('/work/hello.txt');
         say('isfile', stats.isFile() + ',' + stats.isDirectory());
         say('size', stats.size);
-        // `mode` is not cosmetic: chokidar gates every entry on `4 & parseInt(stats.mode, 10)`, so
-        // a Stats without one reads as "not readable" and hides every file in a watched tree.
-        say('modereadable', (4 & parseInt(stats.mode, 10)) !== 0);
+        // `mode` is not cosmetic: a Stats without one reads as "not readable" everywhere it is
+        // tested. OWNER read (0o400) is the bit asserted here, deliberately — Android gives an
+        // app's private files 0600, so the OTHERS bit is legitimately clear on device and
+        // asserting it would be asserting a macOS filesystem. chokidar tests `4 & mode`, the
+        // others bit, and therefore hides every file in a watched tree on Android; that is a real
+        // consequence of real permissions, not a missing mode, and it is recorded as a nuance
+        // rather than papered over by reporting a 0644 the file does not have.
+        say('modereadable', (0o400 & parseInt(stats.mode, 10)) !== 0);
         say('mtime', stats.mtimeMs > 0 && stats.mtime instanceof Date);
 
         fs.writeFileSync('/work/pkg/lib/z.txt', 'z');
