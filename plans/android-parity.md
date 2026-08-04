@@ -196,17 +196,25 @@ each with a screenshot:
 - **(c)** an interactive TUI — `npx create-vite` — renders its menu, takes
   input through the key strip, and advances through its prompts.
 
-  The launch path is in: `node script.js`, `node -e`, and the catalog's own
-  commands go through `MouseShell.NodeRun` → `NodeRunner` → `NodeWebView`,
-  verified on Pixel_9 by running a script from the msh container. Two defects
-  that only running turned up, neither of them blocking but both real:
+  **(a) PASSES.** `pkg install python` then `python hello.py` prints
+  `python says 42` on Pixel_9, by screenshot. The launch path is in — `node
+  script.js`, `node -e`, and the catalog's own commands through
+  `MouseShell.NodeRun` → `NodeRunner` → `NodeWebView` — and three
+  platform-specific walls came down with it: V8 refuses a synchronous
+  `WebAssembly.Module` over 8 MB on the main thread (so the generated WASI
+  bootstrap uses the async `instantiate`), the shared bootstrap REPLACES V8's
+  async wasm API with the synchronous one for a JSC reason that inverts here
+  (so the host restores V8's own across the load), and `randomBytes` was
+  deferred while CPython asks for entropy before `main` (now `SecureRandom`).
+  Terminal output is also a byte stream now, cut on newlines rather than per
+  write, because `print('a', 42)` arrives as four `fd_write`s.
+
+  One defect found by running and NOT yet fixed:
 
   - **`process.platform` answers `darwin` on Android.** The bootstrap hardcodes
     it and is a verbatim iOS copy under a drift gate, so the fix is a host
     override applied after load, with a gate of its own. Packages branch on
     this — napi-rs already does — so it is not cosmetic.
-  - **A `console.log` chunk ending in a newline shows a trailing blank line**
-    in the terminal, because `append` splits on `\n` and keeps the empty tail.
 
   One known gap stands in the way of (c) and is not covered by any milestone
   above: **backspace does not reach a running program.** While a program owns
