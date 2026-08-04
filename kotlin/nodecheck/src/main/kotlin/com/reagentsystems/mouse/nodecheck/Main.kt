@@ -11,6 +11,7 @@ import com.reagentsystems.mouse.node.EsmTranspiler
 import com.reagentsystems.mouse.node.NodeCrypto
 import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeHttp
+import com.reagentsystems.mouse.node.NodeKeys
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSmoke
 import com.reagentsystems.mouse.node.NodeSocketSmoke
@@ -2397,6 +2398,7 @@ fun main(args: Array<String>) {
         rewriteImportsCorpus()
         zlibCorpus(node, scratch)
         cipherCorpus(node, scratch)
+        keyIdentifyCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2415,7 +2417,8 @@ fun main(args: Array<String>) {
             "NODE LAYER: $checks checks — bootstrap drift vs swift/Mouse/NodeEngine.swift, bridge " +
                 "partition, process globals, event loop, cpu time, filesystem and module " +
                 "resolution vs real node, sockets vs real node peers on a real wire, the DNS wire " +
-                "format and resolvers vs real node, the TLS transport's streaming, node --check, " +
+                "format and resolvers vs real node, the TLS transport's streaming, key identity " +
+                "across PKCS#8/SEC1/PKCS#1/SPKI vs real node, node --check, " +
                 "load smoke, verify/fsparity, verify/neterrors, verify/reqsock — MATCH",
         )
     } else {
@@ -2757,6 +2760,124 @@ private fun rewriteImportsCorpus() {
  * ITSELF perfectly while producing bytes no other implementation accepts. So node decompresses
  * what we compress, and we decompress what node compressed.
  */
+/**
+ * `NodeKeys.identify` against real node, over keys real node GENERATED.
+ *
+ * The reference supplies both halves here, which is what makes this differential rather than a
+ * table someone typed: node emits each key in every encoding it supports, and node also states
+ * what it thinks each one is (`asymmetricKeyType`, `namedCurve`, `modulusLength`). Reading the
+ * algorithm OID has to reach the same verdict from the bytes alone.
+ *
+ * The encodings are the point. The same EC key is a different DER grammar as PKCS#8, as SEC1, and
+ * as SPKI, and RSA's PKCS#1 forms carry no algorithm identifier at all — the label is the only
+ * thing that says RSA. A parser that only ever saw `PRIVATE KEY` would pass a corpus that only
+ * generated `PRIVATE KEY`.
+ */
+private fun keyIdentifyCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "key identity corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "keys").also { it.mkdirs() }
+    val plan = StringBuilder()
+    plan.append(
+        """
+        const crypto = require('crypto');
+        const out = [];
+        // name | node's own verdict | base64 of the PEM. node is the reference for BOTH the key
+        // and the answer, so a wrong expectation cannot be written down here by hand.
+        function record(name, pem) {
+          const key = pem.includes('PUBLIC KEY')
+            ? crypto.createPublicKey(pem) : crypto.createPrivateKey(pem);
+          const details = key.asymmetricKeyDetails || {};
+          const verdict = key.asymmetricKeyType + '|' + (details.namedCurve || '') +
+                          '|' + (details.modulusLength || 0);
+          out.push(name + '\t' + verdict + '\t' + Buffer.from(pem, 'utf8').toString('base64'));
+        }
+        function pair(name, type, options, privateType) {
+          const keys = crypto.generateKeyPairSync(type, Object.assign({
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: privateType, format: 'pem' },
+          }, options));
+          record(name + ' private (' + privateType + ')', keys.privateKey);
+          record(name + ' public (spki)', keys.publicKey);
+        }
+        for (const curve of ['prime256v1', 'secp384r1', 'secp521r1']) {
+          pair('ec ' + curve, 'ec', { namedCurve: curve }, 'pkcs8');
+          pair('ec ' + curve, 'ec', { namedCurve: curve }, 'sec1');
+        }
+        for (const type of ['ed25519', 'ed448', 'x25519', 'x448']) {
+          pair(type, type, {}, 'pkcs8');
+        }
+        for (const bits of [2048, 3072]) {
+          pair('rsa ' + bits, 'rsa', { modulusLength: bits }, 'pkcs8');
+          pair('rsa ' + bits, 'rsa', { modulusLength: bits }, 'pkcs1');
+        }
+        // PKCS#1 public form: SEQ { INT n, INT e }, with no algorithm identifier anywhere.
+        const rsa = crypto.generateKeyPairSync('rsa', {
+          modulusLength: 2048,
+          publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+          privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+        });
+        record('rsa 2048 public (pkcs1)', rsa.publicKey);
+        console.log(out.join('\n'));
+        """.trimIndent(),
+    )
+    File(scratch, "plan.js").writeText(plan.toString())
+    val (status, text) = run(listOf(node, "plan.js"), scratch)
+    if (status != 0) {
+        check(false, "real node generated the key corpus:\n${text.take(600)}")
+        return
+    }
+
+    var rows = 0
+    for (line in text.trim().lines()) {
+        val parts = line.split("\t")
+        if (parts.size != 3) continue
+        rows += 1
+        val (name, verdict, pemBase64) = parts
+        val pem = String(Base64.getDecoder().decode(pemBase64), Charsets.UTF_8)
+        val identity = NodeKeys.identify(pem)
+        val ours = "${identity.type}|${identity.curve}|${identity.modulusLength}"
+        checkEqual(ours, verdict, "key identity: $name")
+    }
+    // 12 EC (3 curves × {pkcs8, sec1} × {private, public}) + 8 edwards/montgomery + 8 RSA
+    // (2 sizes × {pkcs8, pkcs1} × {private, public}) + 1 PKCS#1 public.
+    check(rows == 29, "the key corpus produced every encoding — $rows rows, expected 29")
+
+    // Curves node supports and this does not must answer `unknown`, NOT a wrong curve. The
+    // bootstrap turns `unknown` into node's ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE, and its message
+    // names P-256/384/521; answering a nearby curve would sign with the wrong one instead.
+    val exotic = File(scratch, "exotic.js")
+    exotic.writeText(
+        "const crypto = require('crypto');\n" +
+            "const k = crypto.generateKeyPairSync('ec', { namedCurve: 'secp256k1', " +
+            "publicKeyEncoding: { type: 'spki', format: 'pem' }, " +
+            "privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });\n" +
+            "process.stdout.write(k.privateKey);\n",
+    )
+    val (exoticStatus, secp256k1) = run(listOf(node, "exotic.js"), scratch)
+    if (exoticStatus == 0) {
+        checkEqual(
+            NodeKeys.identify(secp256k1).type,
+            "unknown",
+            "a curve this does not support is unknown, not a nearby curve",
+        )
+    }
+
+    // Malformed input answers `unknown` rather than throwing: every caller is asking a question,
+    // and an exception here would escape through a bridge method that promises a value.
+    for ((label, bad) in listOf(
+        "empty text" to "",
+        "no PEM block" to "just some words",
+        "a truncated body" to "-----BEGIN PUBLIC KEY-----\nMFkwEwYH\n-----END PUBLIC KEY-----",
+        "base64 that is not DER" to "-----BEGIN PUBLIC KEY-----\naGVsbG8gd29ybGQ=\n-----END PUBLIC KEY-----",
+        "mismatched labels" to "-----BEGIN PUBLIC KEY-----\naGVsbG8=\n-----END PRIVATE KEY-----",
+    )) {
+        checkEqual(NodeKeys.identify(bad).type, "unknown", "malformed key — $label — is unknown")
+    }
+}
+
 private fun zlibCorpus(node: String?, parent: File) {
     if (node == null) {
         check(true, "zlib corpus skipped — no real node to grade against")
