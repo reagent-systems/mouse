@@ -56,9 +56,12 @@ import com.reagentsystems.mouse.terminal.TerminalKey
 import com.reagentsystems.mouse.terminal.TerminalProgram
 import com.reagentsystems.mouse.terminal.TerminalProgramIO
 import com.reagentsystems.mouse.terminal.TerminalScreen
+import com.reagentsystems.mouse.shell.MouseShell
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.BufferedWriter
 import java.io.File
 
@@ -269,19 +272,27 @@ class TerminalSession(val root: File) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * msh is a BLOCKING API — it lives in `:shell`, which is coroutine-free so `:shellcheck` can
+     * gate it on a bare JVM — so it runs on `Dispatchers.IO` and everything it calls back into
+     * Compose state goes through [onMain]. `isActive` is what [interrupt]'s `cancel()` reaches:
+     * the shell polls it in loops and streaming commands, standing in for iOS's `Task.isCancelled`.
+     */
     private fun runMsh(command: String, scope: CoroutineScope, workspace: Workspace?) {
-        val context = MouseShell.Context(
-            root = root,
-            markModified = { workspace?.markModified(it) },
-            openFile = { /* set on the deck by the caller wiring */ pendingOpen = it },
-            clear = { lines.clear() },
-            emit = { append(it.text, if (it.isError) Line.Kind.ERROR else Line.Kind.OUTPUT) },
-            runtimes = Runtimes.support,
-            launchProgram = { launch(it) },
-        )
         isRunning = true
         runningJob = scope.launch {
-            val (outputs, echo) = msh.execute(command, context)
+            val self = coroutineContext[Job]
+            val context = MouseShell.Context(
+                root = root,
+                markModified = { onMain { workspace?.markModified(it) } },
+                openFile = { /* set on the deck by the caller wiring */ pendingOpen = it },
+                clear = { onMain { lines.clear() } },
+                emit = { o -> onMain { append(o.text, if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT) } },
+                runtimes = Runtimes.support,
+                launchProgram = { p -> onMain { launch(p) } },
+                isActive = { self?.isActive != false },
+            )
+            val (outputs, echo) = withContext(Dispatchers.IO) { msh.execute(command, context) }
             if (echo != null) append("$prompt $echo", Line.Kind.COMMAND)
             for (o in outputs) append(o.text, if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT)
             isRunning = false

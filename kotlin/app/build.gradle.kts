@@ -63,6 +63,10 @@ dependencies {
     // `__mouse` bridge protocol, the process globals and the event loop's bookkeeping. The
     // WebView that runs the engine is in this module (`nodehost/`) because it is framework.
     implementation(project(":node"))
+    // `msh`. Pure-JVM so `:shellcheck` can run the shell against the real `/bin/sh` with no
+    // emulator — see shell/build.gradle.kts. Its API is blocking; `Terminal.kt` puts it on
+    // `Dispatchers.IO` and hands cancellation in as `Context.isActive`.
+    implementation(project(":shell"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
