@@ -157,7 +157,7 @@ commands.
   substitutions and `TarGz`; `./gradlew :pkgcheck:run` gates it the same way
   the iOS side is gated — semver corpus, resolution against real `pnpm
   install --lockfile-only`, and real installs proven by real `node` requiring
-  out of the tree (94 checks, MATCH). Milestone 3a (phase G's foundation) is
+  out of the tree (140 checks, MATCH). Milestone 3a (phase G's foundation) is
   in: the JS bootstrap — 13,993 lines, the portable 72 % — is copied verbatim
   out of `swift/Mouse/NodeEngine.swift` into
   `kotlin/app/src/main/assets/node-bootstrap.js` and re-extracted and diffed on
@@ -175,11 +175,26 @@ commands.
   including `verify/fsparity` run through the Android bridge against the same
   `node.txt`; the WebView itself is gated on device by a debug broadcast
   (`NodeCheckReceiver` — see `kotlin/README.md`), which now runs the filesystem
-  and require program too. Still open: 3c/3d — `fs.watch`, ES modules,
-  sockets/`net`/`http`/DNS, crypto, compression, `vm`, workers, child
-  processes, each refusing by name with its own reason; the Compose grid
-  renderer and key strip; and `npm`/`npx`/`npm run` in Kotlin msh, which wait
-  on G because they exist to run what they install.
+  and require program too (45 checks, MATCH). Phase T's platform half is in as
+  well: `PagerProgram`, session-side program hosting, the Compose grid renderer,
+  key routing and the key strip (`up down left right esc tab canc`), with `less`
+  in msh to drive them — verified on the emulator by paging a 200-line file by
+  touch. Milestone 4's INSTALL half is in: `RuntimeCatalog`/`RuntimeStore`/
+  `ZipArchive` in `kotlin/packages/`, reading `swift/Runtimes.json` itself
+  (copied into assets by a Gradle task, so the repo holds exactly one catalog),
+  and `pkg list | install | remove` in Kotlin msh. `pkg install python` and
+  `pkg install ruby` both land on the emulator — 30 MB of `python.wasm` and a
+  35 MB `bin/ruby`, hash-verified. Still open: 3c/3d — sockets/`net`/`http`/DNS,
+  crypto, compression, `vm`, workers, child processes, `fs.watch`, ES modules,
+  each refusing by name with its own reason; and `npm`/`npx`/`npm run` in Kotlin
+  msh, which wait on G because they exist to run what they install.
+- Running an installed runtime on Android is closer than the plan assumed, and
+  for a reason worth recording: the shared bootstrap reaches for the standard
+  `WebAssembly.*` API rather than shipping an interpreter, so Android gets V8's
+  native JIT-compiled wasm for free, and the WASI layer above it is shared JS
+  resting on the `fs` bindings 3b already landed. What is missing for
+  `python hello.py` is the msh side — `node` and the catalog's `commands` are
+  still unwired in Kotlin msh — not an engine.
 
 ## Blocked on the user
 
