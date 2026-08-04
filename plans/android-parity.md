@@ -169,10 +169,19 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   graded BOTH DIRECTIONS against real node, because a codec wrong in a
   self-consistent way round-trips through itself perfectly.
 
-  Still deferred, and the line is not arbitrary: the rest of crypto needs KEY
-  MANAGEMENT — ciphers, EC/RSA/Ed25519 signing, ECDH, key generation — where
-  iOS rides Security framework and the JCA has no one-to-one counterpart, so it
-  is a port rather than a translation. Brotli has no Android route at all: the
+  **Symmetric ciphers too** — AES-GCM, ChaCha20-Poly1305, and AES in CBC/CTR/ECB.
+  An earlier note here lumped them in with key management, which was WRONG:
+  they take the key the caller supplies, so they are arithmetic like the
+  digests. iOS splits them between CryptoKit's AEADs and CommonCrypto's block
+  modes; the JCA has all of it under one `Cipher`. 38 checks, both directions,
+  and asserting the ciphertext and tag are byte-IDENTICAL to node's rather than
+  merely mutually decodable — plus that a tampered GCM tag refuses, which is
+  the check that separates authenticated encryption from encryption.
+
+  Still deferred, and the line is now where it should have been: what remains
+  needs KEY MANAGEMENT — EC/RSA/Ed25519 signing, ECDH, key generation and
+  parsing — where iOS rides Security framework and the JCA has no one-to-one
+  counterpart, so it is a port rather than a translation. Brotli has no Android route at all: the
   platform decodes it inside its HTTP stack and exposes nothing to an app, and
   a third-party artifact is what invariant #4 forbids. `vm`, workers and child
   processes are untouched.

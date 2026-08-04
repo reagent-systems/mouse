@@ -15,6 +15,7 @@ import com.reagentsystems.mouse.node.HostBridge
 import com.reagentsystems.mouse.node.ModuleResolver
 import com.reagentsystems.mouse.node.NodeCpu
 import com.reagentsystems.mouse.node.NodeCrypto
+import com.reagentsystems.mouse.packages.Json
 import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeHttp
@@ -242,6 +243,33 @@ class NodeWebView(
          * and it is seeded by the OS, which is the property that matters. Base64 out, because the
          * bridge carries strings and the bootstrap already does `Buffer.from(…, 'base64')`.
          */
+        /**
+         * `{data, tag}` as JSON, or null. The bridge cannot carry an object, and the bootstrap
+         * reads `result.tag` and `result.data` — so the shim parses this back into the shape iOS
+         * hands JavaScriptCore directly.
+         */
+        @JavascriptInterface
+        fun cipherSeal(
+            algorithm: String,
+            key: String,
+            iv: String,
+            plain: String,
+            aad: String,
+        ): String? {
+            val (data, tag) = NodeCrypto.cipherSeal(algorithm, key, iv, plain, aad) ?: return null
+            return Json.write(mapOf("data" to data, "tag" to tag))
+        }
+
+        @JavascriptInterface
+        fun cipherOpen(
+            algorithm: String,
+            key: String,
+            iv: String,
+            body: String,
+            tag: String,
+            aad: String,
+        ): String? = NodeCrypto.cipherOpen(algorithm, key, iv, body, tag, aad)
+
         @JavascriptInterface
         fun zlibTransform(mode: String, base64: String, level: Int): String? =
             NodeZlib.transform(mode, base64, level)

@@ -144,6 +144,12 @@ object HostBridge {
         "zlibPush",
         "zlibClose",
         "zlibTransform",
+        // 3d — symmetric ciphers. These take the key the CALLER supplies, so they are arithmetic
+        // like the digests, not key management: AES-GCM, ChaCha20-Poly1305, and AES in CBC/CTR/ECB.
+        // iOS splits them between CryptoKit's AEADs and CommonCrypto's block modes; the JCA has
+        // all of it under one `Cipher`, with the transformation string doing that job.
+        "cipherSeal",
+        "cipherOpen",
     )
 
     /**
@@ -188,7 +194,7 @@ object HostBridge {
             "The `ws` PACKAGE is unaffected — it rides these sockets for `ws://` and works",
         listOf(
             "scrypt", "hkdf",
-            "cipherOpen", "cipherSeal", "keyGenerate", "keyIdentify", "keySign", "keyVerify",
+            "keyGenerate", "keyIdentify", "keySign", "keyVerify",
             "keyAgree", "ecdhGenerate", "ecdhCompute", "rsaGenerate", "rsaSign", "rsaVerify",
             "rsaEncrypt", "rsaDecrypt", "rsaPrivateEncrypt", "rsaPublicDecrypt",
         ) to

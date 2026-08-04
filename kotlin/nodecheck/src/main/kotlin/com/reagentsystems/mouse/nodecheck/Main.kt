@@ -2395,6 +2395,7 @@ fun main(args: Array<String>) {
         resolverCorpus(node, scratch)
         cryptoCorpus(node, scratch)
         zlibCorpus(node, scratch)
+        cipherCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2816,4 +2817,124 @@ private fun zlibCorpus(node: String?, parent: File) {
     check(NodeZlib.open("nope") == 0, "an unknown zlib mode answers handle 0")
     check(NodeZlib.transform("nope", "", -1) == null, "an unknown one-shot mode answers null")
     check(NodeZlib.push(999999, "", true) == null, "pushing to a handle that was never open answers null")
+}
+
+// ------------------------------------------------------------------------ ciphers ----
+
+/**
+ * Symmetric ciphers, graded BOTH DIRECTIONS against real node — for the reason zlib is.
+ *
+ * A cipher that round-trips only through itself proves nothing about interoperability: a wrong
+ * counter, a tag on the wrong end, or a key schedule fed the bytes in the wrong order all decrypt
+ * their own output perfectly. So node decrypts what we encrypt, and we decrypt what node
+ * encrypted, and for the AEADs the TAG has to survive that crossing too.
+ */
+private fun cipherCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "cipher corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "ciphers").also { it.mkdirs() }
+    val b64 = { value: String -> Base64.getEncoder().encodeToString(value.toByteArray(Charsets.UTF_8)) }
+    val hex = { n: Int -> Base64.getEncoder().encodeToString(ByteArray(n) { (it * 7 + 3).toByte() }) }
+
+    // (algorithm, key bytes, iv bytes, is it an AEAD)
+    val suite = listOf(
+        Triple("aes-128-gcm", 16, 12) to true,
+        Triple("aes-256-gcm", 32, 12) to true,
+        Triple("chacha20-poly1305", 32, 12) to true,
+        Triple("aes-128-cbc", 16, 16) to false,
+        Triple("aes-256-cbc", 32, 16) to false,
+        Triple("aes-256-ctr", 32, 16) to false,
+    )
+    val plain = "attack at dawn, and bring the good biscuits"
+
+    for ((spec, aead) in suite) {
+        val (algorithm, keyLen, ivLen) = spec
+        val key = hex(keyLen)
+        val iv = hex(ivLen)
+        val aad = if (aead) b64("some associated data") else ""
+
+        val sealed = NodeCrypto.cipherSeal(algorithm, key, iv, b64(plain), aad)
+        check(sealed != null, "$algorithm encrypts")
+        if (sealed == null) continue
+        val (data, tag) = sealed
+        if (aead) check(tag.isNotEmpty(), "$algorithm produces an auth tag")
+
+        // ours in, ours out
+        checkEqual(
+            NodeCrypto.cipherOpen(algorithm, key, iv, data, tag, aad)?.let {
+                String(Base64.getDecoder().decode(it), Charsets.UTF_8)
+            } ?: "<null>",
+            plain,
+            "$algorithm round-trips here",
+        )
+
+        // ours in, NODE out
+        File(scratch, "open.js").writeText(
+            """
+            const crypto = require('crypto');
+            const key = Buffer.from(${Json.write(key)}, 'base64');
+            const iv = Buffer.from(${Json.write(iv)}, 'base64');
+            const d = crypto.createDecipheriv(${Json.write(algorithm)}, key, iv);
+            ${if (aead) "d.setAAD(Buffer.from(${Json.write(aad)}, 'base64'));\n            d.setAuthTag(Buffer.from(${Json.write(tag)}, 'base64'));" else ""}
+            const out = Buffer.concat([d.update(Buffer.from(${Json.write(data)}, 'base64')), d.final()]);
+            process.stdout.write(out.toString('utf8'));
+            """.trimIndent(),
+        )
+        val (openStatus, opened) = run(listOf(node, "open.js"), scratch)
+        checkEqual(
+            if (openStatus == 0) opened.trimEnd('\n') else "<exit $openStatus: ${opened.trim().take(160)}>",
+            plain,
+            "real node decrypts what we $algorithm",
+        )
+
+        // NODE in, ours out
+        File(scratch, "seal.js").writeText(
+            """
+            const crypto = require('crypto');
+            const key = Buffer.from(${Json.write(key)}, 'base64');
+            const iv = Buffer.from(${Json.write(iv)}, 'base64');
+            const c = crypto.createCipheriv(${Json.write(algorithm)}, key, iv);
+            ${if (aead) "c.setAAD(Buffer.from(${Json.write(aad)}, 'base64'));" else ""}
+            const body = Buffer.concat([c.update(Buffer.from(${Json.write(b64(plain))}, 'base64')), c.final()]);
+            process.stdout.write(body.toString('base64') + '\n' + ${if (aead) "c.getAuthTag().toString('base64')" else "''"});
+            """.trimIndent(),
+        )
+        val (sealStatus, madeRaw) = run(listOf(node, "seal.js"), scratch)
+        if (sealStatus == 0) {
+            val lines = madeRaw.trimEnd('\n').split("\n")
+            val theirData = lines.getOrElse(0) { "" }
+            val theirTag = lines.getOrElse(1) { "" }
+            checkEqual(
+                NodeCrypto.cipherOpen(algorithm, key, iv, theirData, theirTag, aad)?.let {
+                    String(Base64.getDecoder().decode(it), Charsets.UTF_8)
+                } ?: "<null>",
+                plain,
+                "we decrypt what real node $algorithm",
+            )
+            // The ciphertext itself must be identical, not merely mutually decodable — a mode
+            // that differs here still interoperates by luck rather than by agreeing.
+            checkEqual(theirData, data, "$algorithm produces the same ciphertext as node")
+            if (aead) checkEqual(theirTag, tag, "$algorithm produces the same auth tag as node")
+        }
+    }
+
+    // An AEAD whose tag has been touched must FAIL, not decrypt to something. This is the one
+    // check that separates authenticated encryption from encryption.
+    val key = hex(32)
+    val iv = hex(12)
+    val sealed = NodeCrypto.cipherSeal("aes-256-gcm", key, iv, b64(plain), "")
+    check(sealed != null, "aes-256-gcm seals for the tamper check")
+    if (sealed != null) {
+        val bytes = Base64.getDecoder().decode(sealed.second)
+        bytes[0] = (bytes[0].toInt() xor 0x01).toByte()
+        val tampered = Base64.getEncoder().encodeToString(bytes)
+        check(
+            NodeCrypto.cipherOpen("aes-256-gcm", key, iv, sealed.first, tampered, "") == null,
+            "a tampered GCM tag refuses rather than decrypting",
+        )
+    }
+    check(NodeCrypto.cipherSeal("aes-256-gcm", hex(16), iv, b64("x"), "") == null, "a wrong key length refuses")
+    check(NodeCrypto.cipherSeal("nope-256-gcm", key, iv, b64("x"), "") == null, "an unknown cipher refuses")
 }

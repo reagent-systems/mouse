@@ -145,6 +145,18 @@
   // ---- compression --------------------------------------------------------------------------
   // Streaming AND one-shot, because `http`'s gzip responses arrive in pieces. A handle of 0 from
   // `zlibOpen` means the mode is unknown, which is what the bootstrap branches on.
+  // `{data, tag}` — an OBJECT, which @JavascriptInterface cannot carry, so it crosses as JSON.
+  // An empty tag means the mode has none (the block ciphers), and the bootstrap tests `result.tag`
+  // for truthiness, so '' is exactly the right answer rather than a missing key.
+  bridge.cipherSeal = function (algorithm, key, iv, plain, aad) {
+    var raw = host.cipherSeal(String(algorithm), String(key), String(iv), String(plain), String(aad));
+    return (raw === null || raw === undefined) ? null : JSON.parse(raw);
+  };
+  bridge.cipherOpen = function (algorithm, key, iv, body, tag, aad) {
+    return host.cipherOpen(String(algorithm), String(key), String(iv), String(body),
+                           String(tag), String(aad));
+  };
+
   bridge.zlibTransform = function (mode, base64, level) {
     return host.zlibTransform(String(mode), String(base64), Number(level) | 0);
   };
