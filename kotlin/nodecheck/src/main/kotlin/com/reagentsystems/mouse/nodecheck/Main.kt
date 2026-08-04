@@ -15,12 +15,14 @@ import com.reagentsystems.mouse.node.NodeSocketSmoke
 import com.reagentsystems.mouse.node.NodeSockets
 import com.reagentsystems.mouse.packages.Json
 import java.io.File
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
 import java.util.Base64
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
@@ -993,6 +995,64 @@ private fun socketsCorpus(node: String?) {
         crossEngineCorpus(node, table, recorder)
     } finally {
         table.closeAll()
+    }
+    shutdownRaceCorpus()
+}
+
+/**
+ * `closeAll()` while the selector thread is mid-pass — and what it must NOT raise.
+ *
+ * This check exists because the JVM and Android disagree about the consequences of an uncaught
+ * exception on a daemon thread. On the JVM it prints a stack trace and that thread dies; the
+ * harness around it carries on and every other check still passes. On Android the default handler
+ * kills the process. So a shutdown race here is INVISIBLE to an ordinary headless check and fatal
+ * on a phone, which is exactly how one shipped: `closeAll` closes the selector, and a pass already
+ * past `select()` then called `selectedKeys()` on it and got `ClosedSelectorException` — unchecked,
+ * so neither of the loop's catch clauses saw it.
+ *
+ * Making it visible off-device takes the one thing the platforms share: the handler itself. The
+ * table is torn down under live traffic, repeatedly — parked in `select()` the race cannot happen,
+ * so a socket has to be mid-event — and anything that reaches the selector thread's handler is a
+ * failure by name rather than a line on stderr nobody reads.
+ */
+private fun shutdownRaceCorpus() {
+    val raised = ConcurrentLinkedQueue<Throwable>()
+    val previous = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, failure ->
+        if (thread.name.startsWith("mouse.node.net")) raised.add(failure)
+        else previous?.uncaughtException(thread, failure)
+    }
+    try {
+        repeat(40) {
+            val recorder = SocketRecorder()
+            val table = NodeSockets(recorder.post, recorder.retain, recorder.release)
+            val serverId = table.listen("127.0.0.1", 0, 511)
+            recorder.has(serverId, "listening", timeoutMs = 2_000)
+            val port = recorder.port(serverId, "listening")
+            val peer = Socket()
+            try {
+                peer.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+                peer.getOutputStream().write("race".toByteArray())
+                peer.getOutputStream().flush()
+            } catch (_: IOException) {
+                // The point is the teardown below, not this peer. A refused connect still leaves
+                // the selector mid-pass on the accept it was handling.
+            }
+            table.closeAll()
+            try {
+                peer.close()
+            } catch (_: IOException) {
+            }
+        }
+        // A thread killed by its handler dies after `closeAll` has already returned.
+        Thread.sleep(300)
+        checkEqual(
+            raised.map { it::class.java.simpleName }.distinct().sorted().joinToString(",").ifEmpty { "none" },
+            "none",
+            "closeAll() under live traffic raises nothing on the selector thread",
+        )
+    } finally {
+        Thread.setDefaultUncaughtExceptionHandler(previous)
     }
 }
 

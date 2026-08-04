@@ -540,7 +540,9 @@ class NodeWebView(
     private fun runEntry(source: String, entryPath: String) {
         val call = "globalThis.__mouseDispatch.entry(" +
             HostBridge.jsString(source) + "," + HostBridge.jsString(entryPath) + ")"
+        inFlight += 1
         web.evaluateJavascript(call) { raw ->
+            inFlight -= 1
             val text = unquote(raw) ?: ""
             if (text.contains("\"ok\":false")) {
                 // A synchronous top-level throw is node's exit 1, printed. `process.exit` is not
@@ -573,6 +575,20 @@ class NodeWebView(
             end()
             return
         }
+        // A turn may not begin while JavaScript from the previous one is still running.
+        //
+        // This is the consequence of the inversion in the class note. iOS's loop CALLS into
+        // JavaScriptCore and gets its answer before the next line; here `evaluateJavascript` hands
+        // the script to the WebView's renderer — a separate process — and returns, so the host's
+        // view of the loop is stale for as long as the script runs. Any bridge call posts a pump,
+        // and those posts land on the main looper while the renderer is still executing.
+        //
+        // Without this guard the loop asked `isQuiescent()` in that window and answered for a
+        // program that had not finished starting: `net.createServer().listen()` on the first line
+        // of a script reported exit 0 before the bind crossed the bridge. Nothing is lost by
+        // returning here — whichever evaluation is in flight pumps again when it completes, and it
+        // sees the state this pump would have read too early.
+        if (inFlight > 0) return
         handler.removeCallbacks(pumpRunnable)
 
         // Time spent parked since the last turn is IDLE, exactly as the iOS loop counts the time
@@ -626,7 +642,9 @@ class NodeWebView(
      */
     private fun dispatch(script: String) {
         val began = System.nanoTime()
+        inFlight += 1
         web.evaluateJavascript(script) {
+            inFlight -= 1
             loop.recordActive(System.nanoTime() - began)
             pump()
         }
@@ -634,6 +652,13 @@ class NodeWebView(
 
     /** When the loop parked, or 0 when it is running. Main thread only. */
     private var parkedSinceNanos = 0L
+
+    /**
+     * How many evaluations the host has handed the renderer and not yet heard back from. See the
+     * guard in [pump]: while this is above zero the host's view of the loop is stale.
+     */
+    private var inFlight = 0
+
 
     private val pumpRunnable = Runnable { pump() }
 
@@ -694,7 +719,11 @@ class NodeWebView(
     }
 
     private fun evaluate(script: String, then: (String?) -> Unit) {
-        web.evaluateJavascript(script) { raw -> then(unquote(raw)) }
+        inFlight += 1
+        web.evaluateJavascript(script) { raw ->
+            inFlight -= 1
+            then(unquote(raw))
+        }
     }
 
     /** `evaluateJavascript` hands back its result JSON-encoded: `null`, or a quoted string. */

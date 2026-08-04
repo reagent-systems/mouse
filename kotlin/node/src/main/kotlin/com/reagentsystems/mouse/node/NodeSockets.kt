@@ -20,6 +20,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.AlreadyBoundException
 import java.nio.channels.CancelledKeyException
 import java.nio.channels.ClosedChannelException
+import java.nio.channels.ClosedSelectorException
 import java.nio.channels.DatagramChannel
 import java.nio.channels.MembershipKey
 import java.nio.channels.SelectableChannel
@@ -194,6 +195,7 @@ class NodeSockets(
             try {
                 while (true) (tasks.poll() ?: break)()
                 selector.select()
+                if (!running) return
                 val ready = selector.selectedKeys()
                 val iterator = ready.iterator()
                 while (iterator.hasNext()) {
@@ -214,6 +216,15 @@ class NodeSockets(
                 }
             } catch (_: ClosedChannelException) {
                 // A channel closed underneath the select pass. The entry is already gone.
+            } catch (_: ClosedSelectorException) {
+                // Reachable only through `closeAll`'s bounded join: if this pass is still inside a
+                // handler when the join gives up, the selector closes under it. The exception is
+                // UNCHECKED, so neither clause beside this one would see it, and on Android an
+                // uncaught exception on a daemon thread kills the process where the JVM only
+                // prints. NOT exercised by :nodecheck — the join is what makes it unreachable in
+                // the ordinary path, and that is the point — so it is kept small enough to read
+                // instead of gated.
+                return
             } catch (failure: IOException) {
                 if (!running) return
                 // A selector that itself failed is unrecoverable, and spinning on it would peg a
@@ -908,16 +919,31 @@ class NodeSockets(
     /**
      * Close every handle. The host calls this when a program exits, so a forgotten server cannot
      * outlive it and hold the port — the one failure mode that survives the process on a phone.
+     *
+     * The ORDER is the whole of it: stop the loop and wait for it to leave, and only then touch
+     * the channels and the selector. Closing them from here while the loop was still running broke
+     * the rule the [Entry] note states — every field is touched on the selector thread — and the
+     * JDK enforces it: a channel closing under a concurrent `deregister` NPEs inside
+     * `AbstractSelectableChannel.removeKey`, and closing the selector out from under a pass raises
+     * `ClosedSelectorException` on a thread whose death takes the process with it on Android.
+     *
+     * The join is bounded because this runs on the main thread (`destroy()` must, for the WebView),
+     * where blocking is an ANR. In practice the loop leaves in microseconds — it is parked in
+     * `select()` and the wakeup is already posted. If it somehow does not, the teardown proceeds
+     * anyway: the pump is a daemon, so a stuck one cannot hold the process, and a leaked port is
+     * the lesser failure against a frozen UI.
      */
     fun closeAll() {
+        if (!running) return
+        running = false
+        selector.wakeup()
+        resolvers.shutdownNow()
+        pump.join(1_000)
         for (entry in entries.values.toList()) {
             entry.closed = true
             closeQuietly(entry.channel)
         }
         entries.clear()
-        running = false
-        selector.wakeup()
-        resolvers.shutdownNow()
         try {
             selector.close()
         } catch (_: IOException) {
