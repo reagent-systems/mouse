@@ -1,5 +1,7 @@
 package com.reagentsystems.mouse.shell
 
+import com.reagentsystems.mouse.packages.Json
+import com.reagentsystems.mouse.packages.PackageManager
 import com.reagentsystems.mouse.packages.RuntimeCatalog
 import com.reagentsystems.mouse.packages.RuntimeStore
 import com.reagentsystems.mouse.terminal.PagerProgram
@@ -1239,7 +1241,9 @@ class MouseShell {
             "curl", "wget" -> curl(args, context)
             "pkg" -> pkgCmd(args, context)
             "node" -> nodeCmd(args, context, streaming)
-            "git", "npm", "pnpm", "npx" -> IO(err = "$name: not built yet — the native ${if (name == "git") "git" else "package"} engine is on the roadmap", status = 127)
+            "npm" -> npmCmd(args, context, streaming)
+            "npx" -> npxCmd(args, context, streaming)
+            "git", "pnpm" -> IO(err = "$name: not built yet — the native ${if (name == "git") "git" else "package"} engine is on the roadmap", status = 127)
             // A name the CATALOG claims answers honestly, installed or not — that is why the
             // catalog knows an uninstalled runtime's commands. "command not found" for a `python`
             // that is sitting on disk is simply false.
@@ -1376,6 +1380,136 @@ class MouseShell {
         val argv = listOf("node", path) + args.drop(1)
         val status = run.run(source, path, argv, env, emptyList(), emit)
         return IO(collected.toString(), errors.toString(), status)
+    }
+
+    /**
+     * `pkg@range` → the pair `install` wants. A scoped name keeps its own `@`: only the LAST one
+     * separates a version, which is why this scans from the end.
+     */
+    private fun splitSpec(spec: String): Pair<String, String> {
+        val at = spec.lastIndexOf('@')
+        if (at <= 0) return spec to "latest"
+        return spec.substring(0, at) to spec.substring(at + 1).ifEmpty { "latest" }
+    }
+
+    /** `npm install`, `npm run` and the aliases people actually type. */
+    private fun npmCmd(args: List<String>, context: Context, streaming: Boolean): IO {
+        return when (val sub = args.firstOrNull() ?: "install") {
+            "install", "i", "add", "ci", "update" -> {
+                val specs = args.drop(1).filter { !it.startsWith("-") }
+                val requirements = LinkedHashMap<String, String>()
+                for (spec in specs) {
+                    val (name, requirement) = splitSpec(spec)
+                    requirements[name] = requirement
+                }
+                if (requirements.isEmpty()) {
+                    // A bare `npm install` means "what package.json asks for".
+                    val declared = readDependencies(context) ?: return IO(
+                        err = "npm: no package.json here, and nothing named to install", status = 1,
+                    )
+                    requirements.putAll(declared)
+                }
+                if (requirements.isEmpty()) return IO("up to date\n")
+                val report = try {
+                    PackageManager.install(requirements, context.root) { line ->
+                        if (streaming) context.emit(Output(line + "\n", false))
+                    }
+                } catch (failure: Exception) {
+                    return IO(err = "npm: ${failure.message}\n", status = 1)
+                }
+                context.markModified("package.json")
+                IO("added ${report.placements.size} packages\n")
+            }
+            "run", "run-script" -> {
+                val script = args.getOrNull(1)
+                    ?: return IO(err = "npm run: which script?", status = 2)
+                val command = readScripts(context)?.get(script)
+                    ?: return IO(err = "npm run: no script named $script", status = 1)
+                // A script is a SHELL line, not a program: `vite build && node fix.js` has to
+                // work, and this shell is the one that runs it.
+                execute(command, context).first.let { outputs ->
+                    IO(
+                        outputs.filter { !it.isError }.joinToString("") { it.text },
+                        outputs.filter { it.isError }.joinToString("") { it.text },
+                        lastStatus,
+                    )
+                }
+            }
+            else -> IO(err = "npm: $sub is not implemented — install, run", status = 1)
+        }
+    }
+
+    /**
+     * `npx <package> [args]` — install it if the tree does not already carry its bin, then run
+     * that bin through the engine. Same shape as `Shell.swift`'s, including the fallback to a
+     * package's single bin when its name does not match the package's.
+     */
+    private fun npxCmd(args: List<String>, context: Context, streaming: Boolean): IO {
+        val spec = args.firstOrNull { !it.startsWith("-") }
+            ?: return IO(err = "npx: usage: npx <package>", status = 2)
+        val extra = args.dropWhile { it != spec }.drop(1)
+        val (name, requirement) = splitSpec(spec)
+        val short = name.substringAfterLast('/')
+
+        var manifest = PackageManager.readManifest(context.root)
+        if (manifest?.bins?.get(short) == null) {
+            try {
+                PackageManager.install(mapOf(name to requirement), context.root) { line ->
+                    if (streaming) context.emit(Output(line + "\n", false))
+                }
+            } catch (failure: Exception) {
+                return IO(err = "npx: ${failure.message}\n", status = 1)
+            }
+            context.markModified("package.json")
+            manifest = PackageManager.readManifest(context.root)
+        }
+        val binPath = manifest?.bins?.get(short)
+            ?: manifest?.bins?.takeIf { it.size == 1 }?.values?.first()
+            ?: return IO(err = "npx: $name installs no executables", status = 1)
+        return runInstalledBin(binPath, short, extra, context, streaming)
+    }
+
+    /** Run a package's own bin file as a node program. */
+    private fun runInstalledBin(
+        binPath: String,
+        title: String,
+        args: List<String>,
+        context: Context,
+        streaming: Boolean,
+    ): IO {
+        val run = context.runNode ?: return IO(err = "$title: no engine attached", status = 127)
+        val file = File(context.root, binPath)
+        val source = runCatching { file.readText() }.getOrNull()
+            ?: return IO(err = "msh: missing bin file: $binPath\n", status = 127)
+        val collected = StringBuilder()
+        val errors = StringBuilder()
+        val emit: (Output) -> Unit = { out ->
+            if (streaming) context.emit(out)
+            else if (out.isError) errors.append(out.text) else collected.append(out.text)
+        }
+        val path = "/" + binPath
+        val status = run.run(source, path, listOf("node", path) + args, env, emptyList(), emit)
+        return IO(collected.toString(), errors.toString(), status)
+    }
+
+    /** `dependencies` + `devDependencies` from the workspace's own package.json. */
+    private fun readDependencies(context: Context): Map<String, String>? {
+        val text = runCatching { File(context.root, "package.json").readText() }.getOrNull() ?: return null
+        val root = runCatching { Json.parse(text) as? Map<*, *> }.getOrNull() ?: return null
+        val out = LinkedHashMap<String, String>()
+        for (key in listOf("dependencies", "devDependencies")) {
+            val section = root[key] as? Map<*, *> ?: continue
+            for ((name, requirement) in section) out[name.toString()] = requirement.toString()
+        }
+        return out
+    }
+
+    /** `scripts` from the workspace's own package.json. */
+    private fun readScripts(context: Context): Map<String, String>? {
+        val text = runCatching { File(context.root, "package.json").readText() }.getOrNull() ?: return null
+        val root = runCatching { Json.parse(text) as? Map<*, *> }.getOrNull() ?: return null
+        val scripts = root["scripts"] as? Map<*, *> ?: return null
+        return scripts.entries.associate { it.key.toString() to it.value.toString() }
     }
 
     private fun runtimeCmd(

@@ -216,6 +216,17 @@ each with a screenshot:
   `request GET /hello` and `request GET /second` in the terminal as they
   arrived, which is the half a curl transcript alone would not show.
 
+  **(c) is one named wall away.** `npm install`/`npm run` and `npx` are in msh
+  now — `npx create-vite` resolves `create-vite@9.1.2` against the real
+  registry, installs it, finds its bin and executes it. It then stops at
+  `SyntaxError: Cannot use import statement outside a module`: create-vite
+  ships an ES MODULE, and ESM is the deferral 3b recorded. The reason it gave
+  is exact — iOS transpiles with `NodeEngine.rewriteImportForms`, which is
+  SWIFT rather than shared JavaScript, so Android inherited nothing. Leg (c)
+  therefore needs that ~180-line rewriter ported to `:node` and the loader's
+  `esm` paths with it, gated against the same fixtures. That is milestone 3e,
+  not a patch.
+
   One defect found by running and NOT yet fixed:
 
   - **`process.platform` answers `darwin` on Android.** The bootstrap hardcodes
