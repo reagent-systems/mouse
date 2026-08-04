@@ -116,7 +116,6 @@ object NodeFsSmoke {
         write('/work/pkg/node_modules/@scope/thing/main.js', 'module.exports = "scoped-main";');
         write('/work/pkg/node_modules/@scope/thing/extra.js', 'module.exports = "scoped-extra";');
         write('/work/pkg/node_modules/@scope/thing/hidden.js', 'module.exports = "hidden";');
-        write('/work/pkg/esm.mjs', 'export default 1;');
         // The module that does the requiring lives INSIDE the package, so the node_modules walk
         // starts where a real dependency's would. Requiring it from here would search "/".
         // A bare specifier is resolved from the requiring FILE's directory, so the failing cases
@@ -150,7 +149,6 @@ object NodeFsSmoke {
         say('circular', require('/work/pkg/a').viaB + ',' + require('/work/pkg/a').sawA);
         say('notexported', app.notExported());
         say('notfound', app.notFound());
-        say('esm', codeOf(() => require('/work/pkg/esm.mjs')));
         // A module that throws must not linger as partial exports: the SECOND require must run it
         // again and throw the same thing, not hand back a half-built object.
         say('threw', codeOf(() => require('/work/pkg/boom')) + ',' + codeOf(() => require('/work/pkg/boom')));
@@ -210,7 +208,6 @@ object NodeFsSmoke {
         Triple("circular", "b,a", "a circular require reads the partner's LIVE partial exports"),
         Triple("notexported", "ERR_PACKAGE_PATH_NOT_EXPORTED", "a subpath outside \"exports\" is refused, with its own code"),
         Triple("notfound", "MODULE_NOT_FOUND", "a missing package is MODULE_NOT_FOUND"),
-        Triple("esm", "ERR_REQUIRE_ESM", "require() of an ES module refuses by name — no transpiler on Android"),
         Triple("threw", "boom,boom", "a module that throws is evicted, so the next require runs it again"),
         Triple("refused", HostBridge.DEFERRED.size.toString(), "every deferred bridge name refuses with its code"),
         Triple("built", "no-throw", "every bridge name this milestone implemented answers"),

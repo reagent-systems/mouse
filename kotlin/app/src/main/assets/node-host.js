@@ -251,14 +251,19 @@
   // `__mouseRequire` is a SEPARATE parameter carrying the same value as `require`, because a
   // module doing `const require = createRequire(...)` — legal, and what several dual packages do
   // — shadows the `require` PARAMETER scope-wide.
-  function wrapModule(source, id) {
+  function wrapModule(source, id, async) {
     var body = source;
     if (body.slice(0, 2) === '#!') {
       var newline = body.indexOf('\n');
       body = newline < 0 ? '' : body.slice(newline);
     }
+    // An ES module is wrapped ASYNC. The transpiled source emits `await` at its top level —
+    // every import site awaits a dependency that turns out to be pending — so the wrapper has to
+    // be a function that may suspend. A module that never awaits anything real still settles in
+    // the same turn, which is why sync modules stay sync under it.
     return (0, eval)(
-      '(function(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){'
+      '(' + (async ? 'async ' : '')
+      + 'function(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){'
       + body + '\n})\n//# sourceURL=mouse://' + id);
   }
 
@@ -280,19 +285,10 @@
       throw coded("Cannot read '" + id + "'", 'MODULE_NOT_FOUND');
     }
     var info = JSON.parse(payload);
-    if (info.esm) {
-      // Real node's own answer for `require()` of an ES module, and here it is also the honest
-      // one: iOS transpiles ESM to CommonJS at load and Android has no transpiler, so the gap is
-      // iOS's transpiler rather than a wrong answer. `import()` reaches the same wall.
-      throw coded('require() of ES Module ' + id + ' is not supported: the Android Node layer '
-        + 'has no ES module transpiler, and a WebView will not evaluate one against this loader',
-        'ERR_REQUIRE_ESM');
-    }
-
     var directory = host.virtualDirname(id);
     var fn;
     try {
-      fn = wrapModule(info.source, id);
+      fn = wrapModule(info.source, id, info.esm);
     } catch (e) {
       // A SyntaxError here is the FILE failing to parse, and the message is the only thing that
       // says where. Swallowing it leaves "Cannot parse '<2 MB file>'", which is unactionable.
@@ -302,14 +298,34 @@
     var module = { exports: {} };
     inProgress[id] = module;
     var required = makeRequire(directory, false);
+    var result;
     try {
-      fn(module.exports, required, module, id, directory, required, id);
+      result = fn(module.exports, required, module, id, directory, required, id);
     } catch (e) {
       // A module that throws mid-evaluation must not linger as partial exports: evict, and let
       // the ORIGINAL error reach the requiring frame.
       delete inProgress[id];
       delete moduleCache[id];
       throw e;
+    }
+    // An ES module's wrapper is async, so `require()` of one answers a PROMISE of its exports.
+    // That is not a wart: it is the contract the transpiled import site already expects — every
+    // one of them reads `if (x instanceof Promise) x = await x`. It is also the only honest
+    // answer, because a module with top-level await genuinely is not finished yet.
+    if (info.esm && result && typeof result.then === 'function') {
+      var settled = result.then(function () {
+        delete inProgress[id];
+        moduleCache[id] = module.exports;
+        return module.exports;
+      }, function (e) {
+        delete inProgress[id];
+        delete moduleCache[id];
+        throw e;
+      });
+      // Cached as the PROMISE, so a second require during the same evaluation joins the first
+      // rather than running the module twice.
+      moduleCache[id] = settled;
+      return settled;
     }
     delete inProgress[id];
     moduleCache[id] = module.exports;
@@ -484,15 +500,29 @@
     // anything it requires, with its own `module`, `exports`, `__filename`, `__dirname` and a
     // `require` rooted at its directory. A plain global eval — which is what this was before the
     // loader existed — leaves `require` undefined in the one file a user is most likely to write.
-    entry: function (source, url) {
+    entry: function (source, url, async) {
       var result = { ok: true, error: '' };
       try {
         var id = host.normalizePath(String(url || '/main.js'));
         var directory = host.virtualDirname(id);
-        var fn = wrapModule(String(source), id);
+        var fn = wrapModule(String(source), id, !!async);
         var module = { exports: {} };
         var required = makeRequire(directory, false);
-        fn(module.exports, required, module, id, directory, required, id);
+        var settled = fn(module.exports, required, module, id, directory, required, id);
+        // An ESM entry's body runs inside an async wrapper, so a throw after its first `await`
+        // rejects the promise instead of unwinding through the try below. Without this the
+        // program would report success and print nothing, which is the same silent shape the
+        // loop's quiescence bug had.
+        if (settled && typeof settled.then === 'function') {
+          globalThis.__mouseEntrySettled = settled;
+          settled.catch(function (e) {
+            var text = (e && e.stack) ? String(e.stack) : String((e && e.message) || e);
+            if (text.indexOf('__mouse_exit__') >= 0) return;
+            host.stderr(text + '\n');
+            globalThis.__mouseExited = true;
+            host.exit(1);
+          });
+        }
       } catch (e) {
         // process.exit unwinds by throwing; that is not a failure.
         var text = e && e.message ? String(e.message) : String(e);

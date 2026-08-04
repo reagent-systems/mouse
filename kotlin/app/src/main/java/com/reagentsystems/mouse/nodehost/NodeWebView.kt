@@ -10,6 +10,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.reagentsystems.mouse.node.Bootstrap
+import com.reagentsystems.mouse.node.EsmTranspiler
 import com.reagentsystems.mouse.node.HostBridge
 import com.reagentsystems.mouse.node.ModuleResolver
 import com.reagentsystems.mouse.node.NodeCpu
@@ -574,8 +575,16 @@ class NodeWebView(
     }
 
     private fun runEntry(source: String, entryPath: String) {
+        // The entry is transpiled HERE because it never passes through the resolver — msh reads
+        // the file itself and hands the text over, so `loadJson`'s transpile never sees it. That
+        // is exactly how `npx create-vite` failed: every module it required loaded fine and its
+        // own bin, an ES module, did not.
+        val isModule = entryPath.endsWith(".mjs") ||
+            (!entryPath.endsWith(".cjs") && EsmTranspiler.looksLikeModule(source))
+        val body = if (isModule) EsmTranspiler.transpile(source)
+        else EsmTranspiler.rewriteDynamicImport(source)
         val call = "globalThis.__mouseDispatch.entry(" +
-            HostBridge.jsString(source) + "," + HostBridge.jsString(entryPath) + ")"
+            HostBridge.jsString(body) + "," + HostBridge.jsString(entryPath) + "," + isModule + ")"
         inFlight += 1
         web.evaluateJavascript(call) { raw ->
             inFlight -= 1

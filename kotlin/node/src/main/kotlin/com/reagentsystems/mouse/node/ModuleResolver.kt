@@ -408,7 +408,16 @@ class ModuleResolver(private val fs: NodeFs) {
             val newline = source.indexOf('\n')
             source = if (newline < 0) "" else source.substring(newline)
         }
-        return Json.write(mapOf("source" to source, "esm" to isESModule(id, source)))
+        val esm = isESModule(id, source)
+        // The transpile happens HERE, not in the loader, for the reason the loader's own note
+        // gives: only the engine can run a module, but only the host can rewrite one. iOS draws
+        // the same line — `transpileESM` is Swift and the loader receives CommonJS.
+        //
+        // Dynamic `import(` is rewritten in CommonJS too, because it is legal there and no
+        // engine here has a module loader wired to this resolver. prettier lazy-loads its
+        // plugins that way.
+        val body = if (esm) EsmTranspiler.transpile(source) else EsmTranspiler.rewriteDynamicImport(source)
+        return Json.write(mapOf("source" to body, "esm" to esm))
     }
 
     companion object {

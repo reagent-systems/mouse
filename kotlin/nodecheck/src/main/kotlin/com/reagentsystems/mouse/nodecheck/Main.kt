@@ -7,6 +7,7 @@ import com.reagentsystems.mouse.node.NodeCpu
 import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeFsSmoke
 import com.reagentsystems.mouse.node.NodeLoop
+import com.reagentsystems.mouse.node.EsmTranspiler
 import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeHttp
 import com.reagentsystems.mouse.node.NodeProcessConfig
@@ -2382,6 +2383,7 @@ fun main(args: Array<String>) {
         val node = nodeBinary()
         fsCorpus(node, scratch)
         resolverCorpus(node, scratch)
+        esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
         httpCorpus(node, scratch)
@@ -2407,3 +2409,197 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 }
+
+// ---------------------------------------------------------------------------- ESM ----
+
+/**
+ * One ES module case: a little package, and what real node prints when it runs it.
+ *
+ * The grammar is enumerated rather than trusted, for the reason `verify/esmgrammar` gives on the
+ * iOS side and which these cases are taken from: a transpiler that works by pattern is only as
+ * good as its enumeration, and two holes in iOS's were found by accident because dual packages
+ * kept resolving to their CommonJS half.
+ */
+private class EsmCase(val name: String, val files: Map<String, String>)
+
+private val ESM_CASES: List<EsmCase> = listOf(
+    EsmCase(
+        "export-declarations",
+        mapOf(
+            "dep.mjs" to """
+                export const constant = 'const';
+                export let mutable = 'let';
+                export var older = 'var';
+                export function plain() { return 'function'; }
+                export async function waited() { return 'async function'; }
+                export function* generated() { yield 'function*'; }
+                export async function* streamed() { yield 'async function*'; }
+                export class Named { get who() { return 'class'; } }
+            """.trimIndent(),
+            "main.mjs" to """
+                import * as dep from './dep.mjs';
+                console.log(dep.constant, dep.mutable, dep.older);
+                console.log(dep.plain());
+                console.log(dep.generated().next().value);
+                console.log(new dep.Named().who);
+            """.trimIndent(),
+        ),
+    ),
+    EsmCase(
+        "default-and-named",
+        mapOf(
+            "dep.mjs" to """
+                const value = 'the-default';
+                export default value;
+                export const extra = 'extra';
+            """.trimIndent(),
+            "main.mjs" to """
+                import value, { extra } from './dep.mjs';
+                console.log(value, extra);
+            """.trimIndent(),
+        ),
+    ),
+    EsmCase(
+        "aliases-and-clause",
+        mapOf(
+            "dep.mjs" to """
+                const a = 1, b = 2;
+                export { a, b as renamed };
+            """.trimIndent(),
+            "main.mjs" to """
+                import { a, renamed as alias } from './dep.mjs';
+                console.log(a, alias);
+            """.trimIndent(),
+        ),
+    ),
+    EsmCase(
+        "re-export-star",
+        mapOf(
+            "base.mjs" to "export const one = 1;\nexport const two = 2;\nexport default 'base-default';",
+            "dep.mjs" to "export * from './base.mjs';\nexport const three = 3;",
+            "main.mjs" to """
+                import * as dep from './dep.mjs';
+                console.log(dep.one, dep.two, dep.three);
+                console.log(dep.default);
+            """.trimIndent(),
+        ),
+    ),
+    EsmCase(
+        "export-default-function",
+        mapOf(
+            "dep.mjs" to "export default function named() { return 'from-default-fn'; }",
+            "main.mjs" to "import fn from './dep.mjs';\nconsole.log(fn());",
+        ),
+    ),
+    EsmCase(
+        "strings-are-not-code",
+        mapOf(
+            // The mask's whole reason: this line is DATA. A blind rewrite corrupts it and then
+            // assigns a binding that does not exist.
+            // The embedded statement starts a LINE, which is the only way it reaches the
+            // statement patterns' `^` anchor — a string on the same line as its assignment
+            // never could, so a case written that way exercises nothing. This is vite's
+            // worker shim in the shape it actually ships.
+            "main.mjs" to "const shim = `\nexport default function WorkerWrapper(options) {}\n`;\n" +
+                "export const kept = shim.trim().length;\n" +
+                "console.log(shim.trim());\nconsole.log(kept);",
+        ),
+    ),
+    EsmCase(
+        "dynamic-import",
+        mapOf(
+            "dep.mjs" to "export default 'lazy';",
+            "main.mjs" to "const m = await import('./dep.mjs');\nconsole.log(m.default);",
+        ),
+    ),
+)
+
+/**
+ * The transpiler, graded against REAL NODE running the same package as real ES modules.
+ *
+ * This cannot go through [DRIVER] the way the filesystem corpus does. That stand-in host is
+ * JavaScript, the transpiler is Kotlin, and a JS copy of it in the harness would be grading our
+ * loader against a second copy of our own beliefs — the thing this suite refuses to do
+ * everywhere else. So the reference is node itself: it runs `main.mjs` as ESM, we transpile the
+ * same files to CommonJS, node runs THAT, and the two stdouts must be identical.
+ *
+ * The little loader below is harness scaffolding, not a second implementation: it does what
+ * `node-host.js` does — wrap in an async function with the same seven parameters — because the
+ * transpiled source emits top-level `await` and has to be given somewhere to do it.
+ */
+private fun esmCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "ESM corpus skipped — no real node to grade against")
+        return
+    }
+    for (case in ESM_CASES) {
+        val real = File(parent, "esm-real-${case.name}").also { it.deleteRecursively(); it.mkdirs() }
+        for ((name, text) in case.files) File(real, name).writeText(text)
+        val (realStatus, realOut) = run(listOf(node, "main.mjs"), real)
+        if (realStatus != 0) {
+            check(false, "real node runs ${case.name} as ESM:\n${realOut.take(600)}")
+            continue
+        }
+
+        val ours = File(parent, "esm-ours-${case.name}").also { it.deleteRecursively(); it.mkdirs() }
+        for ((name, text) in case.files) {
+            File(ours, name).writeText(EsmTranspiler.transpile(text))
+        }
+        File(ours, "run.cjs").writeText(ESM_RUNNER)
+        val (ourStatus, ourOut) = run(listOf(node, "run.cjs"), ours)
+        if (ourStatus != 0) {
+            check(false, "the transpiled ${case.name} runs:\n${ourOut.take(900)}")
+            continue
+        }
+        checkEqual(ourOut.trimEnd(), realOut.trimEnd(), "ESM ${case.name} matches real node")
+    }
+}
+
+/**
+ * What `node-host.js` does, in the harness: wrap a transpiled module in an ASYNC function with
+ * the same seven parameters, and answer a promise of its exports so an importer's
+ * `if (x instanceof Promise) x = await x` has something to await. The four runtime helpers are
+ * the shared bootstrap's, restated here only because a bare `node` has no bootstrap.
+ */
+private val ESM_RUNNER = """
+    const fs = require('fs');
+    const path = require('path');
+    const cache = {};
+
+    function __esmDefault(m) {
+      if (m && typeof m === 'object' && '__esModule' in m) return m.default;
+      return (m && typeof m === 'object' && 'default' in m) ? m.default : m;
+    }
+    function __esmBinding(m, name) { return m[name]; }
+    function __mouseLive(target, name, get) {
+      Object.defineProperty(target, name, { get: get, enumerable: true, configurable: true });
+    }
+    function __reexportStar(target, source) {
+      for (const key of Object.keys(source || {})) {
+        if (key === 'default' || key === '__esModule') continue;
+        Object.defineProperty(target, key, {
+          get: () => source[key], enumerable: true, configurable: true,
+        });
+      }
+    }
+    function __dynamicImport(req, spec) { return Promise.resolve(req(spec)); }
+
+    function load(id) {
+      if (id in cache) return cache[id];
+      const source = fs.readFileSync(id, 'utf8');
+      const dir = path.dirname(id);
+      const require_ = (spec) => spec.startsWith('.') ? load(path.resolve(dir, spec)) : require(spec);
+      const fn = eval('(async function (exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename) {'
+        + source + '\n})');
+      const module_ = { exports: {} };
+      const settled = fn(module_.exports, require_, module_, id, dir, require_, id)
+        .then(() => { cache[id] = module_.exports; return module_.exports; });
+      cache[id] = settled;
+      return settled;
+    }
+
+    load(path.resolve('main.mjs')).catch((e) => {
+      console.error((e && e.stack) || e);
+      process.exitCode = 1;
+    });
+""".trimIndent()
