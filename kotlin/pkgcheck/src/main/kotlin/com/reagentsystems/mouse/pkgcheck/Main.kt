@@ -743,50 +743,81 @@ private fun runtimeCorpus(scratch: File) {
         check(!store.remove(entry), "removing what is not there reports false")
     }
 
-    // -- the recorded URL and hash are real ----------------------------------------------
-    // This is the check that makes the catalog trustworthy rather than plausible: it downloads the
-    // artifact the entry names and hashes it. Cached like the npm tarballs, since a release asset
-    // is immutable.
-    val cache = File(System.getProperty("user.home"), ".cache/mouse-verify/runtimes")
-    val key = MessageDigest.getInstance("SHA-256").digest(python.url.toByteArray())
-        .joinToString("") { "%02x".format(it) }
-    val cached = File(cache, "$key.bin")
+    // -- the recorded URLs and hashes are real -------------------------------------------
+    // The checks that make the catalog trustworthy rather than plausible: download the artifact
+    // each entry names and hash it. Release assets are immutable, so they cache like the npm
+    // tarballs.
+    //
+    // BOTH archive kinds run, and that is the point rather than thoroughness for its own sake:
+    // everything above this line uses a zip, so without the ruby entry the tar.gz branch of
+    // `install` — and `strip`, which only that branch reads — would ship completely ungated.
     val realStore = RuntimeStore(File(scratch, "realstore"))
-    var realNotes = 0
-    var realError: String? = null
-    try {
-        realStore.install(
-            python,
-            note = { realNotes += 1 },
-            fetch = { url ->
-                if (cached.isFile) {
-                    cached.readBytes()
-                } else {
-                    val bytes = RuntimeStore.download(url)
-                    cache.mkdirs()
-                    cached.writeBytes(bytes)
-                    bytes
-                }
-            },
-        )
-    } catch (e: Exception) {
-        realError = e.message
+    fun installReal(entry: RuntimeCatalog.Entry): String? {
+        val cache = File(System.getProperty("user.home"), ".cache/mouse-verify/runtimes")
+        val key = MessageDigest.getInstance("SHA-256").digest(entry.url.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        val cached = File(cache, "$key.bin")
+        return try {
+            realStore.install(
+                entry,
+                fetch = { url ->
+                    if (cached.isFile) {
+                        cached.readBytes()
+                    } else {
+                        val bytes = RuntimeStore.download(url)
+                        cache.mkdirs()
+                        cached.writeBytes(bytes)
+                        bytes
+                    }
+                },
+            )
+            null
+        } catch (e: Exception) {
+            e.message ?: e.toString()
+        }
     }
-    check(realError == null, "the real CPython wasm build downloads, verifies and unpacks (error: $realError)")
-    val realInstalled = realStore.installed(python)
-    check(realInstalled != null, "the real python.wasm is where the catalog says it is")
+
+    val pythonError = installReal(python)
+    check(pythonError == null, "the real CPython wasm build downloads, verifies and unpacks (error: $pythonError)")
+    val realPython = realStore.installed(python)
+    check(realPython != null, "the real python.wasm is where the catalog says it is")
     check(
-        (realInstalled?.wasm?.length() ?: 0) > 10_000_000,
+        (realPython?.wasm?.length() ?: 0) > 10_000_000,
         "the unpacked interpreter is a real multi-megabyte wasm module",
     )
     // Where the stdlib actually sits comes from the entry's own PYTHONPATH rather than a guess:
     // `library` is `lib`, but CPython keeps its modules a version directory below that, and the
     // catalog already states which one.
-    val stdlib = python.env["PYTHONPATH"]?.replace("{root}", realInstalled?.directory?.path ?: "")
+    val stdlib = python.env["PYTHONPATH"]?.replace("{root}", realPython?.directory?.path ?: "")
     check(
         stdlib != null && File(stdlib, "os.py").isFile,
         "the real standard library came with it, where PYTHONPATH says it is ($stdlib)",
     )
+
+    if (ruby != null) {
+        val rubyError = installReal(ruby)
+        check(rubyError == null, "the real ruby.wasm tarball downloads, verifies and unpacks (error: $rubyError)")
+        val realRuby = realStore.installed(ruby)
+        check(realRuby != null, "the real ruby interpreter is where the catalog says it is")
+        check(
+            (realRuby?.wasm?.length() ?: 0) > 10_000_000,
+            "the unpacked ruby is a real multi-megabyte wasm module",
+        )
+        // `strip: 3` is what makes `bin/ruby` land at the runtime root instead of three
+        // directories down. Nothing else in this corpus reads `strip`, so this assertion is the
+        // only thing standing between a wrong value and a runtime that installs to the wrong
+        // shape — which would surface as "not installed" for a runtime plainly on disk.
+        check(
+            realRuby?.wasm?.path?.endsWith("usr/lib/ruby/bin/ruby") == true,
+            "strip: 3 unwrapped the release tarball's versioned directory",
+        )
+        val rubylib = ruby.env["RUBYLIB"]?.split(":")?.firstOrNull()
+            ?.replace("{root}", realRuby?.directory?.path ?: "")
+        check(
+            rubylib != null && File(rubylib).isDirectory,
+            "the real ruby standard library came with it, where RUBYLIB says it is ($rubylib)",
+        )
+    }
 }
 
 fun main() {
@@ -811,7 +842,7 @@ fun main() {
         println(
             "PACKAGE MANAGER: $checks checks — semver, tar/gzip/json, resolution vs pnpm, " +
                 "real installs proven by real node, npm aliases, wasm substitution, integrity, " +
-                "the runtime store against the real CPython build — MATCH",
+                "the runtime store against the real CPython and ruby builds — MATCH",
         )
     } else {
         println("PACKAGE MANAGER: $failures of $checks checks disagree with the iOS gate — MISMATCH")
