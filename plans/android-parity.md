@@ -216,27 +216,35 @@ each with a screenshot:
   `request GET /hello` and `request GET /second` in the terminal as they
   arrived, which is the half a curl transcript alone would not show.
 
-  **(c) — create-vite RUNS; the menu is what remains.** Milestone 3e ported
-  the ES module transpiler (`EsmTranspiler.kt`, from `rewriteImportForms` and
-  `transpileESM`), gated it differentially against real node on seven grammar
-  cases, and wired it into both the resolver and the ENTRY — the second
-  because msh reads a bin itself and hands the text over, so the resolver
-  never sees it. `npx create-vite` now scaffolds a real project on the
-  emulator. It takes the DEFAULTS, because stdin is not a TTY, so what is left
-  for the leg as written is the T↔G join: `isTty`, hosting the program on the
-  phase-T screen through the engagement rule — ported and gated since phase T
-  and called by nothing until now — and the backspace routing below.
+  **(c) PASSES.** `npx create-vite` renders its prompts on the phase-T grid,
+  takes a project name typed character by character, and moves its framework
+  selection by taps on the key strip. Four things had to land:
 
-  Superseded, kept for the record: `npm install`/`npm run` and `npx` are in msh
-  now — `npx create-vite` resolves `create-vite@9.1.2` against the real
-  registry, installs it, finds its bin and executes it. It then stops at
-  `SyntaxError: Cannot use import statement outside a module`: create-vite
-  ships an ES MODULE, and ESM is the deferral 3b recorded. The reason it gave
-  is exact — iOS transpiles with `NodeEngine.rewriteImportForms`, which is
-  SWIFT rather than shared JavaScript, so Android inherited nothing. Leg (c)
-  therefore needs that ~180-line rewriter ported to `:node` and the loader's
-  `esm` paths with it, gated against the same fixtures. That is milestone 3e,
-  not a patch.
+  - **milestone 3e, the ES module transpiler.** `EsmTranspiler.kt`, ported from
+    `rewriteImportForms` and `transpileESM`, gated differentially against real
+    node on seven grammar cases, and wired into BOTH the resolver and the
+    entry — the second because msh reads a bin itself and hands the text over,
+    so the resolver never sees it. create-vite ships an ES module; before this
+    it could not start at all.
+  - **the T↔G join.** `NodeProgram` hosts a running engine as a
+    `TerminalProgram`, and the engagement rule — ported and gated since phase T
+    with nothing calling it — finally decides when a streaming program becomes
+    a screen program.
+  - **ONLCR.** A pty maps NL→CR-NL on output and we are the pty substitute.
+    Without it every frame sheared diagonally, one column further right per
+    line, because the screen is correctly xterm-faithful in treating LF as
+    index.
+  - **stdin, twice.** `stdinIsComplete` defaulted to TRUE — right for 3a, where
+    nothing is attached and a reader must reach EOF rather than wait forever,
+    and fatal for an interactive program, which is handed a stream that has
+    ALREADY ENDED. It swallowed every keystroke, and it was also the whole of
+    the "starts nothing at all on half its runs" intermittency: clack asks
+    stdin for a line, EOF answers, the prompt cancels itself, and nothing is
+    printed because from the program's side nothing went wrong. Separately, the
+    prompt field sent its whole COMPOSING REGION on every change, so `mouse-app`
+    arrived as `m` + `mo` + `mou` + … concatenated; keystrokes are the DIFF now,
+    and nothing is written back into the field. Backspace falls out of the same
+    change: a shrinking field is DEL.
 
   One defect found by running and NOT yet fixed:
 
@@ -244,40 +252,6 @@ each with a screenshot:
     it and is a verbatim iOS copy under a drift gate, so the fix is a host
     override applied after load, with a gate of its own. Packages branch on
     this — napi-rs already does — so it is not cosmetic.
-
-  **NO TYPED CHARACTER reaches a running program — not just backspace.** This
-  correction was forced by driving it: `Enter` advances a prompt (it is an IME
-  ACTION, `keyboardActions.onSend`) and the arrows work (the key strip calls
-  `sendSpecialKey` directly, never touching the field), so create-vite's menu
-  navigates by touch and its TEXT prompt silently keeps its default. Only
-  `onValueChange` is losing keystrokes, which makes the missing backspace one
-  symptom of a bigger fault rather than the whole of it.
-
-  **FIXED, and it was two faults wearing one coat:**
-
-  - `stdinIsComplete` defaulted to TRUE, which is right for 3a — nothing
-    attached, so a reader must reach EOF rather than wait forever — and hands
-    an interactive program a stream that has ALREADY ENDED. Every keystroke
-    pushed into it afterwards landed on a finished pipe. Now `!interactive`.
-  - the field sent `new.text` outright, which is the whole COMPOSING REGION
-    each time the IME revises it: typing `mouse-app` arrived as `m` + `mo` +
-    `mou` + … concatenated, visible on screen as
-    `mmomoumousmousemouse-mouse-app` the moment stdin was open. Keystrokes are
-    now the DIFF against the field's previous value, and nothing is written
-    back into the field — iOS vetoes the edit instead
-    (`shouldChangeCharactersIn` returns false), which Compose cannot do.
-
-  Backspace comes with it: a shrinking field is DEL, once per character
-  removed. Two earlier attempts aimed only at the field and were reverted;
-  neither could have worked, because stdin was closed underneath them. While a program owns
-  the keyboard the prompt field is held empty, so Compose fires no
-  `onValueChange` for a deletion and the keystroke is lost. `create-vite` asks
-  for a project name, so the leg cannot pass without it. The fix is the usual
-  one — keep a sentinel character in the field so a deletion is always an edit,
-  and translate edits into keys — but it is deliberately NOT written yet,
-  because there is no program on Android that can show a backspace arriving,
-  and unverifiable code is what this plan exists to avoid. It lands with 3d,
-  when a real TUI can prove it.
 
 Plus: the Kotlin app builds clean, the existing carousel/git/workspace
 behaviour is unregressed, and the iOS app is untouched.
