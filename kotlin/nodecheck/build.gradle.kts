@@ -46,8 +46,5 @@ tasks.named<JavaExec>("run") {
     systemProperty("mouse.repo.root", rootProject.projectDir.parentFile.absolutePath)
     standardOutput = System.out
     errorOutput = System.err
-    // `./gradlew :nodecheck:run --args="--sync"` regenerates the asset.
-    if (project.hasProperty("nodecheckArgs")) {
-        args((project.property("nodecheckArgs") as String).split(" "))
-    }
+    // `./gradlew :nodecheck:run --args=--sync` regenerates the asset.
 }

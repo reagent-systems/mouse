@@ -106,7 +106,7 @@ private fun driftCorpus(): String {
         println(
             "  FAIL: ${Bootstrap.ASSET_PATH} has drifted from ${Bootstrap.SWIFT_PATH}\n" +
                 "    first difference at $difference\n" +
-                "    regenerate with: ./gradlew :nodecheck:run -PnodecheckArgs=--sync",
+                "    regenerate with: ./gradlew :nodecheck:run --args=--sync",
         )
     }
     return extracted
