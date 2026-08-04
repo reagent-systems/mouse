@@ -131,6 +131,26 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
 **4 — Runtimes.** Reuse `Runtimes.json` unchanged; port `RuntimeStore` +
 the zip reader; `pkg install python` and `pkg install ruby` on Android.
 
+**5 — Phase A: the shell LANGUAGE. Not started, and not previously tracked
+anywhere.** This plan scoped T, F and G because those were the phases
+AGENTS.md recorded as iOS-only — but iOS also has phase A, and Android's msh
+does not. `swift/Mouse/ShellLanguage.swift` is 690 lines of `if`/`for`/
+`while`/`case`, `test`/`[`, command substitution and script execution;
+`MouseShell.kt` has **none of it** — grepping for control-flow keywords or
+`$(` returns zero. What Kotlin has is the word layer: quoting, variables,
+globs, pipes, redirection, `;`/`&&`/`||`, history and ~50 built-ins.
+
+It blocks none of the three stop-condition legs, which is why it stayed
+invisible, but "everything the iOS app can do now" includes it and a parity
+claim that omits it is wrong rather than incomplete.
+
+The gate is already written and needs no porting decisions: `verify/shell`
+is DIFFERENTIAL — it runs each script through msh and through the real
+`/bin/sh` and compares stdout and exit status. A Kotlin `:shellcheck` can
+drive the identical corpus against `MouseShell` and the same `/bin/sh`. Until
+that exists, the Kotlin shell is the one shared component with no gate at all,
+which by this plan's own rule makes its parity unfalsifiable.
+
 ## Stop condition
 
 The same three legs the iOS loop ended on, each on an Android emulator,
