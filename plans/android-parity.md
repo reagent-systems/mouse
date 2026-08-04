@@ -253,11 +253,28 @@ each with a screenshot:
   `onValueChange` is losing keystrokes, which makes the missing backspace one
   symptom of a bigger fault rather than the whole of it.
 
-  Parking an invisible sentinel in the field to make every deletion an edit was
-  tried and REVERTED: it did not restore typed input either, so the cause is
-  not "an empty field has nothing to delete". The field is rewritten on every
-  change (`field = TextFieldValue("")`), and that is the thing to suspect next
-  — a value the IME did not ask for, applied while it holds a composing region.
+  Two candidate fixes have been tried and BOTH REVERTED, which narrows it:
+
+  - an invisible sentinel in the field, so a deletion is always an edit. Did
+    not restore typed input, so "an empty field has nothing to delete" is not
+    the cause.
+  - routing by DIFF against the field's previous value and never writing a
+    value the IME did not produce — the closest Compose analogue to iOS's
+    `shouldChangeCharactersIn` returning false, which is how the Swift side
+    avoids this entirely. Exercised against a running create-vite and the
+    characters still did not arrive.
+
+  So the fault is NOT the field fighting the IME, which is where both attempts
+  aimed. `sendKey` reaching `NodeProgram.input` has not yet been observed
+  directly — every probe run was lost to the intermittency below — and that is
+  the next measurement to take, before another fix.
+
+  **`npx create-vite` starts nothing at all on roughly half its runs**, most
+  often the first after a fresh launch; a retry in the same app instance then
+  works. No output, no error, no console message — the command simply returns.
+  Seen four times. This blocks measuring anything else about the program, so it
+  is the first thing to chase, and its silence is its own defect: a command
+  that fails must say so.
 
   The original note, kept because its reasoning still stands:
   **backspace does not reach a running program.** While a program owns
