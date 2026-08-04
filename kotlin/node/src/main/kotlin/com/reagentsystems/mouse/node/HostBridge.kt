@@ -128,6 +128,14 @@ object HostBridge {
         // reach `print` without it. `SecureRandom` is the platform's own CSPRNG — JCA, not a
         // dependency. Everything else on the crypto surface is still deferred, by name.
         "randomBytes",
+        // 3d, the arithmetic half of crypto. CryptoKit on iOS, the JCA here — the platform's own
+        // either way, so no dependency is added. What is still deferred below is the half that
+        // needs KEY MANAGEMENT (Security framework has no JCA equivalent that maps one to one)
+        // rather than the half that is a digest.
+        "cryptoHash",
+        "cryptoHmac",
+        "pbkdf2",
+        "randomUUID",
     )
 
     /**
@@ -171,7 +179,7 @@ object HostBridge {
             "(invariant #4) or a hand-written RFC 6455 client that still could not do `wss://`. " +
             "The `ws` PACKAGE is unaffected — it rides these sockets for `ws://` and works",
         listOf(
-            "cryptoHash", "cryptoHmac", "randomUUID", "pbkdf2", "scrypt", "hkdf",
+            "scrypt", "hkdf",
             "cipherOpen", "cipherSeal", "keyGenerate", "keyIdentify", "keySign", "keyVerify",
             "keyAgree", "ecdhGenerate", "ecdhCompute", "rsaGenerate", "rsaSign", "rsaVerify",
             "rsaEncrypt", "rsaDecrypt", "rsaPrivateEncrypt", "rsaPublicDecrypt",

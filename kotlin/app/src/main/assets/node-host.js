@@ -133,6 +133,19 @@
   // WASI start asks for it before a script's first line runs — see HostBridge.DEFERRED for what
   // is still refused and why.
   bridge.randomBytes = function (count) { return host.randomBytes(Number(count) | 0); };
+  bridge.randomUUID = function () { return host.randomUUID(); };
+  // `null` is the contract for "unknown algorithm" and the bootstrap branches on it to raise
+  // node's own error, so an empty string would be a wrong answer rather than a missing one.
+  bridge.cryptoHash = function (algorithm, base64) {
+    return host.cryptoHash(String(algorithm), String(base64));
+  };
+  bridge.cryptoHmac = function (algorithm, keyBase64, base64) {
+    return host.cryptoHmac(String(algorithm), String(keyBase64), String(base64));
+  };
+  bridge.pbkdf2 = function (password, salt, iterations, keylen, digest) {
+    return host.pbkdf2(String(password), String(salt), Number(iterations) | 0,
+                       Number(keylen) | 0, String(digest));
+  };
 
   // ---- sockets, dns and the TLS transport --------------------------------------------------
   //

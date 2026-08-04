@@ -14,6 +14,7 @@ import com.reagentsystems.mouse.node.EsmTranspiler
 import com.reagentsystems.mouse.node.HostBridge
 import com.reagentsystems.mouse.node.ModuleResolver
 import com.reagentsystems.mouse.node.NodeCpu
+import com.reagentsystems.mouse.node.NodeCrypto
 import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeHttp
@@ -240,6 +241,20 @@ class NodeWebView(
          * and it is seeded by the OS, which is the property that matters. Base64 out, because the
          * bridge carries strings and the bootstrap already does `Buffer.from(…, 'base64')`.
          */
+        @JavascriptInterface
+        fun randomUUID(): String = NodeCrypto.randomUUID()
+
+        @JavascriptInterface
+        fun cryptoHash(algorithm: String, base64: String): String? = NodeCrypto.hash(algorithm, base64)
+
+        @JavascriptInterface
+        fun cryptoHmac(algorithm: String, keyBase64: String, base64: String): String? =
+            NodeCrypto.hmac(algorithm, keyBase64, base64)
+
+        @JavascriptInterface
+        fun pbkdf2(password: String, salt: String, iterations: Int, keyLength: Int, digest: String): String? =
+            NodeCrypto.pbkdf2(password, salt, iterations, keyLength, digest)
+
         @JavascriptInterface
         fun randomBytes(count: Int): String {
             if (count <= 0) return ""

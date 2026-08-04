@@ -41,12 +41,14 @@ object NodeSmoke {
         // A surface with no Android host binding must still refuse BY NAME. `cryptoHash` is one of
         // the generated stubs; `NodeFsSmoke` probes the whole list, both directions.
         //
-        // This used to probe `netConnect`, and 3c is what made that wrong: the moment sockets were
-        // real, a check asserting they refuse became a check asserting a regression. That is the
+        // This used to probe `netConnect`, then `cryptoHash`, and each time the milestone that
+        // implemented the surface turned the check into an assertion that a REGRESSION had
+        // happened — which is the gate working, and why the name here is expected to keep moving.
+        // 3c did it to sockets, 3d to the digests. `zlibOpen` is the current one. That is the
         // partition doing its job — it went red and named the line, rather than the capability
         // quietly disagreeing with the record.
         let refusal = 'no-throw';
-        try { globalThis.__mouse.cryptoHash('sha256', ''); }
+        try { globalThis.__mouse.zlibOpen('deflate', {}); }
         catch (e) { refusal = e.code || e.message; }
 
         setTimeout(function(){

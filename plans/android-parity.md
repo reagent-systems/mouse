@@ -150,8 +150,23 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   descriptor handoff (`java.nio` will not adopt an fd it did not open), and the
   `WebSocket` global (no client in the JDK or the framework, and invariant #4
   forbids adding one — the `ws` PACKAGE rides these sockets and works).
-- **3d** — crypto, workers, child processes; then `npm`/`npx`/`npm run` in
-  Kotlin msh.
+- **3d — crypto's arithmetic half. DONE; the rest still refuses by name.**
+  `NodeCrypto` in `:node` — digests, HMAC, PBKDF2 and `randomUUID` on the JCA,
+  which is the platform's own and so adds no dependency, the same bargain
+  CryptoKit is on iOS. It lives in the PURE module because none of it is
+  framework, which is what lets `:nodecheck` grade it against real `node`
+  computing the same digests rather than against pinned vectors: the errors
+  worth catching are translation errors (node says `sha256`, the JCA says
+  `SHA-256` and `HmacSHA256`; an empty HMAC key is legal to node and rejected
+  by the JCA), and every one of them shows up as a different digest. 53 checks.
+
+  Still deferred, and the line is not arbitrary: what remains needs KEY
+  MANAGEMENT — ciphers, EC/RSA/Ed25519 signing, ECDH, key generation — where
+  iOS rides Security framework and the JCA has no one-to-one counterpart, so
+  it is a port rather than a translation. Compression, `vm`, workers and child
+  processes are untouched.
+
+  `npm`/`npx`/`npm run` in Kotlin msh landed earlier, with the launch path.
 
 **4 — Runtimes.** Reuse `Runtimes.json` unchanged; port `RuntimeStore` +
 the zip reader; `pkg install python` and `pkg install ruby` on Android.

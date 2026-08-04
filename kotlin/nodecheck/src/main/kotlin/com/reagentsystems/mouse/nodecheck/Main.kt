@@ -8,6 +8,7 @@ import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeFsSmoke
 import com.reagentsystems.mouse.node.NodeLoop
 import com.reagentsystems.mouse.node.EsmTranspiler
+import com.reagentsystems.mouse.node.NodeCrypto
 import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeHttp
 import com.reagentsystems.mouse.node.NodeProcessConfig
@@ -2391,6 +2392,7 @@ fun main(args: Array<String>) {
         val node = nodeBinary()
         fsCorpus(node, scratch)
         resolverCorpus(node, scratch)
+        cryptoCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2611,3 +2613,92 @@ private val ESM_RUNNER = """
       process.exitCode = 1;
     });
 """.trimIndent()
+
+// ------------------------------------------------------------------------- crypto ----
+
+/**
+ * Digests, HMACs and PBKDF2, graded against REAL NODE computing the same thing.
+ *
+ * The point of asking node rather than pinning hex strings: a pinned vector proves the algorithm
+ * was implemented, not that OUR spelling of it reaches the same function. `sha224` exists in the
+ * JCA and not in CryptoKit; node's HMAC names have no separator and its digest names do; an empty
+ * HMAC key is legal to node and rejected by the JCA. Every one of those is a translation error
+ * waiting to happen, and every one of them shows up as a different digest.
+ */
+private fun cryptoCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "crypto corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "crypto").also { it.mkdirs() }
+    val messages = listOf("", "a", "hello world", "the quick brown fox\n", "\u00ff\u00fe binary-ish")
+    val digests = listOf("md5", "sha1", "sha224", "sha256", "sha384", "sha512")
+    val keys = listOf("", "k", "a longer key than one block of sha512 ".repeat(4))
+
+    // One node run for the whole corpus: a process per digest would dominate the wall clock.
+    val plan = StringBuilder()
+    plan.append("const crypto = require('crypto');\nconst out = [];\n")
+    for (message in messages) {
+        val m = Json.write(message)
+        for (digest in digests) {
+            plan.append("out.push(crypto.createHash(${Json.write(digest)})")
+                .append(".update(Buffer.from($m,'utf8')).digest('base64'));\n")
+        }
+    }
+    for (key in keys) {
+        val k = Json.write(key)
+        for (digest in digests) {
+            plan.append("out.push(crypto.createHmac(${Json.write(digest)}, Buffer.from($k,'utf8'))")
+                .append(".update(Buffer.from('hello world','utf8')).digest('base64'));\n")
+        }
+    }
+    for (digest in listOf("sha1", "sha256", "sha512")) {
+        plan.append("out.push(crypto.pbkdf2Sync(Buffer.from('password','utf8'),")
+            .append("Buffer.from('salt','utf8'),1000,32,${Json.write(digest)}).toString('base64'));\n")
+    }
+    plan.append("console.log(out.join('\\n'));\n")
+    File(scratch, "plan.js").writeText(plan.toString())
+    val (status, text) = run(listOf(node, "plan.js"), scratch)
+    if (status != 0) {
+        check(false, "real node computed the crypto corpus:\n${text.take(600)}")
+        return
+    }
+    val expected = text.trim().lines()
+
+    val ours = ArrayList<String>()
+    val label = ArrayList<String>()
+    val b64 = { value: String -> Base64.getEncoder().encodeToString(value.toByteArray(Charsets.UTF_8)) }
+    for (message in messages) {
+        for (digest in digests) {
+            ours.add(NodeCrypto.hash(digest, b64(message)) ?: "<null>")
+            label.add("$digest of ${message.length} bytes")
+        }
+    }
+    for (key in keys) {
+        for (digest in digests) {
+            ours.add(NodeCrypto.hmac(digest, b64(key), b64("hello world")) ?: "<null>")
+            label.add("hmac-$digest with a ${key.length}-byte key")
+        }
+    }
+    for (digest in listOf("sha1", "sha256", "sha512")) {
+        ours.add(NodeCrypto.pbkdf2(b64("password"), b64("salt"), 1000, 32, digest) ?: "<null>")
+        label.add("pbkdf2-$digest, 1000 rounds, 32 bytes")
+    }
+
+    checkEqual(ours.size.toString(), expected.size.toString(), "the crypto corpus lines up with node's")
+    if (ours.size != expected.size) return
+    for (i in ours.indices) checkEqual(ours[i], expected[i], "crypto: ${label[i]}")
+
+    // An algorithm we do not know must answer NULL, because that is what the bootstrap branches on
+    // to raise node's own error. Answering an empty string would be a wrong digest, not a refusal.
+    check(NodeCrypto.hash("sha3-256", b64("x")) == null, "an unknown digest answers null, not a value")
+    check(NodeCrypto.hmac("nope", b64("k"), b64("x")) == null, "an unknown HMAC answers null")
+    check(NodeCrypto.pbkdf2(b64("p"), b64("s"), 1, 16, "md5") == null, "pbkdf2 refuses a digest the JCA has no factory for")
+
+    val uuid = NodeCrypto.randomUUID()
+    check(
+        Regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$").matches(uuid),
+        "randomUUID is a lower-case v4 UUID ($uuid)",
+    )
+    check(NodeCrypto.randomUUID() != uuid, "randomUUID does not repeat itself")
+}
