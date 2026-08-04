@@ -226,6 +226,55 @@
   // `{data, tag}` — an OBJECT, which @JavascriptInterface cannot carry, so it crosses as JSON.
   // An empty tag means the mode has none (the block ciphers), and the bootstrap tests `result.tag`
   // for truthiness, so '' is exactly the right answer rather than a missing key.
+  // Asymmetric keys. `keyIdentify` and the three generators answer OBJECTS, which
+  // @JavascriptInterface cannot carry, so they cross as JSON like `cipherSeal` does. Everything
+  // else is a string or a boolean and needs no unwrapping.
+  bridge.keyIdentify = function (pem) { return JSON.parse(host.keyIdentify(String(pem))); };
+  bridge.keySign = function (pem, data, algorithm, raw) {
+    return host.keySign(String(pem), String(data), String(algorithm || ''), !!raw);
+  };
+  bridge.keyVerify = function (pem, data, signature, algorithm, raw) {
+    return host.keyVerify(String(pem), String(data), String(signature),
+                          String(algorithm || ''), !!raw);
+  };
+  bridge.keyGenerate = function (kind, curve) {
+    var raw = host.keyGenerate(String(kind), String(curve || ''));
+    return (raw === null || raw === undefined) ? null : JSON.parse(raw);
+  };
+  bridge.keyAgree = function (privatePem, publicPem) {
+    return host.keyAgree(String(privatePem), String(publicPem));
+  };
+  bridge.ecdhGenerate = function (curve) {
+    var raw = host.ecdhGenerate(String(curve));
+    return (raw === null || raw === undefined) ? null : JSON.parse(raw);
+  };
+  bridge.ecdhCompute = function (curve, privateKey, peer) {
+    return host.ecdhCompute(String(curve), String(privateKey), String(peer));
+  };
+  bridge.rsaGenerate = function (modulusLength) {
+    var raw = host.rsaGenerate(Number(modulusLength) | 0);
+    return (raw === null || raw === undefined) ? null : JSON.parse(raw);
+  };
+  bridge.rsaSign = function (pem, data, algorithm, pss) {
+    return host.rsaSign(String(pem), String(data), String(algorithm || ''), !!pss);
+  };
+  bridge.rsaVerify = function (pem, data, signature, algorithm, pss) {
+    return host.rsaVerify(String(pem), String(data), String(signature),
+                          String(algorithm || ''), !!pss);
+  };
+  bridge.rsaEncrypt = function (pem, data, padding, digest) {
+    return host.rsaEncrypt(String(pem), String(data), Number(padding) | 0, String(digest || 'sha1'));
+  };
+  bridge.rsaDecrypt = function (pem, data, padding, digest) {
+    return host.rsaDecrypt(String(pem), String(data), Number(padding) | 0, String(digest || 'sha1'));
+  };
+  bridge.rsaPrivateEncrypt = function (pem, data) {
+    return host.rsaPrivateEncrypt(String(pem), String(data));
+  };
+  bridge.rsaPublicDecrypt = function (pem, data) {
+    return host.rsaPublicDecrypt(String(pem), String(data));
+  };
+
   bridge.cipherSeal = function (algorithm, key, iv, plain, aad) {
     var raw = host.cipherSeal(String(algorithm), String(key), String(iv), String(plain), String(aad));
     return (raw === null || raw === undefined) ? null : JSON.parse(raw);

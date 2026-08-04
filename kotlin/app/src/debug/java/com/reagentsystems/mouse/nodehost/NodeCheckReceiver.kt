@@ -10,6 +10,7 @@ import com.reagentsystems.mouse.node.NodeFsSmoke
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSmoke
 import com.reagentsystems.mouse.node.NodeSocketSmoke
+import com.reagentsystems.mouse.node.NodeKeysSmoke
 import com.reagentsystems.mouse.node.NodeVmSmoke
 import java.io.File
 
@@ -39,10 +40,11 @@ import java.io.File
  * which runs the same sources under real `node`. That is what makes an on-device MISMATCH mean the
  * WebView: the corpus itself is already gated on the JVM.
  *
- * FOUR programs run in sequence, each in its own engine. The last is the only one `:nodecheck`
- * does NOT also run, and deliberately so — see [NodeVmSmoke]: its second context is an iframe, so
- * it needs a DOM that real node has not got. Every other program here is graded twice, by both
- * hosts, from the same source.
+ * FIVE programs run in sequence, each in its own engine. The last TWO are the ones
+ * `:nodecheck` does not also run, for two different reasons — see [NodeVmSmoke] (its second context
+ * is an iframe, so it needs a DOM real node has not got) and [NodeKeysSmoke] (its point is WHOSE
+ * cryptography runs: a JDK harness gets SunEC and SunJCE, a phone gets Conscrypt). The rest are
+ * graded twice, by both hosts, from the same source.
  *
  * The programs:
  *
@@ -53,6 +55,9 @@ import java.io.File
  *    grades the JavaScript loader against a stand-in host, and only here do the two meet.
  *  - [NodeVmSmoke] — `vm`: a second JavaScript context, its own globals and its own intrinsics.
  *    DEVICE-ONLY, for the reason above.
+ *  - [NodeKeysSmoke] — the asymmetric surface end to end: EC, RSA, OAEP and ECDH through the
+ *    bootstrap, the shim, the bridge and Android's own provider. DEVICE-ONLY because `:nodecheck`
+ *    grades `NodeKeys` on a JDK, and the JDK is not the provider that ships on a phone.
  *  - [NodeSocketSmoke] — `net`, `http`, `dns` and `dgram`. Off-device `:nodecheck` grades the
  *    Kotlin socket table against real `node` peers and grades the JavaScript above it against a
  *    stand-in that IS real node's `net`; here they meet, and here the platform gets a say. That
@@ -68,7 +73,7 @@ class NodeCheckReceiver : BroadcastReceiver() {
         var settled = false
         var engine: NodeWebView? = null
         val total = NodeSmoke.CHECK_COUNT + NodeFsSmoke.CHECK_COUNT + NodeSocketSmoke.CHECK_COUNT +
-            NodeVmSmoke.CHECK_COUNT + 4
+            NodeVmSmoke.CHECK_COUNT + NodeKeysSmoke.CHECK_COUNT + 4
 
         fun settle(failures: List<String>, transcript: String) {
             if (settled) return
@@ -77,7 +82,8 @@ class NodeCheckReceiver : BroadcastReceiver() {
                 "NODE WEBVIEW: $total checks — the bootstrap loads, console reaches Kotlin, " +
                     "process answers, timers and tick order, the filesystem round-trips, " +
                     "require resolves over node_modules, TCP echoes and half-closes, an http " +
-                    "server answers its own client, dns.lookup and a UDP round trip, refusals by " +
+                    "server answers its own client, dns.lookup and a UDP round trip, a second vm " +
+                    "context, EC/RSA/OAEP/ECDH through Android's own provider, refusals by " +
                     "name — MATCH"
             } else {
                 for (failure in failures) Log.e(TAG, "  FAIL: $failure")
@@ -164,7 +170,20 @@ class NodeCheckReceiver : BroadcastReceiver() {
                                     "vm", NodeVmSmoke.CONFIG, NodeVmSmoke.PROGRAM,
                                     NodeVmSmoke.ENTRY_PATH, NodeVmSmoke::grade,
                                 ) { vm, fourth ->
-                                    settle(vm, first + "\n" + second + "\n" + third + "\n" + fourth)
+                                    if (vm.isNotEmpty()) {
+                                        settle(vm, first + "\n" + second + "\n" + third + "\n" + fourth)
+                                    } else {
+                                        runProgram(
+                                            "keys", NodeKeysSmoke.CONFIG, NodeKeysSmoke.PROGRAM,
+                                            NodeKeysSmoke.ENTRY_PATH, NodeKeysSmoke::grade,
+                                        ) { keys, fifth ->
+                                            settle(
+                                                keys,
+                                                first + "\n" + second + "\n" + third + "\n" +
+                                                    fourth + "\n" + fifth,
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

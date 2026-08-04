@@ -656,10 +656,8 @@ object NodeKeys {
         if (identity.type != "rsa") return null
         val data = decode(dataBase64) ?: return null
         val key = privateKey(pem, identity) ?: return null
-        val parameters = pssParameters(algorithm) ?: return null
+        val signer = pssSignature(algorithm) ?: return null
         return runCatching {
-            val signer = java.security.Signature.getInstance("RSASSA-PSS")
-            signer.setParameter(parameters)
             signer.initSign(key)
             signer.update(data)
             Base64.getEncoder().encodeToString(signer.sign())
@@ -682,14 +680,46 @@ object NodeKeys {
         val key = publicKey(pem, identity)
             ?: privateKey(pem, identity)?.let { derivePublic(it, identity) }
             ?: return false
-        val parameters = pssParameters(algorithm) ?: return false
+        val verifier = pssSignature(algorithm) ?: return false
         return runCatching {
-            val verifier = java.security.Signature.getInstance("RSASSA-PSS")
-            verifier.setParameter(parameters)
             verifier.initVerify(key)
             verifier.update(data)
             verifier.verify(signature)
         }.getOrDefault(false)
+    }
+
+    /**
+     * A `Signature` set up for RSA-PSS, under whichever name this platform registers it.
+     *
+     * The two providers do not agree, and the JVM corpus could not have told us: a JDK harness gets
+     * SunRsaSign, which registers the generic `RSASSA-PSS` and takes its parameters through
+     * `setParameter`. Android ships **Conscrypt**, which does not register that name at all — it
+     * registers `SHA256withRSA/PSS` and its siblings, with the digest baked into the name. Asking
+     * for `RSASSA-PSS` there throws `NoSuchAlgorithmException`, `rsaSign` answered null, and the
+     * bootstrap raised node's `ERR_CRYPTO_OPERATION_FAILED`.
+     *
+     * That is precisely what [NodeKeysSmoke] exists to catch, and it caught it on its first run
+     * with 781 JVM checks green: plain PKCS#1 v1.5 signing passed on the phone and PSS did not.
+     *
+     * Parameters are set explicitly on BOTH paths where the provider allows it. Conscrypt's
+     * digest-named algorithms already default to MGF1 over the same digest with a salt the length
+     * of that digest — which is what node uses and what the JVM corpus pins — but relying on a
+     * default to agree with another provider's default is how the two silently drift apart.
+     */
+    private fun pssSignature(algorithm: String): java.security.Signature? {
+        val digest = SIGNATURE_DIGESTS[algorithm.lowercase()] ?: return null
+        val parameters = pssParameters(algorithm) ?: return null
+        val generic = runCatching {
+            java.security.Signature.getInstance("RSASSA-PSS").also { it.setParameter(parameters) }
+        }.getOrNull()
+        if (generic != null) return generic
+        val named = runCatching {
+            java.security.Signature.getInstance("${digest}withRSA/PSS")
+        }.getOrNull() ?: return null
+        // Conscrypt accepts these; if a provider does not, its own defaults are already the values
+        // being asked for, so the signature is the same either way.
+        runCatching { named.setParameter(parameters) }
+        return named
     }
 
     private fun pssParameters(algorithm: String): java.security.spec.PSSParameterSpec? {
@@ -876,6 +906,118 @@ object NodeKeys {
             agreement.init(private)
             agreement.doPhase(public, true)
             Base64.getEncoder().encodeToString(agreement.generateSecret())
+        }.getOrNull()
+    }
+
+    // ------------------------------------------------------------- RSA as a cipher ----
+
+    /** node's padding constants, as `crypto.constants` numbers the bootstrap passes through. */
+    private const val PADDING_PKCS1 = 1
+    private const val PADDING_OAEP = 4
+
+    /**
+     * OAEP parameters, spelled out rather than folded into a transformation name.
+     *
+     * `RSA/ECB/OAEPWithSHA-256AndMGF1Padding` looks like the shorter route and is a trap: on some
+     * providers that name uses SHA-256 for the digest and SHA-1 for MGF1, which is not what node
+     * does and produces ciphertext the other side cannot open. Naming both explicitly removes the
+     * ambiguity.
+     */
+    private fun oaepParameters(digest: String): javax.crypto.spec.OAEPParameterSpec? {
+        val name = when (digest.lowercase()) {
+            "sha1" -> "SHA-1"
+            "sha224" -> "SHA-224"
+            "sha256" -> "SHA-256"
+            "sha384" -> "SHA-384"
+            "sha512" -> "SHA-512"
+            else -> return null
+        }
+        val mgf1 = when (name) {
+            "SHA-1" -> java.security.spec.MGF1ParameterSpec.SHA1
+            "SHA-224" -> java.security.spec.MGF1ParameterSpec.SHA224
+            "SHA-256" -> java.security.spec.MGF1ParameterSpec.SHA256
+            "SHA-384" -> java.security.spec.MGF1ParameterSpec.SHA384
+            else -> java.security.spec.MGF1ParameterSpec.SHA512
+        }
+        return javax.crypto.spec.OAEPParameterSpec(
+            name, "MGF1", mgf1, javax.crypto.spec.PSource.PSpecified.DEFAULT,
+        )
+    }
+
+    /** `crypto.publicEncrypt` — the bridge's `rsaEncrypt`. */
+    fun rsaEncrypt(pem: String, dataBase64: String, padding: Int, digest: String): String? {
+        val identity = identify(pem)
+        if (identity.type != "rsa") return null
+        val data = decode(dataBase64) ?: return null
+        val key = publicKey(pem, identity)
+            ?: privateKey(pem, identity)?.let { derivePublic(it, identity) }
+            ?: return null
+        return runCatching {
+            val cipher = when (padding) {
+                PADDING_OAEP -> javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding").also {
+                    it.init(javax.crypto.Cipher.ENCRYPT_MODE, key, oaepParameters(digest) ?: return null)
+                }
+                PADDING_PKCS1 -> javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding").also {
+                    it.init(javax.crypto.Cipher.ENCRYPT_MODE, key)
+                }
+                else -> return null
+            }
+            Base64.getEncoder().encodeToString(cipher.doFinal(data))
+        }.getOrNull()
+    }
+
+    /** `crypto.privateDecrypt` — the bridge's `rsaDecrypt`. */
+    fun rsaDecrypt(pem: String, dataBase64: String, padding: Int, digest: String): String? {
+        val identity = identify(pem)
+        if (identity.type != "rsa") return null
+        val data = decode(dataBase64) ?: return null
+        val key = privateKey(pem, identity) ?: return null
+        return runCatching {
+            val cipher = when (padding) {
+                PADDING_OAEP -> javax.crypto.Cipher.getInstance("RSA/ECB/OAEPPadding").also {
+                    it.init(javax.crypto.Cipher.DECRYPT_MODE, key, oaepParameters(digest) ?: return null)
+                }
+                PADDING_PKCS1 -> javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding").also {
+                    it.init(javax.crypto.Cipher.DECRYPT_MODE, key)
+                }
+                else -> return null
+            }
+            Base64.getEncoder().encodeToString(cipher.doFinal(data))
+        }.getOrNull()
+    }
+
+    /**
+     * `crypto.privateEncrypt` — a PRIVATE-key exponentiation over PKCS#1 type 1 padding.
+     *
+     * This is the signing primitive used as a cipher, and it is what a caller reaches for to prove
+     * origin without a digest — the pattern licence keys and some older token formats use. The JCA
+     * reaches it by initialising the ordinary PKCS#1 cipher for ENCRYPT with a private key, which
+     * selects type 1 padding; the same class does type 2 when the key is public.
+     */
+    fun rsaPrivateEncrypt(pem: String, dataBase64: String): String? {
+        val identity = identify(pem)
+        if (identity.type != "rsa") return null
+        val data = decode(dataBase64) ?: return null
+        val key = privateKey(pem, identity) ?: return null
+        return runCatching {
+            val cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding")
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key)
+            Base64.getEncoder().encodeToString(cipher.doFinal(data))
+        }.getOrNull()
+    }
+
+    /** `crypto.publicDecrypt` — the other half of [rsaPrivateEncrypt]. */
+    fun rsaPublicDecrypt(pem: String, dataBase64: String): String? {
+        val identity = identify(pem)
+        if (identity.type != "rsa") return null
+        val data = decode(dataBase64) ?: return null
+        val key = publicKey(pem, identity)
+            ?: privateKey(pem, identity)?.let { derivePublic(it, identity) }
+            ?: return null
+        return runCatching {
+            val cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding")
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, key)
+            Base64.getEncoder().encodeToString(cipher.doFinal(data))
         }.getOrNull()
     }
 }

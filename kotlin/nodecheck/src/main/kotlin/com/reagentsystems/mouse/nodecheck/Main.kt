@@ -2401,6 +2401,7 @@ fun main(args: Array<String>) {
         keyIdentifyCorpus(node, scratch)
         keySignCorpus(node, scratch)
         keyAgreeCorpus(node, scratch)
+        rsaCipherCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -3243,6 +3244,152 @@ private fun keyAgreeCorpus(node: String?, parent: File) {
     check(
         NodeKeys.generate("ec", "secp256k1") == null,
         "a curve outside P-256/384/521 refuses at generation too",
+    )
+}
+
+/**
+ * RSA used as a cipher — `publicEncrypt`/`privateDecrypt` and the type-1 pair.
+ *
+ * OAEP and PKCS#1 v1.5 are both randomised, so once again the equality is not the ciphertext but
+ * the round trip, and it has to CROSS: node seals and this opens, this seals and node opens. A
+ * padding scheme that is wrong in a consistent way opens its own output and nothing else — and
+ * OAEP has a specific way to be quietly wrong, since the digest and the MGF1 function are chosen
+ * separately and a mismatched pair still encrypts.
+ */
+private fun rsaCipherCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "RSA cipher corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "rsacipher").also { it.mkdirs() }
+    val secret = "attack at dawn — ÿ"
+    val secretBase64 = Base64.getEncoder().encodeToString(secret.toByteArray(Charsets.UTF_8))
+    val digests = listOf("sha1", "sha256", "sha384", "sha512")
+
+    File(scratch, "seal.js").writeText(
+        """
+        const crypto = require('crypto');
+        const fs = require('fs');
+        const message = Buffer.from(${Json.write(secretBase64)}, 'base64');
+        const k = crypto.generateKeyPairSync('rsa', { modulusLength: 2048,
+          publicKeyEncoding: { type: 'spki', format: 'pem' },
+          privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+        fs.writeFileSync('private.pem', k.privateKey);
+        fs.writeFileSync('public.pem', k.publicKey);
+        const out = [];
+        for (const oaepHash of ${Json.write(digests)}) {
+          const sealed = crypto.publicEncrypt(
+            { key: k.publicKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash },
+            message);
+          out.push('oaep\t' + oaepHash + '\t' + sealed.toString('base64'));
+        }
+        out.push('pkcs1\t\t' + crypto.publicEncrypt(
+          { key: k.publicKey, padding: crypto.constants.RSA_PKCS1_PADDING }, message)
+          .toString('base64'));
+        // The type-1 direction: node signs with the private key, this must open it publicly.
+        out.push('type1\t\t' + crypto.privateEncrypt(k.privateKey, message).toString('base64'));
+        console.log(out.join('\n'));
+        """.trimIndent(),
+    )
+    val (status, text) = run(listOf(node, "seal.js"), scratch)
+    if (status != 0) {
+        check(false, "real node sealed the RSA corpus:\n${text.take(600)}")
+        return
+    }
+    val privatePem = File(scratch, "private.pem").readText()
+    val publicPem = File(scratch, "public.pem").readText()
+
+    // node sealed → this opens.
+    var opened = 0
+    for (line in text.trim().lines()) {
+        val parts = line.split("\t")
+        if (parts.size != 3) continue
+        opened += 1
+        val (kind, digest, sealed) = parts
+        val plain = when (kind) {
+            "oaep" -> NodeKeys.rsaDecrypt(privatePem, sealed, 4, digest)
+            "pkcs1" -> NodeKeys.rsaDecrypt(privatePem, sealed, 1, "sha1")
+            else -> NodeKeys.rsaPublicDecrypt(publicPem, sealed)
+        }
+        checkEqual(
+            plain ?: "<null>", secretBase64,
+            "opens what node sealed — $kind${if (digest.isEmpty()) "" else "/$digest"}",
+        )
+    }
+    check(opened == digests.size + 2, "node sealed every case — $opened of ${digests.size + 2}")
+
+    // this seals → node opens.
+    val ours = ArrayList<String>()
+    for (digest in digests) {
+        val sealed = NodeKeys.rsaEncrypt(publicPem, secretBase64, 4, digest)
+        check(sealed != null, "seals with OAEP/$digest")
+        ours.add("oaep\t$digest\t${sealed ?: ""}")
+    }
+    NodeKeys.rsaEncrypt(publicPem, secretBase64, 1, "sha1").let {
+        check(it != null, "seals with PKCS#1 v1.5")
+        ours.add("pkcs1\t\t${it ?: ""}")
+    }
+    NodeKeys.rsaPrivateEncrypt(privatePem, secretBase64).let {
+        check(it != null, "seals with the private key — the type-1 primitive")
+        ours.add("type1\t\t${it ?: ""}")
+    }
+    File(scratch, "ours.tsv").writeText(ours.joinToString("\n"))
+
+    File(scratch, "open.js").writeText(
+        """
+        const crypto = require('crypto');
+        const fs = require('fs');
+        const expected = ${Json.write(secretBase64)};
+        const priv = fs.readFileSync('private.pem', 'utf8');
+        const pub = fs.readFileSync('public.pem', 'utf8');
+        const out = [];
+        for (const line of fs.readFileSync('ours.tsv', 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          const [kind, digest, sealed] = line.split('\t');
+          let ok = false;
+          try {
+            const bytes = Buffer.from(sealed, 'base64');
+            const plain = kind === 'oaep'
+              ? crypto.privateDecrypt({ key: priv,
+                  padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: digest }, bytes)
+              : kind === 'pkcs1'
+                ? crypto.privateDecrypt({ key: priv,
+                    padding: crypto.constants.RSA_PKCS1_PADDING }, bytes)
+                : crypto.publicDecrypt(pub, bytes);
+            ok = plain.toString('base64') === expected;
+          } catch (e) { ok = false; }
+          out.push(kind + (digest ? '/' + digest : '') + '\t' + ok);
+        }
+        console.log(out.join('\n'));
+        """.trimIndent(),
+    )
+    val (openStatus, openText) = run(listOf(node, "open.js"), scratch)
+    if (openStatus != 0) {
+        check(false, "real node opened our RSA corpus:\n${openText.take(600)}")
+        return
+    }
+    var crossed = 0
+    for (line in openText.trim().lines()) {
+        val parts = line.split("\t")
+        if (parts.size != 2) continue
+        crossed += 1
+        check(parts[1] == "true", "real node opens what this sealed — ${parts[0]}")
+    }
+    check(crossed == ours.size, "node graded every sealed case — $crossed of ${ours.size}")
+
+    // The digest is not decoration: OAEP sealed under one hash must NOT open under another.
+    val underSha256 = NodeKeys.rsaEncrypt(publicPem, secretBase64, 4, "sha256")
+    check(
+        NodeKeys.rsaDecrypt(privatePem, underSha256 ?: "", 4, "sha512") == null,
+        "OAEP under one digest does not open under another",
+    )
+    check(
+        NodeKeys.rsaDecrypt(privatePem, underSha256 ?: "", 1, "sha1") == null,
+        "OAEP does not open as PKCS#1 v1.5",
+    )
+    check(
+        NodeKeys.rsaEncrypt(publicPem, secretBase64, 3, "sha1") == null,
+        "a padding mode this does not implement refuses rather than guessing",
     )
 }
 

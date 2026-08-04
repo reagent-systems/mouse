@@ -150,6 +150,26 @@ object HostBridge {
         // all of it under one `Cipher`, with the transformation string doing that job.
         "cipherSeal",
         "cipherOpen",
+        // 3d — asymmetric keys, all fourteen over the one parser in `NodeKeys`. The JCA had the
+        // primitives all along, exactly as the refusal that stood here said; the work was getting a
+        // key IN, since `KeyFactory` reads PKCS#8 and SPKI and node's callers hold PEM in five
+        // grammars. Ed25519 and X25519 need API 33 against this app's minSdk 26, so on an older
+        // device the provider is genuinely absent and these answer null — a refusal the bootstrap
+        // already raises as node's own error, rather than a crash.
+        "keyIdentify",
+        "keySign",
+        "keyVerify",
+        "keyGenerate",
+        "keyAgree",
+        "ecdhGenerate",
+        "ecdhCompute",
+        "rsaGenerate",
+        "rsaSign",
+        "rsaVerify",
+        "rsaEncrypt",
+        "rsaDecrypt",
+        "rsaPrivateEncrypt",
+        "rsaPublicDecrypt",
         // 3d — `vm`. Implemented in the SHIM rather than in Kotlin, because the second context is
         // a JavaScript object: an about:blank iframe is same-origin, so its `contentWindow` is
         // reachable and has its own globals and intrinsics. The refusal here used to say a
@@ -199,20 +219,14 @@ object HostBridge {
             "framework ships a WebSocket client at all, so the choices are a third-party artifact " +
             "(invariant #4) or a hand-written RFC 6455 client that still could not do `wss://`. " +
             "The `ws` PACKAGE is unaffected — it rides these sockets for `ws://` and works",
-        listOf(
-            "scrypt", "hkdf",
-            "keyGenerate", "keyIdentify", "keySign", "keyVerify",
-            "keyAgree", "ecdhGenerate", "ecdhCompute", "rsaGenerate", "rsaSign", "rsaVerify",
-            "rsaEncrypt", "rsaDecrypt", "rsaPrivateEncrypt", "rsaPublicDecrypt",
-        ) to
-            "asymmetric keys. The JCA HAS the primitives — `KeyPairGenerator`, `Signature`, " +
-            "`KeyAgreement`, `KeyFactory` — so this is not a missing capability, and saying so " +
-            "matters: the work is the KEYS, not the maths. Every one of these takes a PEM, and " +
-            "reading one means PKCS#8, SEC1, PKCS#1 and SPKI, identifying the curve, and " +
-            "emitting ECDSA signatures in DER or raw as the caller asks. Ed25519 adds its own " +
-            "wall: the JCA gained it at API 33, against this app's minSdk 26. It is a port of " +
-            "real size rather than a translation, which is why it is deferred and not merely " +
-            "unwired",
+        listOf("scrypt", "hkdf") to
+            "the two KDFs the JCA has no factory for. `SecretKeyFactory` covers PBKDF2 and " +
+            "nothing else here: scrypt is not a JCA algorithm at any API level, and HKDF arrived " +
+            "in the JDK only at 24, against an Android platform that has never shipped it. Both " +
+            "are short constructions over `Mac`, which `NodeCrypto` already drives — HKDF is " +
+            "extract-then-expand, scrypt is PBKDF2 wrapped around ROMix — so this is unwritten " +
+            "rather than unavailable, and the reason must not pretend otherwise. The asymmetric " +
+            "surface that used to share this entry is IMPLEMENTED; see `NodeKeys`",
         listOf(
             "brotliOpen", "brotliPush", "brotliClose", "brotliTransform",
         ) to

@@ -21,6 +21,7 @@ import com.reagentsystems.mouse.packages.Json
 import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeFs
 import com.reagentsystems.mouse.node.NodeHttp
+import com.reagentsystems.mouse.node.NodeKeys
 import com.reagentsystems.mouse.node.NodeLoop
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSockets
@@ -245,6 +246,92 @@ class NodeWebView(
          * and it is seeded by the OS, which is the property that matters. Base64 out, because the
          * bridge carries strings and the bootstrap already does `Buffer.from(…, 'base64')`.
          */
+        // ---------------------------------------------------------- asymmetric keys ----
+        //
+        // Fourteen methods over one parser, per `NodeKeys`. Everything travels as PEM or base64
+        // because that is what the bootstrap already holds; the three that answer a PAIR cross as
+        // JSON, for the same reason `cipherSeal` does.
+
+        @JavascriptInterface
+        fun keyIdentify(pem: String): String {
+            val identity = NodeKeys.identify(pem)
+            return Json.write(
+                mapOf(
+                    "type" to identity.type,
+                    "curve" to identity.curve,
+                    "modulusLength" to identity.modulusLength,
+                ),
+            )
+        }
+
+        @JavascriptInterface
+        fun keySign(pem: String, data: String, algorithm: String, raw: Boolean): String? =
+            NodeKeys.sign(pem, data, algorithm, raw)
+
+        @JavascriptInterface
+        fun keyVerify(
+            pem: String,
+            data: String,
+            signature: String,
+            algorithm: String,
+            raw: Boolean,
+        ): Boolean = NodeKeys.verify(pem, data, signature, algorithm, raw)
+
+        @JavascriptInterface
+        fun keyGenerate(kind: String, curve: String): String? {
+            val (public, private) = NodeKeys.generate(kind, curve) ?: return null
+            return Json.write(mapOf("publicKey" to public, "privateKey" to private))
+        }
+
+        @JavascriptInterface
+        fun keyAgree(privatePem: String, publicPem: String): String? =
+            NodeKeys.agree(privatePem, publicPem)
+
+        @JavascriptInterface
+        fun ecdhGenerate(curve: String): String? {
+            val (private, public) = NodeKeys.ecdhGenerate(curve) ?: return null
+            return Json.write(mapOf("privateKey" to private, "publicKey" to public))
+        }
+
+        @JavascriptInterface
+        fun ecdhCompute(curve: String, privateKey: String, peer: String): String? =
+            NodeKeys.ecdhCompute(curve, privateKey, peer)
+
+        @JavascriptInterface
+        fun rsaGenerate(modulusLength: Int): String? {
+            val (public, private) = NodeKeys.rsaGenerate(modulusLength) ?: return null
+            return Json.write(mapOf("publicKey" to public, "privateKey" to private))
+        }
+
+        @JavascriptInterface
+        fun rsaSign(pem: String, data: String, algorithm: String, pss: Boolean): String? =
+            NodeKeys.rsaSign(pem, data, algorithm, pss)
+
+        @JavascriptInterface
+        fun rsaVerify(
+            pem: String,
+            data: String,
+            signature: String,
+            algorithm: String,
+            pss: Boolean,
+        ): Boolean = NodeKeys.rsaVerify(pem, data, signature, algorithm, pss)
+
+        @JavascriptInterface
+        fun rsaEncrypt(pem: String, data: String, padding: Int, digest: String): String? =
+            NodeKeys.rsaEncrypt(pem, data, padding, digest)
+
+        @JavascriptInterface
+        fun rsaDecrypt(pem: String, data: String, padding: Int, digest: String): String? =
+            NodeKeys.rsaDecrypt(pem, data, padding, digest)
+
+        @JavascriptInterface
+        fun rsaPrivateEncrypt(pem: String, data: String): String? =
+            NodeKeys.rsaPrivateEncrypt(pem, data)
+
+        @JavascriptInterface
+        fun rsaPublicDecrypt(pem: String, data: String): String? =
+            NodeKeys.rsaPublicDecrypt(pem, data)
+
         /**
          * `{data, tag}` as JSON, or null. The bridge cannot carry an object, and the bootstrap
          * reads `result.tag` and `result.data` — so the shim parses this back into the shape iOS
