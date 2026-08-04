@@ -196,6 +196,18 @@ each with a screenshot:
 - **(c)** an interactive TUI — `npx create-vite` — renders its menu, takes
   input through the key strip, and advances through its prompts.
 
+  The launch path is in: `node script.js`, `node -e`, and the catalog's own
+  commands go through `MouseShell.NodeRun` → `NodeRunner` → `NodeWebView`,
+  verified on Pixel_9 by running a script from the msh container. Two defects
+  that only running turned up, neither of them blocking but both real:
+
+  - **`process.platform` answers `darwin` on Android.** The bootstrap hardcodes
+    it and is a verbatim iOS copy under a drift gate, so the fix is a host
+    override applied after load, with a gate of its own. Packages branch on
+    this — napi-rs already does — so it is not cosmetic.
+  - **A `console.log` chunk ending in a newline shows a trailing blank line**
+    in the terminal, because `append` splits on `\n` and keeps the empty tail.
+
   One known gap stands in the way of (c) and is not covered by any milestone
   above: **backspace does not reach a running program.** While a program owns
   the keyboard the prompt field is held empty, so Compose fires no
