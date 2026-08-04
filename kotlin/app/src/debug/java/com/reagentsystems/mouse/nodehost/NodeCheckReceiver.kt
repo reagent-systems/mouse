@@ -9,6 +9,7 @@ import android.util.Log
 import com.reagentsystems.mouse.node.NodeFsSmoke
 import com.reagentsystems.mouse.node.NodeProcessConfig
 import com.reagentsystems.mouse.node.NodeSmoke
+import com.reagentsystems.mouse.node.NodeSocketSmoke
 import java.io.File
 
 /**
@@ -37,13 +38,19 @@ import java.io.File
  * which runs the same sources under real `node`. That is what makes an on-device MISMATCH mean the
  * WebView: the corpus itself is already gated on the JVM.
  *
- * Two programs run in sequence, each in its own engine:
+ * Three programs run in sequence, each in its own engine:
  *
  *  - [NodeSmoke] — console, `process`, timers and the tick order. It must be the FIRST thing its
  *    engine runs, because `__leaveEntryFrame` flips `hostFrame` false for good afterwards.
  *  - [NodeFsSmoke] — the filesystem and `require` over `node_modules`, which is the half no JVM
  *    harness can reach at all: `:nodecheck` grades `NodeFs` and `ModuleResolver` directly and
  *    grades the JavaScript loader against a stand-in host, and only here do the two meet.
+ *  - [NodeSocketSmoke] — `net`, `http`, `dns` and `dgram`. Off-device `:nodecheck` grades the
+ *    Kotlin socket table against real `node` peers and grades the JavaScript above it against a
+ *    stand-in that IS real node's `net`; here they meet, and here the platform gets a say. That
+ *    matters more for this layer than for any before it, because a JVM gate runs with full POSIX
+ *    and no permission model — milestone 3b shipped two bugs of exactly that shape, invisible to a
+ *    green 310-check desktop run and fatal to 31 of 45 checks on a phone.
  */
 class NodeCheckReceiver : BroadcastReceiver() {
 
@@ -52,7 +59,7 @@ class NodeCheckReceiver : BroadcastReceiver() {
         val handler = Handler(Looper.getMainLooper())
         var settled = false
         var engine: NodeWebView? = null
-        val total = NodeSmoke.CHECK_COUNT + NodeFsSmoke.CHECK_COUNT + 2
+        val total = NodeSmoke.CHECK_COUNT + NodeFsSmoke.CHECK_COUNT + NodeSocketSmoke.CHECK_COUNT + 3
 
         fun settle(failures: List<String>, transcript: String) {
             if (settled) return
@@ -60,7 +67,9 @@ class NodeCheckReceiver : BroadcastReceiver() {
             val verdict = if (failures.isEmpty()) {
                 "NODE WEBVIEW: $total checks — the bootstrap loads, console reaches Kotlin, " +
                     "process answers, timers and tick order, the filesystem round-trips, " +
-                    "require resolves over node_modules, refusals by name — MATCH"
+                    "require resolves over node_modules, TCP echoes and half-closes, an http " +
+                    "server answers its own client, dns.lookup and a UDP round trip, refusals by " +
+                    "name — MATCH"
             } else {
                 for (failure in failures) Log.e(TAG, "  FAIL: $failure")
                 Log.e(TAG, transcript.take(4000))
@@ -132,7 +141,16 @@ class NodeCheckReceiver : BroadcastReceiver() {
                 settle(basic, first)
             } else {
                 runProgram("fs", NodeFsSmoke.CONFIG, NodeFsSmoke.PROGRAM, NodeFsSmoke.ENTRY_PATH, NodeFsSmoke::grade) { fs, second ->
-                    settle(fs, first + "\n" + second)
+                    if (fs.isNotEmpty()) {
+                        settle(fs, first + "\n" + second)
+                    } else {
+                        runProgram(
+                            "sockets", NodeSocketSmoke.CONFIG, NodeSocketSmoke.PROGRAM,
+                            NodeSocketSmoke.ENTRY_PATH, NodeSocketSmoke::grade,
+                        ) { sockets, third ->
+                            settle(sockets, first + "\n" + second + "\n" + third)
+                        }
+                    }
                 }
             }
         }
@@ -141,7 +159,10 @@ class NodeCheckReceiver : BroadcastReceiver() {
     private companion object {
         const val TAG = "MouseNodeCheck"
 
-        /** Two engines, each loading 14,000 lines of bootstrap, on an emulator. */
-        const val TIMEOUT_MS = 20_000L
+        /**
+         * Three engines, each loading 14,000 lines of bootstrap, on an emulator — and the third
+         * one waits on real sockets, whose own watchdog is 12 s.
+         */
+        const val TIMEOUT_MS = 45_000L
     }
 }

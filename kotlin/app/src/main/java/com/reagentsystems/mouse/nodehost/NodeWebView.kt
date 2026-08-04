@@ -2,6 +2,8 @@ package com.reagentsystems.mouse.nodehost
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.ConnectivityManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
@@ -11,10 +13,14 @@ import com.reagentsystems.mouse.node.Bootstrap
 import com.reagentsystems.mouse.node.HostBridge
 import com.reagentsystems.mouse.node.ModuleResolver
 import com.reagentsystems.mouse.node.NodeCpu
+import com.reagentsystems.mouse.node.NodeDns
 import com.reagentsystems.mouse.node.NodeFs
+import com.reagentsystems.mouse.node.NodeHttp
 import com.reagentsystems.mouse.node.NodeLoop
 import com.reagentsystems.mouse.node.NodeProcessConfig
+import com.reagentsystems.mouse.node.NodeSockets
 import java.io.File
+import java.util.Base64
 
 /**
  * The Node layer's host on Android: a headless WebView running the SAME JavaScript bootstrap the
@@ -49,10 +55,12 @@ import java.io.File
  *
  * ## Scope
  *
- * Milestones 3a and 3b. `console.log`/`error` reach Kotlin, `process` answers (argv, env, cwd,
- * version, exit code), timers run with node's tick discipline, the filesystem is real and
- * `require` resolves over `node_modules`. `fs.watch`, sockets, crypto, children and workers refuse
- * BY NAME, each with its own reason — see [HostBridge.DEFERRED].
+ * Milestones 3a, 3b and 3c. `console.log`/`error` reach Kotlin, `process` answers (argv, env, cwd,
+ * version, exit code), timers run with node's tick discipline, the filesystem is real, `require`
+ * resolves over `node_modules`, and `net`/`http`/`dns`/`dgram` ride a real Java NIO socket layer —
+ * which is what makes a dev server inside the app possible. `fs.watch`, unix-domain sockets, the
+ * `cluster` descriptor handoff, the `WebSocket` global, crypto, compression, `vm`, children and
+ * workers refuse BY NAME, each with its own reason — see [HostBridge.DEFERRED].
  *
  * ## The filesystem a program sees
  *
@@ -83,6 +91,64 @@ class NodeWebView(
     private val handler = Handler(Looper.getMainLooper())
     private val loop = NodeLoop()
     private val appContext = context.applicationContext
+
+    /**
+     * The socket layer, and the two transports beside it.
+     *
+     * Each posts completions into the loop's JOB queue and schedules a pump; the loop drains jobs
+     * FIRST, ahead of immediates and timers, which is the order `NodeEngine.runEventLoop` drains
+     * them in. `retain`/`release` are the open-handle count — a listening server is a reason to
+     * stay alive, an unref'd one is not.
+     *
+     * Not one of these runs I/O on the main thread, and on Android that is not tidiness: the
+     * WebView's JavaScript runs on the main looper, so a blocking connect or lookup reached from
+     * a `@JavascriptInterface` method would be a `NetworkOnMainThreadException` rather than a slow
+     * answer. Every entry point hands the work to the selector thread or a resolver pool and
+     * returns an id.
+     */
+    private val sockets = NodeSockets(
+        post = ::postJob,
+        retain = { hold(true) },
+        release = { hold(false) },
+    )
+    private val dns = NodeDns(post = ::postJob)
+    private val http = NodeHttp(post = ::postJob, retain = { hold(true) }, release = { hold(false) })
+
+    private fun postJob(handlerId: Int, argsJson: String, final: Boolean) {
+        loop.postJob(HostBridge.job(handlerId, argsJson, final))
+        handler.post { pump() }
+    }
+
+    private fun hold(on: Boolean) {
+        loop.hold(on)
+        handler.post { pump() }
+    }
+
+    /**
+     * The nameservers the `dns.resolve*` family asks.
+     *
+     * AGENTS.md: "Only the host knows what the host knows." Android has no `/etc/resolv.conf` —
+     * `NodeDns`'s own fallback finds nothing there — and the active network's resolvers live
+     * behind `ConnectivityManager`, which is framework and unreachable from `:node`. So the host
+     * reads them and hands them down. On an emulator this is how a query reaches 10.0.2.3, the
+     * NAT's resolver, rather than a guess.
+     *
+     * Empty is a legitimate answer (no network, or the permission refused): `NodeDns` then reports
+     * ESERVFAIL rather than inventing a public resolver, which would send a user's lookups
+     * somewhere they did not choose.
+     */
+    private fun platformNameservers(): List<String> = try {
+        val manager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (manager == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            emptyList()
+        } else {
+            val active = manager.activeNetwork
+            val properties = if (active == null) null else manager.getLinkProperties(active)
+            properties?.dnsServers?.mapNotNull { it.hostAddress }.orEmpty()
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
 
     private var started = false
     private var ended = false
@@ -270,6 +336,133 @@ class NodeWebView(
          */
         @JavascriptInterface
         fun setRawMode(raw: Boolean) = Unit
+
+        // ---------------------------------------------------------------- sockets ----
+        //
+        // Each of these returns an ID SYNCHRONOUSLY and does its work elsewhere, because that is
+        // the shape `net.connect` needs: JavaScript must have a handle to return before anything
+        // has happened. Every outcome after that arrives as a job.
+        //
+        // The id is also the key `node-host.js` files the callback under, which is why it has to
+        // come back from the call rather than with the first event.
+
+        @JavascriptInterface
+        fun netConnect(host: String, port: Int): Int = sockets.connect(host, port)
+
+        @JavascriptInterface
+        fun netListen(host: String, port: Int, backlog: Int): Int = sockets.listen(host, port, backlog)
+
+        /**
+         * The one that answers a value the caller acts on: false means the kernel queue is past
+         * the high-water mark, which JavaScript turns into `write()`'s false and a wait for
+         * `drain`. Backpressure is honest end to end only because this is not always true.
+         */
+        @JavascriptInterface
+        fun netWrite(id: Int, base64: String): Boolean =
+            sockets.write(id, Base64.getDecoder().decode(base64))
+
+        @JavascriptInterface
+        fun netEnd(id: Int) = sockets.end(id)
+
+        @JavascriptInterface
+        fun netDestroy(id: Int) = sockets.destroy(id)
+
+        @JavascriptInterface
+        fun netPause(id: Int) = sockets.pause(id)
+
+        @JavascriptInterface
+        fun netResume(id: Int) = sockets.resume(id)
+
+        @JavascriptInterface
+        fun netRef(id: Int, refed: Boolean) = sockets.setRef(id, refed)
+
+        @JavascriptInterface
+        fun netNoDelay(id: Int, on: Boolean) = sockets.setNoDelay(id, on)
+
+        @JavascriptInterface
+        fun netKeepAlive(id: Int, on: Boolean, delayMs: Int) = sockets.setKeepAlive(id, on)
+
+        /** `dns.lookup` — getaddrinfo, on the resolver pool. */
+        @JavascriptInterface
+        fun netResolve(host: String, family: Int): Int {
+            val id = sockets.claimExternalId()
+            sockets.resolve(id, host, family)
+            return id
+        }
+
+        // -------------------------------------------------------------------- dns ----
+
+        @JavascriptInterface
+        fun dnsResolve(name: String, type: String): Int {
+            val id = sockets.claimExternalId()
+            dns.resolve(id, name, type)
+            return id
+        }
+
+        @JavascriptInterface
+        fun dnsReverse(address: String): Int {
+            val id = sockets.claimExternalId()
+            dns.reverse(id, address)
+            return id
+        }
+
+        @JavascriptInterface
+        fun dnsService(address: String, port: Int): Int {
+            val id = sockets.claimExternalId()
+            dns.lookupService(id, address, port)
+            return id
+        }
+
+        /**
+         * The bootstrap giving back the loop handle a lookup took. Every `dns.resolve*` completion
+         * calls it exactly once, which is why the handle is taken by the QUERY and released here
+         * rather than when the answer is delivered — the iOS `pendingLookups` pair, unchanged.
+         */
+        @JavascriptInterface
+        fun dnsDone() = hold(false)
+
+        // ------------------------------------------------------------------- http ----
+
+        @JavascriptInterface
+        fun httpRequest(url: String, method: String, headersJson: String, bodyBase64: String): Int {
+            val id = sockets.claimExternalId()
+            http.request(id, url, method, headersJson, bodyBase64)
+            return id
+        }
+
+        @JavascriptInterface
+        fun httpStream(url: String, method: String, headersJson: String, bodyBase64: String): Int {
+            val id = sockets.claimExternalId()
+            http.stream(id, url, method, headersJson, bodyBase64)
+            return id
+        }
+
+        // ------------------------------------------------------------------ dgram ----
+
+        @JavascriptInterface
+        fun dgramBind(host: String, port: Int, broadcast: Boolean): Int =
+            sockets.bindDatagram(host, port, broadcast)
+
+        @JavascriptInterface
+        fun dgramSend(id: Int, base64: String, host: String, port: Int): Int {
+            val callback = sockets.claimExternalId()
+            sockets.sendDatagram(callback, id, Base64.getDecoder().decode(base64), host, port)
+            return callback
+        }
+
+        /** Synchronous, and the empty string is SUCCESS — see the note in NodeSockets. */
+        @JavascriptInterface
+        fun dgramMembership(id: Int, group: String, interfaceName: String, join: Boolean): String =
+            sockets.multicastMembership(id, group, interfaceName, join)
+
+        @JavascriptInterface
+        fun dgramOption(id: Int, ttl: Int, loopback: Int, interfaceName: String) =
+            sockets.multicastOption(
+                id,
+                ttl = if (ttl < 0) null else ttl,
+                loopback = if (loopback < 0) null else loopback == 1,
+                interfaceName = interfaceName,
+            )
     }
 
     // ------------------------------------------------------------------- lifecycle ----
@@ -284,6 +477,7 @@ class NodeWebView(
         check(Looper.myLooper() == Looper.getMainLooper()) { "NodeWebView runs on the main looper" }
         check(!started) { "NodeWebView.start is once per instance" }
         started = true
+        dns.servers = platformNameservers()
 
         web.webViewClient = object : WebViewClient() {
             private var loaded = false
@@ -366,10 +560,12 @@ class NodeWebView(
     /**
      * One turn of the event loop.
      *
-     * The order is the iOS loop's order: every ready immediate as a batch, then the earliest due
-     * timer, then sleep until the next one. Quiescence — no REF'D timer, no open handle, no live
-     * stdin listener — ends the run, which is why an unref'd watchdog cannot keep a finished
-     * program alive.
+     * The order is the iOS loop's order: every ready I/O completion as a batch, then every ready
+     * immediate as a batch, then the earliest due timer, then sleep until the next one. JOBS COME
+     * FIRST — that is `runEventLoop`'s own sequence (jobs, port deliveries, immediates, timers),
+     * and it is what makes a socket's data reach its handler before a timer scheduled after it.
+     * Quiescence — no queued job, no REF'D timer, no open handle, no live stdin listener — ends
+     * the run, which is why an unref'd watchdog cannot keep a finished program alive.
      */
     private fun pump() {
         if (ended) return
@@ -385,6 +581,12 @@ class NodeWebView(
         if (parkedSinceNanos != 0L) {
             loop.recordIdle(System.nanoTime() - parkedSinceNanos)
             parkedSinceNanos = 0L
+        }
+
+        val ready = loop.takeJobs()
+        if (ready.isNotEmpty()) {
+            dispatch(HostBridge.dispatchJobs(ready))
+            return
         }
 
         val batch = loop.takeImmediates()
@@ -439,6 +641,7 @@ class NodeWebView(
         if (ended) return
         ended = true
         handler.removeCallbacks(pumpRunnable)
+        releaseHandles()
         // iOS drains the tick queue once more after its `while` exits: the last callback's
         // microtask checkpoint has only just finished when the loop decides it is done.
         web.evaluateJavascript("globalThis.__mouseDispatch && globalThis.__mouseDispatch.finish();") {
@@ -455,7 +658,21 @@ class NodeWebView(
     fun destroy() {
         ended = true
         handler.removeCallbacks(pumpRunnable)
+        releaseHandles()
         web.destroy()
+    }
+
+    /**
+     * Close every socket and stop every pool. This is `SocketTable.closeAll()`, and it exists for
+     * one reason: a program that forgot to close its server must not outlive itself and hold the
+     * port. On a phone the process persists between runs, so a leaked listener is not collected
+     * the way it is when a CLI exits — the next run would fail with EADDRINUSE against a server
+     * nobody can see.
+     */
+    private fun releaseHandles() {
+        sockets.closeAll()
+        dns.close()
+        http.close()
     }
 
     // ----------------------------------------------------------------------- detail ----

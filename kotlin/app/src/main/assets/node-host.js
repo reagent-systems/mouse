@@ -24,6 +24,18 @@
   var timers = Object.create(null);
   var immediates = Object.create(null);
 
+  // id -> fn, for everything the host calls back ASYNCHRONOUSLY: socket events, DNS answers, HTTP
+  // chunks. Same reason the timer registry exists — @JavascriptInterface cannot carry a function,
+  // so the callback stays here and the host holds only the id it was given.
+  //
+  // A socket's handler is registered under the id `netConnect`/`netListen` returned and stays
+  // until that socket closes; a SERVER's handler receives its accepted sockets' events too, which
+  // is why the id the host dispatches under is the OWNER's rather than the event's. The host says
+  // when an entry may go (the `final` flag), because only the host knows whether the handle is
+  // gone — inferring it from the event name here would drop a server's handler on the first
+  // connection's close and silently kill every later one.
+  var handlers = Object.create(null);
+
   var bridge = Object.create(null);
 
   // ---- console / stdio sinks -------------------------------------------------------------
@@ -115,6 +127,93 @@
   // No terminal is attached to a headless host, so this does nothing — which is exactly what the
   // iOS block does with `tty == nil`. A faithful port of a no-op, not a stub standing in for one.
   bridge.setRawMode = function (raw) { host.setRawMode(!!raw); };
+
+  // ---- sockets, dns and the TLS transport --------------------------------------------------
+  //
+  // iOS hands JavaScriptCore the callback itself: `bridge.netConnect(host, port, fn)` and the
+  // Swift side calls `fn(id, event, payload)` whenever the socket does something. Nothing about
+  // that survives @JavascriptInterface, so the callback is registered here and the host is given
+  // an id; the host re-enters through __mouseDispatch.jobs with `(id, argsJson, final)` and the
+  // arguments are applied unchanged. The bootstrap's `_hostEvent` switch never learns any of this.
+  //
+  // Payloads cross as JSON for the same reason `stat` does — an object cannot cross — and socket
+  // DATA crosses as base64 inside it, exactly as on iOS, so binary survives the String hop.
+  // Register AFTER the host has answered, which is safe because a job cannot be delivered inside
+  // this turn: the host queues it and only `pump()` dispatches, and `pump()` dispatches by calling
+  // evaluateJavascript, which the WebView runs after the script currently executing. So there is
+  // no window in which an event arrives for an id nothing is listening to yet.
+  function remember(fn) {
+    return function (assigned) {
+      var id = assigned | 0;
+      handlers[id] = fn;
+      return id;
+    };
+  }
+
+  // `hostname`, never `host`: the host OBJECT is in scope under that name for the whole file, and
+  // a parameter called `host` would shadow it — the call inside would go to the string. This is
+  // the same shape as the bootstrap's `interface`-as-a-parameter trap, and just as invisible.
+  bridge.netConnect = function (hostname, port, fn) {
+    return remember(fn)(host.netConnect(String(hostname), Number(port) | 0));
+  };
+  bridge.netListen = function (hostname, port, backlog, fn) {
+    return remember(fn)(host.netListen(String(hostname), Number(port) | 0, Number(backlog) | 0));
+  };
+  bridge.netWrite = function (id, base64) { return host.netWrite(id | 0, String(base64)); };
+  bridge.netEnd = function (id) { host.netEnd(id | 0); };
+  bridge.netDestroy = function (id) { host.netDestroy(id | 0); };
+  bridge.netPause = function (id) { host.netPause(id | 0); };
+  bridge.netResume = function (id) { host.netResume(id | 0); };
+  bridge.netRef = function (id, refed) { host.netRef(id | 0, !!refed); };
+  bridge.netNoDelay = function (id, on) { host.netNoDelay(id | 0, on === undefined ? true : !!on); };
+  bridge.netKeepAlive = function (id, on, delay) {
+    host.netKeepAlive(id | 0, on === undefined ? true : !!on, Number(delay) | 0);
+  };
+  // dns.lookup. One-shot: the answer arrives once and the entry goes with it.
+  bridge.netResolve = function (hostname, family, fn) {
+    remember(fn)(host.netResolve(String(hostname), Number(family) | 0));
+  };
+
+  // The dns.resolve* family. `dnsDone` is the bootstrap giving the loop handle back after each
+  // answer — it is called from JS, not delivered from the host, so it stays a plain crossing.
+  bridge.dnsResolve = function (name, type, fn) {
+    remember(fn)(host.dnsResolve(String(name), String(type)));
+  };
+  bridge.dnsReverse = function (address, fn) {
+    remember(fn)(host.dnsReverse(String(address)));
+  };
+  bridge.dnsService = function (address, port, fn) {
+    remember(fn)(host.dnsService(String(address), Number(port) | 0));
+  };
+  bridge.dnsDone = function () { host.dnsDone(); };
+
+  // fetch and https.request. `headers` is an object on iOS and cannot cross, so it travels as
+  // JSON; the body is base64 on both platforms already.
+  bridge.httpRequest = function (url, method, headers, bodyBase64, fn) {
+    remember(fn)(host.httpRequest(String(url), String(method),
+                                  JSON.stringify(headers || {}), String(bodyBase64 || '')));
+  };
+  bridge.httpStream = function (url, method, headers, bodyBase64, fn) {
+    remember(fn)(host.httpStream(String(url), String(method),
+                                 JSON.stringify(headers || {}), String(bodyBase64 || '')));
+  };
+
+  // UDP.
+  bridge.dgramBind = function (hostname, port, broadcast, fn) {
+    return remember(fn)(host.dgramBind(String(hostname), Number(port) | 0, !!broadcast));
+  };
+  bridge.dgramSend = function (id, base64, hostname, port, fn) {
+    remember(fn)(host.dgramSend(id | 0, String(base64), String(hostname), Number(port) | 0));
+  };
+  // Synchronous, and the empty string means SUCCESS — the iOS rule this layer paid for once:
+  // coalescing "no problem" to a code reported every successful join as a failure.
+  bridge.dgramMembership = function (id, group, iface, join) {
+    return host.dgramMembership(id | 0, String(group), String(iface || ''), !!join);
+  };
+  // -1 means "leave this one alone": each knob is set independently.
+  bridge.dgramOption = function (id, ttl, loopback, iface) {
+    host.dgramOption(id | 0, Number(ttl) | 0, Number(loopback) | 0, String(iface || ''));
+  };
 
   // ---- require ---------------------------------------------------------------------------
   //
@@ -327,6 +426,28 @@
   }
 
   globalThis.__mouseDispatch = {
+    // I/O completions — socket events, DNS answers, HTTP chunks. This is the iOS `enqueueJob`
+    // queue, and the loop drains it FIRST, ahead of immediates and timers, on both platforms.
+    //
+    // A batch, snapshot by the host before it runs, for the same reason immediates are: an event
+    // that arrives WHILE this batch runs belongs to the next turn. `__mouseExited` stops the rest
+    // of a batch once a program has exited, which is `guard exitCode == nil` inside the iOS loop.
+    //
+    // Each entry is `[handlerId, argsJson, final]`. The arguments are applied unchanged, so the
+    // bootstrap's socket callback receives exactly `(id, event, payload)` — the same three the
+    // Swift dispatcher passes.
+    jobs: function (batch) {
+      turn(function () {
+        for (var i = 0; i < batch.length; i++) {
+          if (globalThis.__mouseExited) return;
+          var entry = batch[i];
+          var fn = handlers[entry[0]];
+          if (entry[2]) delete handlers[entry[0]];
+          if (!fn) continue;
+          globalThis.__invoke(fn, JSON.parse(entry[1]));
+        }
+      });
+    },
     timer: function (id) {
       turn(function () {
         var entry = timers[id];

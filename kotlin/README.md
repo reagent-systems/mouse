@@ -40,7 +40,7 @@ stop building off-device.
 | `:screencheck` | The headless gate for `:terminal` |
 | `:packages` | The package manager: semver, the npm registry client, the hoisting tree resolver, integrity-checked installs, the `node_modules` manifest, and `TarGz`. Pure Kotlin/JVM, JDK-only |
 | `:pkgcheck` | The headless gate for `:packages` |
-| `:node` | The Node layer's portable half: the bootstrap's extraction from the iOS source, the `__mouse` bridge protocol, the process globals, the event loop's bookkeeping, the workspace-virtual filesystem (`NodeFs`) and node's module-resolution algorithm (`ModuleResolver`). Pure Kotlin/JVM |
+| `:node` | The Node layer's portable half: the bootstrap's extraction from the iOS source, the `__mouse` bridge protocol, the process globals, the event loop's bookkeeping, the workspace-virtual filesystem (`NodeFs`), node's module-resolution algorithm (`ModuleResolver`), the Java NIO socket table (`NodeSockets`), the DNS wire client (`NodeDns`) and the TLS-capable HTTP transport (`NodeHttp`). Pure Kotlin/JVM |
 | `:nodecheck` | The headless gate for `:node` — including the bootstrap-drift check |
 | `:shell` | `msh` itself: the word layer (quoting, variables, globs, pipes, redirection, sequencing, history, ~50 built-ins) and the LANGUAGE (`ShellLanguage.kt` — lexer, AST, parser, arithmetic, `fnmatch`). Pure Kotlin/JVM, JDK-only |
 | `:shellcheck` | The headless gate for `:shell` — differential against the real `/bin/sh` |
@@ -154,12 +154,13 @@ than as `undefined is not a function` inside 14,000 lines), the reason attached
 to each deferred name, the process globals the bootstrap reads while it loads,
 the event loop's bookkeeping, the `/proc/self/stat` reader behind
 `process.cpuUsage()`, `node --check` on the extracted bootstrap and on
-`node-host.js`, and three runs of the engine under real `node` with a JavaScript
+`node-host.js`, and runs of the engine under real `node` with a JavaScript
 stand-in for `__mouseHost`: `NodeSmoke` (console, `process`, timers, tick
-order), `NodeFsSmoke` (the filesystem and `require` over `node_modules`) — both
-of them the same programs the on-device gate runs, graded by the same graders —
-and `verify/fsparity`, read straight out of `verify/` and graded against the
-same `node.txt` iOS is graded against.
+order), `NodeFsSmoke` (the filesystem and `require` over `node_modules`) and
+`NodeSocketSmoke` (`net`, `http`, `dns`, `dgram`) — all three the same programs
+the on-device gate runs, graded by the same graders — plus `verify/fsparity`,
+`verify/neterrors` and `verify/reqsock`, read straight out of `verify/` and
+graded against the same `node.txt` iOS is graded against.
 
 The filesystem and the resolver are gated **against real `node` itself**, which
 is what makes the parity claim falsifiable: `NodeFs.stat` is compared with
@@ -169,6 +170,35 @@ node's own `Stats` for the same file, and `ModuleResolver` is compared with
 scoped package, a dual package, the walk-up). A resolver graded against
 hand-written expectations is graded against whatever its author believed node
 does.
+
+### Verifying the socket layer
+
+`NodeSockets` is graded the same way and for the same reason, one layer down.
+The JavaScript stand-in in the harness is real node's own `net`, so it proves
+`node-host.js` and the bootstrap's `net`/`http` modules above it and says
+nothing at all about the Kotlin underneath. So the NIO table is *also* driven
+directly, against real peers on a real wire: a plain JVM socket for the
+deterministic cases (accept, echo, half-close, backpressure past the 64 KB
+high-water mark, pause/resume losing no bytes, ECONNREFUSED, EADDRINUSE,
+ref/unref, a UDP round trip), and **real `node` for the two that matter** — a
+node CLIENT against our server and our client against a node SERVER. "It works
+when both ends are ours" proves nothing about the wire; that is the same rule
+`verify/net` states from the other side.
+
+`NodeDns` is graded twice over. The parse half runs against a response
+assembled byte by byte in the harness **with compression pointers in it**,
+because name expansion is the one piece of this layer with no reference
+implementation to lean on — iOS gets `res_9_dn_expand` from libresolv and a JVM
+has no equivalent, and a plain byte scan reads a compressed name as a truncated
+one without ever failing. The live half asks a real nameserver for
+`verify/dnsres`'s own record types and compares with real node asking for the
+same thing; it skips rather than fails when there is no resolver or no network.
+
+`NodeHttp` is graded on the ORDER of its events, not only their contents —
+`head,data,data,end` for a response written in two pieces. A fixture comparing
+only the concatenated body passes just as happily against a transport that
+buffers everything, which is how the equivalent bug hid on the URLSession path
+for so long.
 
 The JavaScript loader in `node-host.js` and the Kotlin resolver under it are
 gated separately off-device — the stand-in host resolves through node's own
@@ -199,11 +229,18 @@ The app does not need to be running; the broadcast starts it. Because the
 programs and their grading are shared with `:nodecheck`, an on-device MISMATCH
 means the WebView rather than the corpus.
 
-Two programs run in sequence, each in its own engine and its own empty
-directory: `NodeSmoke` and then `NodeFsSmoke`. The second is the one no JVM
-harness can reach at all — it is the only place `NodeFs` and `ModuleResolver`
-meet the JavaScript loader, over a `node_modules` tree the program writes for
-itself through `fs` and then requires.
+Three programs run in sequence, each in its own engine and its own empty
+directory: `NodeSmoke`, `NodeFsSmoke`, then `NodeSocketSmoke`. The last two are
+the ones no JVM harness can reach — `NodeFsSmoke` is the only place `NodeFs` and
+`ModuleResolver` meet the JavaScript loader, and `NodeSocketSmoke` is the only
+place the NIO socket table meets the shim, over loopback: a TCP echo with a
+half-close, an `http` server answering its own client, `dns.lookup`, a UDP round
+trip, and the two refusals a program would actually hit (a unix-domain socket
+and the `WebSocket` global).
+
+Nothing in it needs a network. A device gate that depended on the internet would
+fail for reasons that have nothing to do with the code, and a flaky gate is one
+nobody reads.
 
 ## Running on an emulator
 
@@ -303,9 +340,14 @@ Feature parity with the iOS app, built natively in Compose:
   relative and bare specifiers, the walk-up, `package.json` "main"/"exports"/
   "imports"/"type", extension probing, index fallback, `.json` modules, the
   module cache, circular requires reading live partial exports, and
-  `require.resolve` with `.paths`. `fs.watch`, ES modules, sockets, crypto,
-  compression, `vm`, workers and child processes are not wired and refuse by
-  name, each with its own reason
+  `require.resolve` with `.paths`
+- **Node layer, sockets** (`NodeSockets`, `NodeDns`, `NodeHttp`) — real TCP and
+  UDP on one Java NIO selector thread (not a thread per socket), `net` and
+  through it `http.createServer`, `dns.lookup` plus the whole `dns.resolve*`
+  family on the wire, and `fetch`/`https.request` over the platform's own TLS
+  client. `fs.watch`, ES modules, unix-domain sockets, the `cluster` descriptor
+  handoff, the `WebSocket` global, crypto, compression, `vm`, workers and child
+  processes are not wired and refuse by name, each with its own reason
 
 ## Known Android nuances
 
@@ -379,6 +421,55 @@ Feature parity with the iOS app, built natively in Compose:
   view has no spelling for setuid/setgid/sticky. The case the iOS block exists
   for — a program writing a secret with `mode: 0o600` and getting a
   world-readable file — is entirely within those nine.
+- **`socket.setKeepAlive(on, delay)` honours the flag and drops the delay.**
+  `SO_KEEPALIVE` is `StandardSocketOptions`; the idle interval the iOS block
+  sets with `TCP_KEEPALIVE` has no portable Java spelling — `TCP_KEEPIDLE` lives
+  in `jdk.net.ExtendedSocketOptions`, which Android does not ship. So keep-alive
+  is on or off as asked and the interval is the system default. This is an
+  accepted-and-dropped OPTION, which AGENTS.md calls the worst of three, so it
+  is written down rather than left to be discovered: the alternative is throwing
+  on a call every HTTP agent makes.
+- **`dns.resolve*` needs the host to say where to ask.** Android has no
+  `/etc/resolv.conf`, and the JDK exposes no resolver API at all — `javax.naming`
+  is absent on Android, so a resolver built on it would gate green on a desktop
+  and be missing on a phone. `NodeDns` therefore speaks DNS on the wire and takes
+  its nameservers from `ConnectivityManager.getLinkProperties(…).dnsServers`
+  (hence `ACCESS_NETWORK_STATE` in the manifest). With no network, or with the
+  permission refused, the list is empty and every `dns.resolve*` answers
+  `ESERVFAIL` — deliberately not a public resolver, which would send a user's
+  lookups somewhere they did not choose and would be wrong on any split-horizon
+  network. `dns.lookup` is unaffected: that is `getaddrinfo`.
+- **`dns.lookupService` gets its service names from a table.** There is no
+  `getservbyport` in Java. The names come from `/etc/services` where it is
+  readable (it is on Android) and from the IANA well-known list otherwise; a
+  port with neither answers its own number, which is what `getnameinfo` does
+  without `NI_NUMERICSERV`.
+- **Unix-domain sockets, the `cluster` fd handoff and the `WebSocket` global are
+  the three socket surfaces that stayed deferred, and none of them is "later".**
+  `AF_UNIX` in `java.nio` is `UnixDomainSocketAddress`, JDK 16 and Android API
+  34, against this app's minSdk 26 — the class is absent on most devices it
+  targets, and `android.net.LocalSocket` is not a `SelectableChannel` and cannot
+  join the selector. `netAdopt`/`netListenHandoff` want a `SocketChannel` around
+  a descriptor the JVM did not open, which `java.nio` will not build. And there
+  is no WebSocket client in the JDK or the framework, so the global would need a
+  third-party artifact (invariant #4) or a hand-written RFC 6455 stack that
+  still could not do `wss://`. The `ws` PACKAGE is unaffected — it rides these
+  sockets for `ws://`.
+- **The relative order of events on two DIFFERENT sockets is not asserted, on
+  either platform.** node reports a server's `connection` before the connecting
+  client's `connect`; iOS reports the reverse, because a loopback handshake
+  completes inside `connect()`. A non-blocking `SocketChannel.connect` on this
+  platform may land either way. Every fixture here asserts each socket's OWN
+  sequence instead, which is the same disposition `verify/net` records.
+- **`dns.lookup('localhost')` may answer `::1`.** Some images resolve loopback to
+  IPv6 first. The gate accepts either and asserts that a NAME resolved at all;
+  a fixture pinned to `127.0.0.1` would be asserting an image, not the engine.
+- **The live half of the DNS cross-check compares two resolvers.** It asks a real
+  nameserver and compares with real node asking for the same records, which is
+  the only way to grade the wire format honestly — and it is the same exposure
+  `verify/dnsres` has on iOS. It skips when there is no resolver or the network
+  does not answer in 30 s, but a partial answer from one side would read as a
+  mismatch. If that ever fires alone, re-run before believing it.
 - **TypeScript `paths` aliases are not tried.** iOS asks the bootstrap's
   TypeScript bridge for a project's `tsconfig` aliases before walking
   `node_modules`; that needs a compiler loaded through the very loader being

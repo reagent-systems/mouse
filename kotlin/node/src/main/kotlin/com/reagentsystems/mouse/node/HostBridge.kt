@@ -88,6 +88,41 @@ object HostBridge {
         // does in the same configuration (`self?.tty?.rawModeChanged(raw)` with `tty == nil`).
         // It is a faithful port of a no-op, not a stub standing in for one.
         "setRawMode",
+        // 3c — TCP, through `NodeSockets`' Java NIO table. `net` is the whole of what
+        // `http.createServer` stands on, so this is the milestone that makes a dev server on the
+        // device possible at all. Every RULE about half-close, backpressure and when a socket may
+        // announce its own close lives in the shared bootstrap and comes across with it.
+        "netConnect",
+        "netListen",
+        "netWrite",
+        "netEnd",
+        "netDestroy",
+        "netPause",
+        "netResume",
+        "netRef",
+        "netNoDelay",
+        "netKeepAlive",
+        // `dns.lookup` — getaddrinfo, which is `InetAddress.getAllByName`, on the resolver pool
+        // and never on the thread that carries socket I/O.
+        "netResolve",
+        // 3c — the dns.resolve* family: a real DNS query on the wire (`NodeDns`), because no Java
+        // API asks a nameserver for a record type and Android ships no JNDI at all.
+        "dnsResolve",
+        "dnsReverse",
+        "dnsService",
+        "dnsDone",
+        // 3c — the TLS-capable transport behind `fetch` and `https.request`. Same bargain as iOS:
+        // the platform owns the handshake (`HttpsURLConnection` there, URLSession here), and this
+        // layer owns only delivery — including the incremental delivery that makes it a stream.
+        "httpRequest",
+        "httpStream",
+        // 3c — UDP. The refusal that covered these named the missing socket layer; once the
+        // selector exists, `DatagramChannel` is the same machinery with whole packets, so the
+        // reason stopped being true and the capability had to follow it.
+        "dgramBind",
+        "dgramSend",
+        "dgramOption",
+        "dgramMembership",
     )
 
     /**
@@ -106,23 +141,30 @@ object HostBridge {
         // wall is specific rather than "later": it is not a syscall, it is a subscription.
         listOf("fsWatch", "fsUnwatch") to
             "watching a path needs inotify, which on Android is `android.os.FileObserver` — " +
-            "framework, so it cannot live in the pure module this bridge is partitioned in — plus " +
-            "a way for the host to call BACK into JavaScript with each event, which is the same " +
-            "machinery the socket layer needs and does not exist yet",
+            "framework, so it cannot live in the pure module this bridge is partitioned in, and " +
+            "the recursive mode node documents would be one observer per subdirectory plus one " +
+            "per FILE, which is the only way inotify can name which entry changed",
         listOf("rewriteImports") to
             "this rewrites `import(…)` inside source compiled at RUNTIME, and it is one entry " +
             "point to the ES module transpiler; Android has no transpiler, which is also why " +
             "`require()` of an ES module refuses with ERR_REQUIRE_ESM rather than loading it",
-        listOf(
-            "netConnect", "netConnectUnix", "netListen", "netListenUnix", "netListenHandoff",
-            "netAdopt", "netWrite", "netEnd", "netDestroy", "netDiscard", "netPause", "netResume",
-            "netRef", "netNoDelay", "netKeepAlive", "netResolve", "dnsResolve", "dnsReverse",
-            "dnsService", "dnsDone", "httpRequest", "httpStream", "wsOpen", "wsSend", "wsClose",
-            "dgramBind", "dgramSend", "dgramOption", "dgramMembership",
-        ) to
-            "net, http, dns, WebSocket and datagram all ride one socket layer, and Android has " +
-            "none: `NodeSockets.swift` is a Dispatch-source engine with no Java NIO counterpart " +
-            "written yet",
+        listOf("netConnectUnix", "netListenUnix") to
+            "a socket FILE needs AF_UNIX, and the only `java.nio` spelling for it is " +
+            "`java.net.UnixDomainSocketAddress` — JDK 16, and Android API 34, against this app's " +
+            "minSdk 26, so on most devices it targets the class is simply absent; the framework " +
+            "alternative `android.net.LocalSocket` is not a `SelectableChannel` and cannot join " +
+            "the one selector every other socket here is driven by",
+        listOf("netListenHandoff", "netAdopt", "netDiscard") to
+            "these three are `cluster`'s seam: the primary accepts a connection and hands the raw " +
+            "DESCRIPTOR to a worker engine in the same OS process. Android has no worker engines " +
+            "yet, and `java.nio` gives no way to build a `SocketChannel` around a descriptor it " +
+            "did not open — a channel owns its fd and will not adopt one",
+        listOf("wsOpen", "wsSend", "wsClose") to
+            "this is the `WebSocket` GLOBAL, which on iOS rides URLSession's own WebSocket task " +
+            "because it is the one TLS-capable path there; neither the JDK nor the Android " +
+            "framework ships a WebSocket client at all, so the choices are a third-party artifact " +
+            "(invariant #4) or a hand-written RFC 6455 client that still could not do `wss://`. " +
+            "The `ws` PACKAGE is unaffected — it rides these sockets for `ws://` and works",
         listOf(
             "cryptoHash", "cryptoHmac", "randomBytes", "randomUUID", "pbkdf2", "scrypt", "hkdf",
             "cipherOpen", "cipherSeal", "keyGenerate", "keyIdentify", "keySign", "keyVerify",
@@ -216,6 +258,28 @@ object HostBridge {
     /** The same for the immediate queue. The host drains a batch, matching the iOS loop. */
     fun dispatchImmediate(ids: List<Int>): String =
         "globalThis.__mouseDispatch.immediates([${ids.joinToString(",")}]);"
+
+    /**
+     * One I/O completion, ready to be queued as a JOB.
+     *
+     * A job is the iOS `enqueueJob` — the queue the event loop drains FIRST, ahead of immediates
+     * and timers, and the route every socket event, DNS answer and HTTP chunk takes back into
+     * JavaScript. The shape is the same trick timers use, for the same reason: a function cannot
+     * cross `@JavascriptInterface`, so the callback stays in a JS registry and only its id and its
+     * ARGUMENTS travel.
+     *
+     * [argsJson] is a JSON array applied to the callback, so the bootstrap sees exactly the
+     * argument list the iOS block passes. [final] says the registry entry may be dropped
+     * afterwards — true for a one-shot (a DNS answer, an HTTP body) and for a socket's own
+     * `close`, false for every event of a socket that is still alive. Without it the registry
+     * grows one entry per connection for the life of the program.
+     */
+    fun job(handlerId: Int, argsJson: String, final: Boolean): String =
+        "[$handlerId,${jsString(argsJson)},${if (final) 1 else 0}]"
+
+    /** A whole batch of [job] entries, run as one turn — the shape the iOS loop drains jobs in. */
+    fun dispatchJobs(jobs: List<String>): String =
+        "globalThis.__mouseDispatch.jobs([${jobs.joinToString(",")}]);"
 
     /**
      * A JavaScript string literal for [value].
