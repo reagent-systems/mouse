@@ -149,6 +149,44 @@ object Bootstrap {
     }
 
     /**
+     * Keep V8's own async `WebAssembly` around while the bootstrap replaces it, and put it back
+     * afterwards. Evaluate [KEEP_NATIVE_WASM] before the bootstrap and [RESTORE_NATIVE_WASM]
+     * after it.
+     *
+     * The bootstrap defines `WebAssembly.compile` and `.instantiate` as the SYNCHRONOUS
+     * constructors wrapped in a resolved promise, and says why: JavaScriptCore's async wasm
+     * functions never settle on a bare `JSContext`, because nothing runs the runloop their
+     * completion needs. That is true, and it is a JSC fact.
+     *
+     * On V8 it is worse than unnecessary. The async functions are real here, and the SYNCHRONOUS
+     * ones are the ones that are restricted: `new WebAssembly.Module(bytes)` throws for a buffer
+     * over 8 MB on the main thread, which is the only thread a WebView's JavaScript has. So the
+     * polyfill takes a working call and replaces it with one that cannot succeed —
+     * `python.wasm` is 14 MB, and `python hello.py` failed with exactly that RangeError, raised
+     * from inside the polyfill rather than from the caller.
+     *
+     * This is not a patch of shared behaviour. The two engines genuinely disagree about which
+     * half of the wasm API works, so the host that knows which engine it is puts back the half
+     * that does — the same reasoning as [unlockGlobalsScript], one layer up.
+     */
+    const val KEEP_NATIVE_WASM: String = """
+        globalThis.__mouseNativeWasm = (typeof WebAssembly === 'object' && WebAssembly)
+          ? { compile: WebAssembly.compile, instantiate: WebAssembly.instantiate }
+          : null;
+    """
+
+    /** @see KEEP_NATIVE_WASM */
+    const val RESTORE_NATIVE_WASM: String = """
+        (function () {
+          var native = globalThis.__mouseNativeWasm;
+          if (!native) return;
+          if (typeof native.compile === 'function') WebAssembly.compile = native.compile;
+          if (typeof native.instantiate === 'function') WebAssembly.instantiate = native.instantiate;
+          delete globalThis.__mouseNativeWasm;
+        })();
+    """
+
+    /**
      * Where the two texts first differ, as a human-readable line, or null when they match.
      * Reported by LABEL — line number and both texts — rather than by index into a diff, for
      * the reason AGENTS.md records: one divergence shifts every later line.

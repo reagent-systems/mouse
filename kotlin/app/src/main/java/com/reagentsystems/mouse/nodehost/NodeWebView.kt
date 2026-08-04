@@ -120,6 +120,9 @@ class NodeWebView(
         retain = { hold(true) },
         release = { hold(false) },
     )
+    /** One instance: `SecureRandom` reseeds itself, and constructing one per call is wasteful. */
+    private val secureRandom = java.security.SecureRandom()
+
     private val dns = NodeDns(post = ::postJob)
     private val http = NodeHttp(post = ::postJob, retain = { hold(true) }, release = { hold(false) })
 
@@ -206,6 +209,24 @@ class NodeWebView(
         /** A decimal STRING, deliberately — see the note in node-host.js. */
         @JavascriptInterface
         fun monotonicNanos(): String = System.nanoTime().toString()
+
+        /**
+         * Entropy, and the only crypto surface bound so far.
+         *
+         * It is here ahead of the rest of `crypto` because it is not really crypto's: CPython's
+         * WASI start asks for it before `main` runs, so `python hello.py` cannot reach its first
+         * line without it. `SecureRandom` is the platform's own CSPRNG — JCA, not a dependency —
+         * and it is seeded by the OS, which is the property that matters. Base64 out, because the
+         * bridge carries strings and the bootstrap already does `Buffer.from(…, 'base64')`.
+         */
+        @JavascriptInterface
+        fun randomBytes(count: Int): String {
+            if (count <= 0) return ""
+            val bytes = ByteArray(count)
+            secureRandom.nextBytes(bytes)
+            return Base64.getEncoder().encodeToString(bytes)
+        }
+
 
         @JavascriptInterface
         fun setTimer(delayMs: Double, repeat: Boolean): Int {
@@ -524,12 +545,18 @@ class NodeWebView(
                     if (failed(unlockError, ready)) return@evaluateGuardedInJs
                     evaluateGuardedInJs(config.globalsScript(), "mouse-process-globals") { globalsError ->
                         if (failed(globalsError, ready)) return@evaluateGuardedInJs
-                        val call = "globalThis.__mouseEvalAsset(" +
-                            HostBridge.jsString(Bootstrap.ASSET_NAME) + ")"
-                        evaluate(call) { bootError ->
-                            if (failed(bootError, ready)) return@evaluate
-                            ready(null)
-                            runEntry(source, entryPath)
+                        evaluateGuardedInJs(Bootstrap.KEEP_NATIVE_WASM, "mouse-keep-native-wasm") { keepError ->
+                            if (failed(keepError, ready)) return@evaluateGuardedInJs
+                            val call = "globalThis.__mouseEvalAsset(" +
+                                HostBridge.jsString(Bootstrap.ASSET_NAME) + ")"
+                            evaluate(call) { bootError ->
+                                if (failed(bootError, ready)) return@evaluate
+                                evaluateGuardedInJs(Bootstrap.RESTORE_NATIVE_WASM, "mouse-restore-native-wasm") { wasmError ->
+                                    if (failed(wasmError, ready)) return@evaluateGuardedInJs
+                                    ready(null)
+                                    runEntry(source, entryPath)
+                                }
+                            }
                         }
                     }
                 }

@@ -123,6 +123,11 @@ object HostBridge {
         "dgramSend",
         "dgramOption",
         "dgramMembership",
+        // Entropy, ahead of the rest of crypto and not really part of it: CPython's WASI start
+        // asks for random bytes before a script's first line runs, so `python hello.py` cannot
+        // reach `print` without it. `SecureRandom` is the platform's own CSPRNG — JCA, not a
+        // dependency. Everything else on the crypto surface is still deferred, by name.
+        "randomBytes",
     )
 
     /**
@@ -166,7 +171,7 @@ object HostBridge {
             "(invariant #4) or a hand-written RFC 6455 client that still could not do `wss://`. " +
             "The `ws` PACKAGE is unaffected — it rides these sockets for `ws://` and works",
         listOf(
-            "cryptoHash", "cryptoHmac", "randomBytes", "randomUUID", "pbkdf2", "scrypt", "hkdf",
+            "cryptoHash", "cryptoHmac", "randomUUID", "pbkdf2", "scrypt", "hkdf",
             "cipherOpen", "cipherSeal", "keyGenerate", "keyIdentify", "keySign", "keyVerify",
             "keyAgree", "ecdhGenerate", "ecdhCompute", "rsaGenerate", "rsaSign", "rsaVerify",
             "rsaEncrypt", "rsaDecrypt", "rsaPrivateEncrypt", "rsaPublicDecrypt",

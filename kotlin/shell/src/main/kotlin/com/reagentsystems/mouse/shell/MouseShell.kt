@@ -1418,10 +1418,23 @@ class MouseShell {
     }
 
     /**
-     * The JavaScript that runs a wasm interpreter, identical in shape to the one `Shell.swift`
-     * generates — deliberately, because it is the SHARED bootstrap's `node:wasi` and
-     * `WebAssembly` that execute it on both platforms. Android needs no interpreter of its own:
-     * the WebView's V8 compiles the wasm natively.
+     * The JavaScript that runs a wasm interpreter. Same `node:wasi` and same `WebAssembly` as
+     * `Shell.swift` generates — that is the point, both are the SHARED bootstrap's, and Android
+     * needs no interpreter of its own because the WebView's V8 compiles the wasm natively.
+     *
+     * It diverges from iOS in exactly one place, for a reason that is this platform's alone:
+     * **V8 refuses a SYNCHRONOUS `new WebAssembly.Module()` over 8 MB on the main thread**, and
+     * the WebView's JavaScript has no other thread to run on. `python.wasm` is 14 MB, so the
+     * synchronous form iOS uses fails outright:
+     *
+     *     RangeError: WebAssembly.Compile is disallowed on the main thread, if the buffer size
+     *     is larger than 8MB. Use WebAssembly.compile, …
+     *
+     * So the compile is the asynchronous one. The interval is not decoration: a pending
+     * `WebAssembly.compile` is a promise, and a promise is a microtask rather than an open
+     * handle, so the loop would find nothing to wait for and end the program mid-compile — the
+     * same rule that decides when `node script.js` is over. A ref'd timer IS a reason to stay
+     * alive, and it is cleared the moment the module lands.
      */
     private fun wasiBootstrap(
         mount: String,
@@ -1438,10 +1451,18 @@ class MouseShell {
           preopens: { '/': '/' },
           returnOnExit: true,
         });
-        const instance = new WebAssembly.Instance(
-          new WebAssembly.Module(fs.readFileSync('$mount/$wasm')), wasi.getImportObject());
-        const code = wasi.start(instance);
-        if (code) process.exitCode = code;
+        const compiling = setInterval(function () {}, 1000);
+        WebAssembly.instantiate(fs.readFileSync('$mount/$wasm'), wasi.getImportObject()).then(
+          function (result) {
+            clearInterval(compiling);
+            const code = wasi.start(result.instance);
+            if (code) process.exitCode = code;
+          },
+          function (error) {
+            clearInterval(compiling);
+            throw error;
+          },
+        );
     """.trimIndent()
 
     /**

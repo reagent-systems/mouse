@@ -289,7 +289,7 @@ class TerminalSession(val root: File) {
                 markModified = { onMain { workspace?.markModified(it) } },
                 openFile = { /* set on the deck by the caller wiring */ pendingOpen = it },
                 clear = { onMain { lines.clear() } },
-                emit = { o -> onMain { append(o.text, if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT) } },
+                emit = { o -> onMain { appendStream(o.text, if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT) } },
                 runtimes = Runtimes.support,
                 launchProgram = { p -> onMain { launch(p) } },
                 // The engine. `NodeRunner` blocks this (IO) thread and drives the WebView on the
@@ -315,8 +315,9 @@ class TerminalSession(val root: File) {
                 isActive = { self?.isActive != false },
             )
             val (outputs, echo) = withContext(Dispatchers.IO) { msh.execute(command, context) }
+            flushStreams()
             if (echo != null) append("$prompt $echo", Line.Kind.COMMAND)
-            for (o in outputs) append(o.text, if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT)
+            for (o in outputs) append(o.text.trimEnd('\n'), if (o.isError) Line.Kind.ERROR else Line.Kind.OUTPUT)
             isRunning = false
         }
     }
@@ -332,6 +333,46 @@ class TerminalSession(val root: File) {
     private fun append(text: String, kind: Line.Kind) {
         lines.add(Line(text, kind))
         while (lines.size > 500) lines.removeAt(0)
+    }
+
+    /**
+     * A partial line, per stream, waiting for the newline that ends it.
+     *
+     * Program output is a BYTE STREAM, not a sequence of lines, and one `write` is not one line.
+     * CPython's `print('python says', 42)` reaches the host as four writes — `python says`, a
+     * space, `42`, `\n` — because that is how WASI's `fd_write` is called. Treating each as its
+     * own line turned `python says 42` into four rows on screen, one of them blank.
+     *
+     * So writes accumulate here and are cut on `\n` only, with whatever has no newline yet held
+     * back until it gets one. stdout and stderr buffer separately: they are separate streams and
+     * interleaving their fragments would corrupt both.
+     */
+    private val pending = HashMap<Line.Kind, StringBuilder>()
+
+    /** Append a chunk of stream output, breaking it into lines only where it really breaks. */
+    private fun appendStream(text: String, kind: Line.Kind) {
+        val buffer = pending.getOrPut(kind) { StringBuilder() }
+        buffer.append(text)
+        var cut = buffer.indexOf("\n")
+        while (cut >= 0) {
+            append(buffer.substring(0, cut), kind)
+            buffer.delete(0, cut + 1)
+            cut = buffer.indexOf("\n")
+        }
+    }
+
+    /**
+     * Flush what a stream never terminated. A program that exits after `process.stdout.write('x')`
+     * with no newline still wrote `x`, and dropping it would lose real output — node prints it.
+     */
+    private fun flushStreams() {
+        for (kind in listOf(Line.Kind.OUTPUT, Line.Kind.ERROR)) {
+            val buffer = pending[kind] ?: continue
+            if (buffer.isNotEmpty()) {
+                append(buffer.toString(), kind)
+                buffer.setLength(0)
+            }
+        }
     }
 
     fun destroy() { systemShell?.destroy() }

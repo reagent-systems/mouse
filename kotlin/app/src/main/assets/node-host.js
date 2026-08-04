@@ -128,6 +128,12 @@
   // iOS block does with `tty == nil`. A faithful port of a no-op, not a stub standing in for one.
   bridge.setRawMode = function (raw) { host.setRawMode(!!raw); };
 
+  // ---- crypto ------------------------------------------------------------------------------
+  // Only entropy so far. It is bound ahead of the rest of the crypto surface because CPython's
+  // WASI start asks for it before a script's first line runs — see HostBridge.DEFERRED for what
+  // is still refused and why.
+  bridge.randomBytes = function (count) { return host.randomBytes(Number(count) | 0); };
+
   // ---- sockets, dns and the TLS transport --------------------------------------------------
   //
   // iOS hands JavaScriptCore the callback itself: `bridge.netConnect(host, port, fn)` and the
