@@ -2400,6 +2400,7 @@ fun main(args: Array<String>) {
         cipherCorpus(node, scratch)
         keyIdentifyCorpus(node, scratch)
         keySignCorpus(node, scratch)
+        keyAgreeCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2420,7 +2421,8 @@ fun main(args: Array<String>) {
                 "resolution vs real node, sockets vs real node peers on a real wire, the DNS wire " +
                 "format and resolvers vs real node, the TLS transport's streaming, key identity " +
                 "across PKCS#8/SEC1/PKCS#1/SPKI vs real node, EC/RSA/Ed25519 signing graded both " +
-                "directions against real node, node --check, " +
+                "directions against real node, key generation real node can use, ECDH agreeing " +
+                "with node's own half, RSA-PSS, node --check, " +
                 "load smoke, verify/fsparity, verify/neterrors, verify/reqsock — MATCH",
         )
     } else {
@@ -3061,6 +3063,186 @@ private fun keySignCorpus(node: String?, parent: File) {
             messageBase64, Base64.getEncoder().encodeToString(ByteArray(16)), first[1], false,
         ),
         "a malformed signature is refused rather than thrown on",
+    )
+}
+
+/**
+ * Generation, ECDH and RSA-PSS — the three that cannot be graded by comparing bytes.
+ *
+ * A generated key is fresh every run and an ECDH exchange has two halves, so "identical to node's"
+ * is not available. What IS available is the property each one actually has to satisfy:
+ *
+ *  - a generated key must be one REAL NODE CAN USE — so node imports it, signs with it, and this
+ *    verifies. A key that parses here and nowhere else would pass a self-check.
+ *  - a shared secret must MATCH THE OTHER SIDE'S — so node and this each generate a pair, exchange
+ *    public halves, and both compute. Agreement is the whole property; a wrong-but-consistent
+ *    implementation agrees with itself and not with node.
+ *  - a PSS signature is randomised, so it is cross-verified in both directions like ECDSA.
+ */
+private fun keyAgreeCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "key agreement corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "keyagree").also { it.mkdirs() }
+    val message = "agreement and generation"
+    val messageBase64 = Base64.getEncoder().encodeToString(message.toByteArray(Charsets.UTF_8))
+
+    // ---- generation: this generates, node uses ----
+    val generated = ArrayList<String>()
+    for (curve in listOf("prime256v1", "secp384r1", "secp521r1")) {
+        val pair = NodeKeys.generate("ec", curve)
+        check(pair != null, "generates an EC key on $curve")
+        if (pair == null) continue
+        val signature = NodeKeys.sign(pair.second, messageBase64, "sha256", false)
+        check(signature != null, "signs with the key it just generated — $curve")
+        generated.add(
+            listOf(
+                "ec $curve", "sha256",
+                Base64.getEncoder().encodeToString(pair.first.toByteArray(Charsets.UTF_8)),
+                signature ?: "",
+            ).joinToString("\t"),
+        )
+    }
+    for (kind in listOf("ed25519")) {
+        val pair = NodeKeys.generate(kind, "")
+        check(pair != null, "generates an $kind key")
+        if (pair == null) continue
+        val signature = NodeKeys.sign(pair.second, messageBase64, "", false)
+        check(signature != null, "signs with the $kind key it just generated")
+        generated.add(
+            listOf(
+                kind, "",
+                Base64.getEncoder().encodeToString(pair.first.toByteArray(Charsets.UTF_8)),
+                signature ?: "",
+            ).joinToString("\t"),
+        )
+    }
+    val rsa = NodeKeys.rsaGenerate(2048)
+    check(rsa != null, "generates a 2048-bit RSA key")
+    if (rsa != null) {
+        checkEqual(
+            NodeKeys.identify(rsa.second).modulusLength.toString(), "2048",
+            "the generated RSA key reports the size it was asked for",
+        )
+        val signature = NodeKeys.sign(rsa.second, messageBase64, "sha256", false)
+        generated.add(
+            listOf(
+                "rsa 2048", "sha256",
+                Base64.getEncoder().encodeToString(rsa.first.toByteArray(Charsets.UTF_8)),
+                signature ?: "",
+            ).joinToString("\t"),
+        )
+        // PSS, cross-verified both ways.
+        val pss = NodeKeys.rsaSign(rsa.second, messageBase64, "sha256", true)
+        check(pss != null, "signs with RSA-PSS")
+        check(
+            NodeKeys.rsaVerify(rsa.first, messageBase64, pss ?: "", "sha256", true),
+            "its own PSS signature verifies",
+        )
+        check(
+            !NodeKeys.rsaVerify(rsa.first, messageBase64, pss ?: "", "sha256", false),
+            "a PSS signature is NOT accepted as PKCS#1 v1.5 — the paddings are not interchangeable",
+        )
+        generated.add(
+            listOf(
+                "rsa 2048 pss", "sha256",
+                Base64.getEncoder().encodeToString(rsa.first.toByteArray(Charsets.UTF_8)),
+                pss ?: "",
+            ).joinToString("\t"),
+        )
+    }
+    File(scratch, "generated.tsv").writeText(generated.joinToString("\n"))
+
+    // ---- ECDH: this generates one half, node the other, and the secrets must agree ----
+    val exchanges = ArrayList<String>()
+    for (curve in listOf("prime256v1", "secp384r1", "secp521r1")) {
+        val mine = NodeKeys.ecdhGenerate(curve)
+        check(mine != null, "generates an ECDH pair on $curve")
+        if (mine != null) exchanges.add("$curve\t${mine.first}\t${mine.second}")
+    }
+    File(scratch, "exchanges.tsv").writeText(exchanges.joinToString("\n"))
+
+    File(scratch, "check.js").writeText(
+        """
+        const crypto = require('crypto');
+        const fs = require('fs');
+        const message = Buffer.from(${Json.write(messageBase64)}, 'base64');
+        const out = [];
+
+        // Every key this generated must be usable by real node.
+        for (const line of fs.readFileSync('generated.tsv', 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          const [name, algorithm, pub, signature] = line.split('\t');
+          const pem = Buffer.from(pub, 'base64').toString('utf8');
+          let ok = false;
+          try {
+            // The salt length is PINNED to the digest's, not left at node's verify-side default
+            // of RSA_PSS_SALTLEN_AUTO. Auto accepts whatever salt the signature happens to carry,
+            // so a cross-verify against it cannot see a wrong salt length at all — which is
+            // exactly what a deliberate break proved when it sailed through unnoticed. Strict
+            // verifiers (WebCrypto among them) do not auto-detect, so the length has to be right.
+            const key = name.endsWith('pss')
+              ? { key: pem, padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+                  saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST }
+              : pem;
+            ok = crypto.verify(algorithm || null, message, key,
+                               Buffer.from(signature, 'base64'));
+          } catch (e) { ok = false; }
+          out.push('use\t' + name + '\t' + ok);
+        }
+
+        // ECDH: node takes our public half, we take node's, and the secrets must be equal.
+        for (const line of fs.readFileSync('exchanges.tsv', 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          const [curve, , ourPublic] = line.split('\t');
+          const theirs = crypto.createECDH(curve);
+          const theirPublic = theirs.generateKeys();
+          const secret = theirs.computeSecret(Buffer.from(ourPublic, 'base64'));
+          out.push('ecdh\t' + curve + '\t' + theirPublic.toString('base64') +
+                   '\t' + secret.toString('base64'));
+        }
+        console.log(out.join('\n'));
+        """.trimIndent(),
+    )
+    val (status, text) = run(listOf(node, "check.js"), scratch)
+    if (status != 0) {
+        check(false, "real node graded the agreement corpus:\n${text.take(600)}")
+        return
+    }
+
+    var used = 0
+    var agreed = 0
+    val privateByCurve = exchanges.associate { it.split("\t")[0] to it.split("\t")[1] }
+    for (line in text.trim().lines()) {
+        val parts = line.split("\t")
+        when {
+            parts.size == 3 && parts[0] == "use" -> {
+                used += 1
+                check(parts[2] == "true", "real node uses the key this generated — ${parts[1]}")
+            }
+            parts.size == 4 && parts[0] == "ecdh" -> {
+                agreed += 1
+                val curve = parts[1]
+                val ours = NodeKeys.ecdhCompute(curve, privateByCurve[curve] ?: "", parts[2])
+                checkEqual(ours ?: "<null>", parts[3], "ECDH agrees with node's half — $curve")
+            }
+        }
+    }
+    check(used == generated.size, "node graded every generated key — $used of ${generated.size}")
+    check(agreed == exchanges.size, "every curve exchanged — $agreed of ${exchanges.size}")
+
+    // A peer point that is not the uncompressed form is refused, not guessed at.
+    check(
+        NodeKeys.ecdhCompute(
+            "prime256v1", privateByCurve["prime256v1"] ?: "",
+            Base64.getEncoder().encodeToString(byteArrayOf(0x02) + ByteArray(32)),
+        ) == null,
+        "a compressed peer point is refused rather than misread",
+    )
+    check(
+        NodeKeys.generate("ec", "secp256k1") == null,
+        "a curve outside P-256/384/521 refuses at generation too",
     )
 }
 

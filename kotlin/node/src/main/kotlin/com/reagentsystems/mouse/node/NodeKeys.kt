@@ -71,6 +71,21 @@ object NodeKeys {
     /** The name node reports → the curve OID, for going the other way. */
     val CURVE_OIDS: Map<String, String> = CURVES.entries.associate { (oid, name) -> name to oid }
 
+    /**
+     * node's curve name → the JCA's, for `ECGenParameterSpec`.
+     *
+     * P-256 is the one that differs: node and OpenSSL call it `prime256v1`, the JDK and Android
+     * call it `secp256r1`, and they are the same curve. Passing node's spelling to
+     * `ECGenParameterSpec` throws — which is how this was found, with P-256 the only curve of the
+     * three that failed to generate while P-384 and P-521 sailed through, since those two spell
+     * the same in both worlds.
+     */
+    private val JCA_CURVES = mapOf(
+        "prime256v1" to "secp256r1",
+        "secp384r1" to "secp384r1",
+        "secp521r1" to "secp521r1",
+    )
+
     // --------------------------------------------------------------------- PEM ----
 
     private val PEM_BLOCK =
@@ -624,4 +639,243 @@ object NodeKeys {
 
     private fun decode(base64: String): ByteArray? =
         runCatching { Base64.getDecoder().decode(base64) }.getOrNull()
+
+    // ------------------------------------------------------------------ RSA-PSS ----
+
+    /**
+     * `crypto.sign`/`verify` for RSA — the bridge's `rsaSign` and `rsaVerify`.
+     *
+     * PKCS#1 v1.5 goes through the same `Signature` as everything else; PSS needs its parameters
+     * spelled out, because the JCA's `RSASSA-PSS` has no defaults worth relying on. The salt is the
+     * digest's own length, which is what node uses when a caller names PSS padding without saying
+     * more, and MGF1 over the same digest — get either wrong and signatures verify nowhere.
+     */
+    fun rsaSign(pem: String, dataBase64: String, algorithm: String, pss: Boolean): String? {
+        if (!pss) return sign(pem, dataBase64, algorithm, false)
+        val identity = identify(pem)
+        if (identity.type != "rsa") return null
+        val data = decode(dataBase64) ?: return null
+        val key = privateKey(pem, identity) ?: return null
+        val parameters = pssParameters(algorithm) ?: return null
+        return runCatching {
+            val signer = java.security.Signature.getInstance("RSASSA-PSS")
+            signer.setParameter(parameters)
+            signer.initSign(key)
+            signer.update(data)
+            Base64.getEncoder().encodeToString(signer.sign())
+        }.getOrNull()
+    }
+
+    /** @see rsaSign */
+    fun rsaVerify(
+        pem: String,
+        dataBase64: String,
+        signatureBase64: String,
+        algorithm: String,
+        pss: Boolean,
+    ): Boolean {
+        if (!pss) return verify(pem, dataBase64, signatureBase64, algorithm, false)
+        val identity = identify(pem)
+        if (identity.type != "rsa") return false
+        val data = decode(dataBase64) ?: return false
+        val signature = decode(signatureBase64) ?: return false
+        val key = publicKey(pem, identity)
+            ?: privateKey(pem, identity)?.let { derivePublic(it, identity) }
+            ?: return false
+        val parameters = pssParameters(algorithm) ?: return false
+        return runCatching {
+            val verifier = java.security.Signature.getInstance("RSASSA-PSS")
+            verifier.setParameter(parameters)
+            verifier.initVerify(key)
+            verifier.update(data)
+            verifier.verify(signature)
+        }.getOrDefault(false)
+    }
+
+    private fun pssParameters(algorithm: String): java.security.spec.PSSParameterSpec? {
+        val digest = SIGNATURE_DIGESTS[algorithm.lowercase()] ?: return null
+        val jca = when (digest) {
+            "SHA1" -> "SHA-1"
+            else -> digest.replaceFirst("SHA", "SHA-")
+        }
+        val saltLength = when (digest) {
+            "SHA1" -> 20
+            "SHA224" -> 28
+            "SHA256" -> 32
+            "SHA384" -> 48
+            "SHA512" -> 64
+            else -> return null
+        }
+        return java.security.spec.PSSParameterSpec(
+            jca, "MGF1", java.security.spec.MGF1ParameterSpec(jca), saltLength, 1,
+        )
+    }
+
+    // --------------------------------------------------------------- generation ----
+
+    /** DER to a PEM block, wrapped at 64 characters as every other producer writes it. */
+    private fun pem(label: String, der: ByteArray): String {
+        val body = Base64.getEncoder().encodeToString(der)
+        val lines = StringBuilder()
+        var at = 0
+        while (at < body.length) {
+            val end = minOf(at + 64, body.length)
+            lines.append(body, at, end).append('\n')
+            at = end
+        }
+        return "-----BEGIN $label-----\n$lines-----END $label-----\n"
+    }
+
+    /**
+     * `crypto.generateKeyPairSync` for EC, Ed25519 and X25519 — the bridge's `keyGenerate`.
+     *
+     * Returns (public PEM, private PEM). The JCA hands back SPKI and PKCS#8 from `getEncoded`,
+     * which are exactly the two encodings [identify] reads, so a generated key goes straight back
+     * through the front door.
+     *
+     * A null answer covers both "no such curve" and "this device has no provider for it" — the
+     * second is real on Android, where Ed25519 and X25519 arrived at API 33 against a minSdk of
+     * 26. The bootstrap raises `ERR_CRYPTO_INVALID_CURVE` either way, which is the honest error
+     * when the key cannot be made here.
+     */
+    fun generate(kind: String, curve: String): Pair<String, String>? {
+        val algorithm = when (kind) {
+            "ec" -> "EC"
+            "ed25519" -> "Ed25519"
+            "ed448" -> "Ed448"
+            "x25519" -> "X25519"
+            "x448" -> "X448"
+            else -> return null
+        }
+        val jcaCurve = if (kind == "ec") JCA_CURVES[curve] ?: return null else ""
+        return runCatching {
+            val generator = java.security.KeyPairGenerator.getInstance(algorithm)
+            if (kind == "ec") generator.initialize(java.security.spec.ECGenParameterSpec(jcaCurve))
+            val pair = generator.generateKeyPair()
+            pem("PUBLIC KEY", pair.public.encoded) to pem("PRIVATE KEY", pair.private.encoded)
+        }.getOrNull()
+    }
+
+    /** `crypto.generateKeyPairSync('rsa', …)` — the bridge's `rsaGenerate`. */
+    fun rsaGenerate(modulusLength: Int): Pair<String, String>? {
+        if (modulusLength < 512 || modulusLength > 8192) return null
+        return runCatching {
+            val generator = java.security.KeyPairGenerator.getInstance("RSA")
+            generator.initialize(modulusLength)
+            val pair = generator.generateKeyPair()
+            pem("PUBLIC KEY", pair.public.encoded) to pem("PRIVATE KEY", pair.private.encoded)
+        }.getOrNull()
+    }
+
+    // --------------------------------------------------------------------- ECDH ----
+    //
+    // `createECDH` does NOT speak PEM. Its keys are raw: the private one is the scalar, and the
+    // public one is the uncompressed point `0x04 || X || Y` that node calls a public key and
+    // OpenSSL calls octet form. So this half of the work is the opposite of the parser's — the
+    // key material arrives with no envelope at all, and the curve's parameters have to be fetched
+    // by name to give it meaning.
+
+    /** The JCA's parameters for a named curve, which raw key material needs to be interpreted. */
+    private fun curveParameters(curve: String): java.security.spec.ECParameterSpec? =
+        runCatching {
+            val parameters = java.security.AlgorithmParameters.getInstance("EC")
+            parameters.init(java.security.spec.ECGenParameterSpec(JCA_CURVES[curve] ?: curve))
+            parameters.getParameterSpec(java.security.spec.ECParameterSpec::class.java)
+        }.getOrNull()
+
+    /** Fixed-width big-endian bytes, which is how a coordinate and a scalar both travel. */
+    private fun fixed(value: java.math.BigInteger, width: Int): ByteArray? {
+        val bytes = value.toByteArray()
+        val from = if (bytes.size > width && bytes[0].toInt() == 0) 1 else 0
+        val size = bytes.size - from
+        if (size > width) return null
+        val out = ByteArray(width)
+        bytes.copyInto(out, width - size, from, bytes.size)
+        return out
+    }
+
+    /** `ecdh.generateKeys()` — (private scalar, uncompressed point), both base64. */
+    fun ecdhGenerate(curve: String): Pair<String, String>? {
+        val width = coordinateSize(curve) ?: return null
+        val jcaCurve = JCA_CURVES[curve] ?: return null
+        return runCatching {
+            val generator = java.security.KeyPairGenerator.getInstance("EC")
+            generator.initialize(java.security.spec.ECGenParameterSpec(jcaCurve))
+            val pair = generator.generateKeyPair()
+            val private = pair.private as java.security.interfaces.ECPrivateKey
+            val public = pair.public as java.security.interfaces.ECPublicKey
+            val scalar = fixed(private.s, width) ?: return null
+            val x = fixed(public.w.affineX, width) ?: return null
+            val y = fixed(public.w.affineY, width) ?: return null
+            Base64.getEncoder().encodeToString(scalar) to
+                Base64.getEncoder().encodeToString(byteArrayOf(0x04) + x + y)
+        }.getOrNull()
+    }
+
+    /**
+     * `ecdh.computeSecret(peer)` — the bridge's `ecdhCompute`.
+     *
+     * The secret is the X coordinate of the shared point and nothing else, which is what
+     * `KeyAgreement.generateSecret()` returns and what node returns. Neither hashes it; a caller
+     * who wants a key runs it through a KDF, and doing that here would silently change the answer.
+     */
+    fun ecdhCompute(curve: String, privateBase64: String, peerBase64: String): String? {
+        val width = coordinateSize(curve) ?: return null
+        val parameters = curveParameters(curve) ?: return null
+        val scalar = decode(privateBase64) ?: return null
+        val peer = decode(peerBase64) ?: return null
+        // Only the uncompressed form is accepted. A compressed point would need the curve equation
+        // solved for Y, and answering null is what raises node's ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY.
+        if (peer.size != 1 + width * 2 || peer[0].toInt() != 0x04) return null
+        return runCatching {
+            val factory = java.security.KeyFactory.getInstance("EC")
+            val private = factory.generatePrivate(
+                java.security.spec.ECPrivateKeySpec(java.math.BigInteger(1, scalar), parameters),
+            )
+            val point = java.security.spec.ECPoint(
+                java.math.BigInteger(1, peer.copyOfRange(1, 1 + width)),
+                java.math.BigInteger(1, peer.copyOfRange(1 + width, peer.size)),
+            )
+            val public = factory.generatePublic(
+                java.security.spec.ECPublicKeySpec(point, parameters),
+            )
+            val agreement = javax.crypto.KeyAgreement.getInstance("ECDH")
+            agreement.init(private)
+            agreement.doPhase(public, true)
+            Base64.getEncoder().encodeToString(agreement.generateSecret())
+        }.getOrNull()
+    }
+
+    /**
+     * `crypto.diffieHellman({ privateKey, publicKey })` — the bridge's `keyAgree`, over PEM.
+     *
+     * X25519 and X448 agree through `XDH`; the NIST curves through `ECDH`. The algorithm name has
+     * to match the key, so it comes from the identity rather than from a guess.
+     */
+    fun agree(privatePem: String, publicPem: String): String? {
+        val identity = identify(privatePem)
+        val algorithm = when (identity.type) {
+            "ec" -> "ECDH"
+            "x25519", "x448" -> "XDH"
+            else -> return null
+        }
+        val family = when (identity.type) {
+            "ec" -> "EC"
+            "x25519" -> "X25519"
+            else -> "X448"
+        }
+        val privateDer = pkcs8(privatePem) ?: return null
+        val publicDer = spki(publicPem) ?: return null
+        return runCatching {
+            val factory = java.security.KeyFactory.getInstance(family)
+            val private = factory.generatePrivate(
+                java.security.spec.PKCS8EncodedKeySpec(privateDer),
+            )
+            val public = factory.generatePublic(java.security.spec.X509EncodedKeySpec(publicDer))
+            val agreement = javax.crypto.KeyAgreement.getInstance(algorithm)
+            agreement.init(private)
+            agreement.doPhase(public, true)
+            Base64.getEncoder().encodeToString(agreement.generateSecret())
+        }.getOrNull()
+    }
 }
