@@ -187,7 +187,22 @@ biggest rewrite: `NodeSockets.swift` → Java NIO.
   curve, and emitting ECDSA signatures in DER or raw as the caller asks —
   fourteen bridge methods over one shared parser. Ed25519 adds a second wall:
   the JCA gained it at API 33, against this app's minSdk 26, so it needs a
-  runtime check rather than a straight call. Brotli has no Android route at all: the
+  runtime check rather than a straight call.
+
+  **`vm` is DONE, and its refusal had been wrong.** It said "a WebView gives no
+  way to make another context reachable from this one". Measured on a device:
+  an `about:blank` iframe is same-origin, so its `contentWindow` is reachable,
+  with its own globals AND its own intrinsics (`w.Array !== Array`) — exactly
+  what `vm.createContext` needs. It lives entirely in the shim, because the
+  context is a JavaScript object and no Kotlin is involved. Where it falls short
+  of node is written down rather than glossed: node's sandbox is a live proxy,
+  this one is copied in before a run and out after, so the two agree at every
+  `runInContext` boundary and can disagree inside one.
+
+  Gated by `NodeVmSmoke`, the first DEVICE-ONLY program in the suite — an
+  iframe needs a DOM and real node has none, so grading it in `:nodecheck` too
+  would mean expecting different things of the two hosts, which is the trap the
+  ES module refusal fell into. Brotli has no Android route at all: the
   platform decodes it inside its HTTP stack and exposes nothing to an app, and
   a third-party artifact is what invariant #4 forbids. `vm`, workers and child
   processes are untouched.
