@@ -13,6 +13,17 @@ plugins {
     alias(libs.plugins.kotlin.jvm)
 }
 
+dependencies {
+    // For `Json` only, and the reason is invariant #4 rather than convenience. Module resolution
+    // reads package.json — "exports", "main", "type", "imports" — and stat/readdir answers cross
+    // the `@JavascriptInterface` boundary as JSON because that boundary carries nothing else.
+    // `org.json` is Android framework and absent from the JDK, so using it would cost a
+    // third-party artifact AND stop this module building off-device; `:packages` already carries
+    // the hand-written reader/writer written for exactly that reason, and a second copy here
+    // would be one more thing to drift.
+    implementation(project(":packages"))
+}
+
 java {
     // Match `:app` exactly: an Android module compiled for 11 cannot consume a 21-byte-code jar.
     sourceCompatibility = JavaVersion.VERSION_11

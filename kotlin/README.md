@@ -40,7 +40,7 @@ stop building off-device.
 | `:screencheck` | The headless gate for `:terminal` |
 | `:packages` | The package manager: semver, the npm registry client, the hoisting tree resolver, integrity-checked installs, the `node_modules` manifest, and `TarGz`. Pure Kotlin/JVM, JDK-only |
 | `:pkgcheck` | The headless gate for `:packages` |
-| `:node` | The Node layer's portable half: the bootstrap's extraction from the iOS source, the `__mouse` bridge protocol, the process globals and the event loop's bookkeeping. Pure Kotlin/JVM, JDK-only |
+| `:node` | The Node layer's portable half: the bootstrap's extraction from the iOS source, the `__mouse` bridge protocol, the process globals, the event loop's bookkeeping, the workspace-virtual filesystem (`NodeFs`) and node's module-resolution algorithm (`ModuleResolver`). Pure Kotlin/JVM |
 | `:nodecheck` | The headless gate for `:node` — including the bootstrap-drift check |
 
 `:terminal`, `:packages` and `:node` are modules rather than files in `:app` for
@@ -111,12 +111,31 @@ rewrites the asset using the *same* code that grades it:
 Also gated there: the bridge partition (every `bridge.<name>` the shipping
 bootstrap calls is either implemented by the Android host or explicitly
 deferred, exactly once — so an iOS-side addition turns up as a red gate rather
-than as `undefined is not a function` inside 14,000 lines), the process globals
-the bootstrap reads while it loads, the event loop's bookkeeping, `node --check`
-on the extracted bootstrap, and a **load smoke**: the five scripts loaded in the
-host's order under real `node` with a JavaScript stand-in for `__mouseHost`,
-running `NodeSmoke.PROGRAM` — the same program the on-device gate runs, graded
-by the same grader.
+than as `undefined is not a function` inside 14,000 lines), the reason attached
+to each deferred name, the process globals the bootstrap reads while it loads,
+the event loop's bookkeeping, the `/proc/self/stat` reader behind
+`process.cpuUsage()`, `node --check` on the extracted bootstrap and on
+`node-host.js`, and three runs of the engine under real `node` with a JavaScript
+stand-in for `__mouseHost`: `NodeSmoke` (console, `process`, timers, tick
+order), `NodeFsSmoke` (the filesystem and `require` over `node_modules`) — both
+of them the same programs the on-device gate runs, graded by the same graders —
+and `verify/fsparity`, read straight out of `verify/` and graded against the
+same `node.txt` iOS is graded against.
+
+The filesystem and the resolver are gated **against real `node` itself**, which
+is what makes the parity claim falsifiable: `NodeFs.stat` is compared with
+node's own `Stats` for the same file, and `ModuleResolver` is compared with
+`require.resolve` case by case in one real tree (relative and bare specifiers,
+`.` and `..`, "exports" maps with pattern keys, a subpath outside the map, a
+scoped package, a dual package, the walk-up). A resolver graded against
+hand-written expectations is graded against whatever its author believed node
+does.
+
+The JavaScript loader in `node-host.js` and the Kotlin resolver under it are
+gated separately off-device — the stand-in host resolves through node's own
+resolver rather than through a second copy of ours, because grading our loader
+against our own resolver would prove nothing about either. The two meet for the
+first time on a device.
 
 ### On the device
 
@@ -138,8 +157,14 @@ adb logcat -d -s MouseNodeCheck
 ```
 
 The app does not need to be running; the broadcast starts it. Because the
-program and its grading are shared with `:nodecheck`, an on-device MISMATCH
+programs and their grading are shared with `:nodecheck`, an on-device MISMATCH
 means the WebView rather than the corpus.
+
+Two programs run in sequence, each in its own engine and its own empty
+directory: `NodeSmoke` and then `NodeFsSmoke`. The second is the one no JVM
+harness can reach at all — it is the only place `NodeFs` and `ModuleResolver`
+meet the JavaScript loader, over a `node_modules` tree the program writes for
+itself through `fs` and then requires.
 
 ## Running on an emulator
 
@@ -217,8 +242,17 @@ Feature parity with the iOS app, built natively in Compose:
   JavaScript bootstrap, verbatim, running in a headless WebView with a Kotlin
   bridge under it: `console`, `process` (argv, env, cwd, version, exit code)
   and timers with node's tick discipline. Gated by `:nodecheck` off-device and
-  by a debug broadcast on-device. `fs`, module loading, sockets, crypto,
-  workers and child processes are not wired yet and refuse by name
+  by a debug broadcast on-device
+- **Node layer, filesystem and modules** — `fs` over workspace-virtual paths
+  (`NodeFs`: read, write, append, stat/lstat with node's full field set,
+  readdir, mkdir, remove, rename, chmod, statfs) and a real CommonJS `require`
+  over `node_modules` (`ModuleResolver` plus the loader in `node-host.js`):
+  relative and bare specifiers, the walk-up, `package.json` "main"/"exports"/
+  "imports"/"type", extension probing, index fallback, `.json` modules, the
+  module cache, circular requires reading live partial exports, and
+  `require.resolve` with `.paths`. `fs.watch`, ES modules, sockets, crypto,
+  compression, `vm`, workers and child processes are not wired and refuse by
+  name, each with its own reason
 
 ## Known Android nuances
 
@@ -235,6 +269,39 @@ Feature parity with the iOS app, built natively in Compose:
   host redefines every global the bootstrap assigns as a plain writable
   property first (`Bootstrap.unlockGlobalsScript`), and the list is derived
   from the shipping bootstrap rather than written by hand.
+- **`fs.renameSync` does not overwrite, on either platform.** The bootstrap
+  ignores what `bridge.rename` answers, and both hosts refuse a move onto an
+  existing name — iOS because `FileManager.moveItem` does, Android because
+  `NodeFs.rename` was written to match it. Real node overwrites. So a rename
+  onto an existing file silently does nothing on both. This is a bug in the
+  SHARED design (the fix belongs in the bootstrap, which is `swift/`, frozen
+  for this loop), so it is recorded rather than fixed — fixing it on Android
+  alone would make the two platforms disagree while looking like a repair.
+- **`process.exit()` from an async continuation is reported as an unhandled
+  rejection.** `process.exit` records the code through `bridge.exit` and then
+  unwinds by throwing a sentinel. Thrown from a synchronous frame the shim
+  catches it; thrown from a promise continuation it lands in the microtask
+  checkpoint at the *end* of a turn, outside any `try`/`catch` — where a
+  WebView logs it to its console. The run still ends with the right code,
+  because the code was recorded before the throw. iOS never sees this:
+  JavaScriptCore drains microtasks inside the native call, so its
+  `exceptionHandler` catches the sentinel and ignores it.
+- **`Stats` fields the JDK cannot name are derived, not measured.**
+  `st_blocks` is computed from the size in 512-byte units and `st_blksize`
+  answers 4096; `statfs` reports `type`, `files` and `ffree` as 0. Where the
+  `unix:*` attribute view is missing (it is on Android), `mode` is rebuilt
+  from the POSIX permission set plus the type bits, and `ino` falls back to
+  the file key's identity. Everything a program branches on — the type bits,
+  the permission bits, size, and all four timestamps — is real.
+- **`chmod` carries the nine permission bits and no more.** The JDK's POSIX
+  view has no spelling for setuid/setgid/sticky. The case the iOS block exists
+  for — a program writing a secret with `mode: 0o600` and getting a
+  world-readable file — is entirely within those nine.
+- **TypeScript `paths` aliases are not tried.** iOS asks the bootstrap's
+  TypeScript bridge for a project's `tsconfig` aliases before walking
+  `node_modules`; that needs a compiler loaded through the very loader being
+  built, and Android has none wired. A project using one gets
+  MODULE_NOT_FOUND — which is also what real node gives.
 - **Edge-swipe vs. the system back gesture.** On gesture-navigation devices,
   Android reserves the screen edges for the back gesture. The ring edge-swipe
   claims those bands with `Modifier.systemGestureExclusion()` (the standard

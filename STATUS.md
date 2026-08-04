@@ -165,10 +165,19 @@ commands.
   protocol, the process globals and the event loop's bookkeeping;
   `kotlin/app/.../nodehost/NodeWebView.kt` is the headless WebView host, with
   `console`, `process` (argv/env/cwd/version/exit) and timers wired.
-  `./gradlew :nodecheck:run` gates it (87 checks, MATCH) and the WebView itself
-  is gated on device by a debug broadcast (`NodeCheckReceiver` — see
-  `kotlin/README.md`). Still open: 3b/3c/3d — `fs`, module loading/`require`,
-  sockets/`net`/`http`, crypto, workers, child processes; the Compose grid
+  Milestone 3b is in: `NodeFs` is the workspace-virtual filesystem and
+  `ModuleResolver` is node's resolution algorithm, both pure Kotlin and both
+  gated against **real `node` itself** — `stat` against node's own `Stats`,
+  every resolution case against `require.resolve` in one real tree — with the
+  CommonJS loader that evaluates what they resolve in `node-host.js`, the same
+  split `NodeEngine.swift` makes. The entry script is a module now, so `require`
+  works in it. `./gradlew :nodecheck:run` gates all of it (310 checks, MATCH),
+  including `verify/fsparity` run through the Android bridge against the same
+  `node.txt`; the WebView itself is gated on device by a debug broadcast
+  (`NodeCheckReceiver` — see `kotlin/README.md`), which now runs the filesystem
+  and require program too. Still open: 3c/3d — `fs.watch`, ES modules,
+  sockets/`net`/`http`/DNS, crypto, compression, `vm`, workers, child
+  processes, each refusing by name with its own reason; the Compose grid
   renderer and key strip; and `npm`/`npx`/`npm run` in Kotlin msh, which wait
   on G because they exist to run what they install.
 

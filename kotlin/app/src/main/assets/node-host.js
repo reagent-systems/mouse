@@ -72,24 +72,197 @@
     host.clearImmediate(id);
   };
 
+  // ---- filesystem ------------------------------------------------------------------------
+  //
+  // Primitives only. Every RULE about when they may be called — ENOENT for a missing parent,
+  // EISDIR for reading a directory, EEXIST, ENOTDIR, refusing to delete a tree without
+  // `recursive` — lives in the shared bootstrap, which Android runs verbatim, so all of that
+  // hard-won strictness arrives with it and none of it is restated here.
+  //
+  // The marshalling is the whole of what this section adds. iOS hands JavaScriptCore a Swift
+  // dictionary and JSC converts it; @JavascriptInterface carries nothing but primitives and
+  // strings, so a structured answer crosses as JSON and is parsed back into the shape the
+  // bootstrap already expects. Content crosses as base64 on BOTH platforms — the bootstrap does
+  // `Buffer.from(base64, 'base64')` either way — so binary survives the String hop.
+  //
+  // `null` is load-bearing. It is how every one of these reports failure, and the bootstrap
+  // branches on it (`if (!raw) return …`), so a wrapper that turned a null into `undefined` or
+  // into an empty object would disable a rule written somewhere else.
+  function parsedOrNull(raw) {
+    return (raw === null || raw === undefined) ? null : JSON.parse(raw);
+  }
+
+  bridge.stat = function (path, followLinks) {
+    return parsedOrNull(host.stat(String(path), !!followLinks));
+  };
+  bridge.statfs = function (path) { return parsedOrNull(host.statfs(String(path))); };
+  bridge.readdir = function (path) { return parsedOrNull(host.readdir(String(path))); };
+  bridge.readFile = function (path) {
+    var base64 = host.readFile(String(path));
+    return (base64 === null || base64 === undefined) ? null : base64;
+  };
+  bridge.writeFile = function (path, base64, append) {
+    return host.writeFile(String(path), String(base64), !!append);
+  };
+  bridge.mkdir = function (path) { return host.mkdir(String(path)); };
+  bridge.remove = function (path) { return host.remove(String(path)); };
+  bridge.rename = function (from, to) { return host.rename(String(from), String(to)); };
+  bridge.chmodPath = function (path, mode) { return host.chmodPath(String(path), Number(mode) | 0); };
+
+  // ---- process / loop instrumentation ----------------------------------------------------
+  bridge.cpuUsage = function () { return JSON.parse(host.cpuUsage()); };
+  bridge.loopUtilization = function () { return JSON.parse(host.loopUtilization()); };
+  // No terminal is attached to a headless host, so this does nothing — which is exactly what the
+  // iOS block does with `tty == nil`. A faithful port of a no-op, not a stub standing in for one.
+  bridge.setRawMode = function (raw) { host.setRawMode(!!raw); };
+
   // ---- require ---------------------------------------------------------------------------
-  // Called at the TOP LEVEL of the bootstrap (`globalThis.__mouseRequire`), so it cannot be one
-  // of the throwing stubs — it has to hand back a function. The function is what refuses, which
-  // is also the honest shape: the loader exists nowhere on this platform yet, so every request
-  // fails, and it fails by name at the point of use rather than at load.
-  bridge.createRequire = function () {
-    var refuse = function (specifier) {
-      var error = new Error("Cannot find module '" + specifier + "': the Android Node layer has "
-        + 'no module loader — CommonJS resolution over node_modules is not part of the '
-        + 'console/process/timer bridge');
-      error.code = 'MODULE_NOT_FOUND';
-      throw error;
+  //
+  // `require(x)` is two jobs that look like one, and iOS splits them the same way this does.
+  // RESOLUTION — the node_modules walk, package.json "exports"/"main"/"imports", extension
+  // probing, index files — is `NodeEngine.resolveModule` in Swift and `ModuleResolver` in Kotlin,
+  // where a harness can reach it. LOADING — reading the file, wrapping it in the module function,
+  // evaluating it — can only happen in the JavaScript engine, so it is here.
+  //
+  // The cache is per ENGINE, not per require: `require('./a')` from two different files must hand
+  // back the same object, which is what makes a module's state its own.
+  var moduleCache = Object.create(null);
+  var coreCache = Object.create(null);
+  // A module still being evaluated. A circular require reads exports LIVE off the module object,
+  // so `module.exports = Class` before the cycle closes is visible to the partner — the iOS
+  // `modulesInProgress` map, and the reason this is not simply "cache it when it finishes".
+  var inProgress = Object.create(null);
+
+  function coded(message, code) {
+    var error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  // No newline after the wrapper: the body's first line must BE the file's first line, or every
+  // line number in every stack trace is off by one — which for an editor means the click lands on
+  // the wrong line, all day. node wraps this way for the same reason, and so does iOS.
+  //
+  // `__mouseRequire` is a SEPARATE parameter carrying the same value as `require`, because a
+  // module doing `const require = createRequire(...)` — legal, and what several dual packages do
+  // — shadows the `require` PARAMETER scope-wide.
+  function wrapModule(source, id) {
+    var body = source;
+    if (body.slice(0, 2) === '#!') {
+      var newline = body.indexOf('\n');
+      body = newline < 0 ? '' : body.slice(newline);
+    }
+    return (0, eval)(
+      '(function(exports, require, module, __filename, __dirname, __mouseRequire, __mouseFilename){'
+      + body + '\n})\n//# sourceURL=mouse://' + id);
+  }
+
+  function loadJson(id) {
+    if (id in moduleCache) return moduleCache[id];
+    var text = host.readText(id);
+    if (text === null || text === undefined) throw coded("Cannot read '" + id + "'", 'MODULE_NOT_FOUND');
+    var value = (0, eval)('(' + text + ')');
+    moduleCache[id] = value;
+    return value;
+  }
+
+  function loadFile(id) {
+    if (id in inProgress) return inProgress[id].exports;
+    if (id in moduleCache) return moduleCache[id];
+
+    var payload = host.loadModule(id);
+    if (payload === null || payload === undefined) {
+      throw coded("Cannot read '" + id + "'", 'MODULE_NOT_FOUND');
+    }
+    var info = JSON.parse(payload);
+    if (info.esm) {
+      // Real node's own answer for `require()` of an ES module, and here it is also the honest
+      // one: iOS transpiles ESM to CommonJS at load and Android has no transpiler, so the gap is
+      // iOS's transpiler rather than a wrong answer. `import()` reaches the same wall.
+      throw coded('require() of ES Module ' + id + ' is not supported: the Android Node layer '
+        + 'has no ES module transpiler, and a WebView will not evaluate one against this loader',
+        'ERR_REQUIRE_ESM');
+    }
+
+    var directory = host.virtualDirname(id);
+    var fn;
+    try {
+      fn = wrapModule(info.source, id);
+    } catch (e) {
+      // A SyntaxError here is the FILE failing to parse, and the message is the only thing that
+      // says where. Swallowing it leaves "Cannot parse '<2 MB file>'", which is unactionable.
+      throw coded("Cannot parse '" + id + "': " + ((e && e.message) || e), 'ERR_MOUSE_PARSE');
+    }
+
+    var module = { exports: {} };
+    inProgress[id] = module;
+    var required = makeRequire(directory, false);
+    try {
+      fn(module.exports, required, module, id, directory, required, id);
+    } catch (e) {
+      // A module that throws mid-evaluation must not linger as partial exports: evict, and let
+      // the ORIGINAL error reach the requiring frame.
+      delete inProgress[id];
+      delete moduleCache[id];
+      throw e;
+    }
+    delete inProgress[id];
+    moduleCache[id] = module.exports;
+    return module.exports;
+  }
+
+  function resolveAnswer(specifier, fromDir, esm) {
+    return JSON.parse(host.resolveModule(String(specifier), fromDir, !!esm));
+  }
+
+  function requireFrom(fromDir, esm, specifier) {
+    var answer = resolveAnswer(specifier, fromDir, esm);
+    if (answer.kind === 'core') {
+      if (answer.id in coreCache) return coreCache[answer.id];
+      var core = globalThis.__coreModule(answer.id);
+      coreCache[answer.id] = core;
+      return core;
+    }
+    if (answer.kind === 'json') return loadJson(answer.id);
+    if (answer.kind === 'file') return loadFile(answer.id);
+    // 'addon' and 'error' both arrive with the message and the code the caller should see —
+    // ERR_DLOPEN_FAILED is a different fact from MODULE_NOT_FOUND, and tools branch on it.
+    throw coded(answer.message, answer.code);
+  }
+
+  function makeRequire(fromDir, esm) {
+    var required = function (specifier) { return requireFrom(fromDir, !!esm, specifier); };
+    required.resolve = function (specifier) {
+      var answer = resolveAnswer(specifier, fromDir, esm);
+      if (answer.kind === 'core') return 'node:' + answer.id;
+      if (answer.kind === 'error') throw coded(answer.message, answer.code);
+      return answer.id;
     };
-    refuse.resolve = refuse;
-    refuse.cache = Object.create(null);
-    refuse.extensions = Object.create(null);
-    refuse.main = undefined;
-    return refuse;
+    // `require.resolve.paths(request)`: the directories that WOULD be searched. jest asks for
+    // these to build its own module registry, so a missing one stops it at startup.
+    required.resolve.paths = function (specifier) {
+      return JSON.parse(host.resolvePaths(String(specifier), fromDir));
+    };
+    // `import()` resolves on the "import" condition WHATEVER the importing file is: node keys the
+    // condition to the syntax, not to the file's format, and a dual package ships genuinely
+    // different files behind the two.
+    required.__importCondition = function (specifier) {
+      try {
+        return requireFrom(fromDir, true, specifier);
+      } catch (e) {
+        if (e && e.code === 'MODULE_NOT_FOUND') e.code = 'ERR_MODULE_NOT_FOUND';
+        throw e;
+      }
+    };
+    return required;
+  }
+
+  // Called at the TOP LEVEL of the bootstrap (`globalThis.__mouseRequire`), so it can never be
+  // one of the throwing stubs — it has to hand back a function.
+  bridge.createRequire = function (fromPath) {
+    var from = String(fromPath === undefined || fromPath === null ? '/' : fromPath);
+    if (from.indexOf('file://') === 0) from = from.slice(7);
+    return makeRequire(host.virtualDirname(from), false);
   };
 
   globalThis.__mouse = bridge;
@@ -179,10 +352,20 @@
     // The entry script's synchronous frame. After it, `hostFrame` is false and nextTick has to
     // schedule its own drain — the bootstrap's comment on why is worth reading before touching
     // any of this.
+    //
+    // The entry is a MODULE, not a loose script: `NodeEngine.runOnQueue` wraps it exactly like
+    // anything it requires, with its own `module`, `exports`, `__filename`, `__dirname` and a
+    // `require` rooted at its directory. A plain global eval — which is what this was before the
+    // loader existed — leaves `require` undefined in the one file a user is most likely to write.
     entry: function (source, url) {
       var result = { ok: true, error: '' };
       try {
-        (0, eval)(source + (url ? '\n//# sourceURL=' + url : ''));
+        var id = host.normalizePath(String(url || '/main.js'));
+        var directory = host.virtualDirname(id);
+        var fn = wrapModule(String(source), id);
+        var module = { exports: {} };
+        var required = makeRequire(directory, false);
+        fn(module.exports, required, module, id, directory, required, id);
       } catch (e) {
         // process.exit unwinds by throwing; that is not a failure.
         var text = e && e.message ? String(e.message) : String(e);

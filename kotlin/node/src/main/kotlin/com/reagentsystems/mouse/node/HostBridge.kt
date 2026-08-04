@@ -41,10 +41,11 @@ object HostBridge {
     const val SHIM_ASSET_PATH: String = "kotlin/app/src/main/assets/node-host.js"
 
     /**
-     * What milestone 3a binds for real. Everything a program needs to print, to be told who it is,
-     * and to schedule work — plus the three the bootstrap calls before it has finished loading
-     * (`monotonicNanos`, `createRequire`) or that hold the event loop open (`loopHold`,
-     * `stdinActive`), which are loop machinery rather than a feature.
+     * What the Android host binds for real.
+     *
+     * Milestone 3a brought everything a program needs to print, to be told who it is and to
+     * schedule work; 3b brought the filesystem and the module loader, which is what turns the
+     * engine from a thing that runs a string into a thing that runs a PROGRAM.
      */
     val IMPLEMENTED: Set<String> = linkedSetOf(
         // console.log / console.error and the process.stdout / process.stderr sinks under them
@@ -61,24 +62,16 @@ object HostBridge {
         "clearImmediate",
         // Called at TOP LEVEL by the bootstrap (`__perfStart`), so it cannot be a stub.
         "monotonicNanos",
-        // Also called at top level (`globalThis.__mouseRequire`). It must RETURN a function; the
-        // function it returns is what refuses, because module loading is 3b.
+        // Also called at top level (`globalThis.__mouseRequire`). It must RETURN a function, and
+        // since 3b the function it returns is a real CommonJS `require` over node_modules.
         "createRequire",
         // Event-loop bookkeeping: an open handle and a live stdin listener each keep the loop
-        // running. Both are no-ops with nothing to hold in 3a, but they are the loop's own
-        // vocabulary and wiring them now is cheaper than discovering the omission later.
+        // running.
         "loopHold",
         "stdinActive",
-    )
-
-    /**
-     * The rest of the iOS bridge, by the milestone that lands it. These exist as functions that
-     * throw a NAMED refusal: a missing member reads as `undefined is not a function` from inside
-     * the bootstrap with no clue attached, and a silent no-op is worse still (AGENTS.md: "a silent
-     * no-op is a lie").
-     */
-    val DEFERRED: Set<String> = linkedSetOf(
-        // 3b — the filesystem, module loading and the process surface that reads them
+        // 3b — the filesystem. Primitives only: every rule about WHEN they may be called (ENOENT
+        // for a missing parent, EISDIR, EEXIST, refusing to delete a tree without `recursive`)
+        // lives in the shared bootstrap and comes across with it.
         "stat",
         "statfs",
         "readFile",
@@ -88,89 +81,91 @@ object HostBridge {
         "remove",
         "rename",
         "chmodPath",
-        "fsWatch",
-        "fsUnwatch",
-        "rewriteImports",
-        "setRawMode",
+        // 3b — the process surface that reads the machine rather than the program.
         "cpuUsage",
         "loopUtilization",
-        // 3c — sockets, DNS, HTTP, WebSocket, datagram
-        "netConnect",
-        "netConnectUnix",
-        "netListen",
-        "netListenUnix",
-        "netListenHandoff",
-        "netAdopt",
-        "netWrite",
-        "netEnd",
-        "netDestroy",
-        "netDiscard",
-        "netPause",
-        "netResume",
-        "netRef",
-        "netNoDelay",
-        "netKeepAlive",
-        "netResolve",
-        "dnsResolve",
-        "dnsReverse",
-        "dnsService",
-        "dnsDone",
-        "httpRequest",
-        "httpStream",
-        "wsOpen",
-        "wsSend",
-        "wsClose",
-        "dgramBind",
-        "dgramSend",
-        "dgramOption",
-        "dgramMembership",
-        // 3d — crypto, compression, vm, child processes, workers
-        "cryptoHash",
-        "cryptoHmac",
-        "randomBytes",
-        "randomUUID",
-        "pbkdf2",
-        "scrypt",
-        "hkdf",
-        "cipherOpen",
-        "cipherSeal",
-        "keyGenerate",
-        "keyIdentify",
-        "keySign",
-        "keyVerify",
-        "keyAgree",
-        "ecdhGenerate",
-        "ecdhCompute",
-        "rsaGenerate",
-        "rsaSign",
-        "rsaVerify",
-        "rsaEncrypt",
-        "rsaDecrypt",
-        "rsaPrivateEncrypt",
-        "rsaPublicDecrypt",
-        "zlibOpen",
-        "zlibPush",
-        "zlibClose",
-        "zlibTransform",
-        "brotliOpen",
-        "brotliPush",
-        "brotliClose",
-        "brotliTransform",
-        "vmCreate",
-        "vmRun",
-        "shellExec",
-        "spawnNode",
-        "spawnWrite",
-        "spawnEnd",
-        "spawnKill",
-        "spawnRef",
-        "spawnMessage",
-        "ipcSend",
-        "ipcHold",
-        "ipcDisconnect",
-        "portDeliver",
-        "unhandledRejection",
+        // A headless host has no terminal, so this does nothing — which is what the iOS block
+        // does in the same configuration (`self?.tty?.rawModeChanged(raw)` with `tty == nil`).
+        // It is a faithful port of a no-op, not a stub standing in for one.
+        "setRawMode",
     )
+
+    /**
+     * The rest of the iOS bridge: a name, and the REASON there is no Android binding behind it.
+     *
+     * The reason is the point. A missing member reads as `undefined is not a function` from inside
+     * 14,000 lines of someone else's JavaScript with no clue attached; a silent no-op is worse
+     * still (AGENTS.md: "a silent no-op is a lie"); and a refusal that names no reason, or names a
+     * reason that has since stopped being true, is worse than all of them, because it stops
+     * anyone looking again. So the reasons are per-SURFACE and they are graded — `:nodecheck`
+     * calls every name here and fails if one answers, and calls the implemented ones and fails if
+     * one refuses, so the claim cannot rot in either direction.
+     */
+    val DEFERRED: Map<String, String> = buildDeferred(
+        // fs.watch is the one part of the filesystem that did not come with the rest, and the
+        // wall is specific rather than "later": it is not a syscall, it is a subscription.
+        listOf("fsWatch", "fsUnwatch") to
+            "watching a path needs inotify, which on Android is `android.os.FileObserver` — " +
+            "framework, so it cannot live in the pure module this bridge is partitioned in — plus " +
+            "a way for the host to call BACK into JavaScript with each event, which is the same " +
+            "machinery the socket layer needs and does not exist yet",
+        listOf("rewriteImports") to
+            "this rewrites `import(…)` inside source compiled at RUNTIME, and it is one entry " +
+            "point to the ES module transpiler; Android has no transpiler, which is also why " +
+            "`require()` of an ES module refuses with ERR_REQUIRE_ESM rather than loading it",
+        listOf(
+            "netConnect", "netConnectUnix", "netListen", "netListenUnix", "netListenHandoff",
+            "netAdopt", "netWrite", "netEnd", "netDestroy", "netDiscard", "netPause", "netResume",
+            "netRef", "netNoDelay", "netKeepAlive", "netResolve", "dnsResolve", "dnsReverse",
+            "dnsService", "dnsDone", "httpRequest", "httpStream", "wsOpen", "wsSend", "wsClose",
+            "dgramBind", "dgramSend", "dgramOption", "dgramMembership",
+        ) to
+            "net, http, dns, WebSocket and datagram all ride one socket layer, and Android has " +
+            "none: `NodeSockets.swift` is a Dispatch-source engine with no Java NIO counterpart " +
+            "written yet",
+        listOf(
+            "cryptoHash", "cryptoHmac", "randomBytes", "randomUUID", "pbkdf2", "scrypt", "hkdf",
+            "cipherOpen", "cipherSeal", "keyGenerate", "keyIdentify", "keySign", "keyVerify",
+            "keyAgree", "ecdhGenerate", "ecdhCompute", "rsaGenerate", "rsaSign", "rsaVerify",
+            "rsaEncrypt", "rsaDecrypt", "rsaPrivateEncrypt", "rsaPublicDecrypt",
+        ) to
+            "the crypto surface rides CryptoKit, CommonCrypto and Security framework on iOS, and " +
+            "nothing on Android is bound to its JCA counterparts yet",
+        listOf(
+            "zlibOpen", "zlibPush", "zlibClose", "zlibTransform",
+            "brotliOpen", "brotliPush", "brotliClose", "brotliTransform",
+        ) to
+            "zlib rides libz and brotli rides Apple's Compression framework; the Android host " +
+            "binds neither, and `java.util.zip` covers only half of what these carry",
+        listOf("vmCreate", "vmRun") to
+            "node's contextified sandbox is a SECOND JavaScript context sharing one virtual " +
+            "machine, and a WebView gives no way to make another context reachable from this one",
+        listOf(
+            "shellExec", "spawnNode", "spawnWrite", "spawnEnd", "spawnKill", "spawnRef",
+            "spawnMessage", "ipcSend", "ipcHold", "ipcDisconnect", "portDeliver",
+        ) to
+            "a child is either msh running a command or a second engine with live pipes; neither " +
+            "is attached to the Android host, and `process.send` is correctly undefined without " +
+            "the IPC channel that would make it real",
+        listOf("unhandledRejection") to
+            "iOS reports an unhandled promise rejection through JavaScriptCore's " +
+            "`JSGlobalContextSetUnhandledRejectionCallback`; a WebView exposes no equivalent hook, " +
+            "so nothing can call this",
+    )
+
+    /**
+     * Flatten the surface groups, refusing a name that appears in two of them — a duplicate would
+     * silently give one surface's reason to another's method.
+     */
+    private fun buildDeferred(vararg groups: Pair<List<String>, String>): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for ((names, reason) in groups) {
+            for (name in names) {
+                require(out.put(name, reason) == null) { "$name is deferred twice" }
+            }
+        }
+        return out
+    }
 
     private val BRIDGE_REFERENCE = Regex("""\bbridge\.([A-Za-z_][A-Za-z0-9_]*)""")
 
@@ -187,22 +182,27 @@ object HostBridge {
      * on this platform) rather than promising one.
      */
     fun deferredStubScript(): String {
-        val names = DEFERRED.joinToString(",") { jsString(it) }
+        // The reasons are shared by whole surfaces, so they cross once each and the names carry an
+        // index into them. Twenty-nine copies of the socket sentence would be the same text five
+        // times over, and a reader diffing this script would have to compare all of them.
+        val reasons = DEFERRED.values.distinct()
+        val index = reasons.withIndex().associate { (at, reason) -> reason to at }
+        val reasonLiterals = reasons.joinToString(",") { jsString(it) }
+        val nameLiterals = DEFERRED.entries.joinToString(",") { (name, reason) ->
+            jsString(name) + ":" + index[reason]
+        }
         return """
             (function(){
-              var missing = [$names];
-              for (var i = 0; i < missing.length; i++) {
-                (function(name){
-                  globalThis.__mouse[name] = function() {
-                    var error = new Error('__mouse.' + name + ' has no Android host binding: the '
-                      + 'WebView host implements the console/process/timer bridge, and this call '
-                      + 'belongs to a surface (fs, modules, sockets, crypto, children) that is not '
-                      + 'wired to it');
-                    error.code = 'ERR_MOUSE_NO_HOST_BINDING';
-                    throw error;
-                  };
-                })(missing[i]);
-              }
+              var reasons = [$reasonLiterals];
+              var missing = {$nameLiterals};
+              Object.keys(missing).forEach(function(name){
+                var reason = reasons[missing[name]];
+                globalThis.__mouse[name] = function() {
+                  var error = new Error('__mouse.' + name + ' has no Android host binding — ' + reason);
+                  error.code = 'ERR_MOUSE_NO_HOST_BINDING';
+                  throw error;
+                };
+              });
             })();
         """.trimIndent()
     }

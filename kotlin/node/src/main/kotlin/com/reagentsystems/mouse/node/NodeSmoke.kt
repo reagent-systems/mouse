@@ -32,14 +32,16 @@ object NodeSmoke {
         let ticks = 0;
         const every = setInterval(function(){ if (++ticks === 3) clearInterval(every); }, 2);
 
-        // A surface with no Android host binding must refuse BY NAME. `__mouseRequire` is what
-        // `bridge.createRequire('/')` handed back while the bootstrap loaded; `__mouse.readFile`
-        // is one of the generated stubs.
+        // `__mouseRequire` is what `bridge.createRequire('/')` handed back while the bootstrap
+        // loaded — the referrer for source compiled at runtime, which has no other way to name
+        // one. Since 3b it is a real loader, so a core module comes back rather than a refusal.
         let requireCode = 'no-throw';
-        try { globalThis.__mouseRequire('fs'); }
+        try { requireCode = typeof globalThis.__mouseRequire('fs').readFileSync; }
         catch (e) { requireCode = e.code || e.message; }
+        // A surface with no Android host binding must still refuse BY NAME. `netConnect` is one
+        // of the generated stubs; `NodeFsSmoke` probes the whole list, both directions.
         let refusal = 'no-throw';
-        try { globalThis.__mouse.readFile('/x'); }
+        try { globalThis.__mouse.netConnect('127.0.0.1', 1); }
         catch (e) { refusal = e.code || e.message; }
 
         setTimeout(function(){
@@ -80,7 +82,7 @@ object NodeSmoke {
         Triple("argv", "/usr/local/bin/node,/nodecheck.js,alpha", "process.argv is the host's"),
         Triple("env", "1", "process.env is the host's"),
         Triple("cwd", "/", "process.cwd() is the host's"),
-        Triple("require", "MODULE_NOT_FOUND", "require() refuses by name, not with a TypeError"),
+        Triple("require", "function", "the bootstrap's own require reaches a core module"),
         Triple("refusal", "ERR_MOUSE_NO_HOST_BINDING", "a deferred bridge surface refuses with its code"),
     )
 

@@ -432,7 +432,16 @@ one verdict line ending in MATCH or MISMATCH. There is no JUnit
 The engines they gate live in `kotlin/terminal/`, `kotlin/packages/` and
 `kotlin/node/`, pure Kotlin/JVM modules with no Android dependency, for the
 reason phase T learned on iOS: logic that shares a file with UI is logic no
-harness can reach.
+harness can reach. **The Node layer's Kotlin half is gated against REAL `node`,
+not against expectations**: `NodeFs.stat` against node's own `Stats` for the
+same file, and `ModuleResolver` against `require.resolve` case by case in one
+real tree. A resolver graded against hand-written expectations is graded against
+whatever its author believed node does — the same disposition `:pkgcheck` takes
+when it proves an install layout by making node's own resolver agree with it.
+The JavaScript loader in `node-host.js` is gated separately, against a stand-in
+host that resolves through node's resolver rather than through a second copy of
+ours; grading our loader against our own resolver would prove nothing about
+either, and the two halves meet for the first time on a device.
 `:packages` brings its own JSON reader/writer — `org.json` is in the Android
 framework but not the JDK, so using it would cost a third-party artifact AND
 stop the module building off-device. `TarGz` lives there too, not in
@@ -446,10 +455,20 @@ trap `verify/pkg` documents from the other side.
 Node layer — is UNDER WAY on the WebView path** (`plans/android-parity.md`
 milestone 3), which is the measured split: the engine is 72 % portable JS
 bootstrap, 28 % host bridge, and WebView + `@JavascriptInterface` is the
-parity route that keeps invariant #4. Milestone 3a is in — the bootstrap,
-`console`, `process` and timers. Because `node` is only a foundation there,
-the msh commands that drive the installer (`npm`/`npx`/`npm run`) stay
-unported: they exist to run what they install.
+parity route that keeps invariant #4. Milestones 3a and 3b are in — the
+bootstrap, `console`, `process`, timers, the filesystem and a real CommonJS
+`require` over `node_modules`. Because `node` still has no sockets there, the
+msh commands that drive the installer (`npm`/`npx`/`npm run`) stay unported:
+they exist to run what they install.
+**Every deferred bridge name carries its OWN reason, and both directions are
+probed.** A refusal that names no reason, or names one that has stopped being
+true, is worse than a gap — it stops anyone looking again, which is what the
+`cluster` "single process" claim did on iOS. So `HostBridge.DEFERRED` is a map
+from name to reason, grouped by surface; the generated stubs carry the reason
+into the error message; and the shared smoke calls every deferred name (which
+must refuse with `ERR_MOUSE_NO_HOST_BINDING`) AND every newly implemented one
+(which must answer). A capability that quietly starts working fails the gate
+just as a regression does.
 **The Android bootstrap is a COPY, and the gate is what keeps it honest.**
 `kotlin/app/src/main/assets/node-bootstrap.js` is `NodeEngine.swift`'s raw
 string, verbatim; `:nodecheck` re-extracts it from the shipping Swift file on
