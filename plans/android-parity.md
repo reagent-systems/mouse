@@ -63,13 +63,21 @@ emulator (AVDs present: `Pixel_9`, `Medium_Phone_API_36.0`, `Medium_Tablet`;
 SDK at `~/Library/Android/sdk`, JDK 21; nothing is on PATH — export
 `ANDROID_HOME` and use `$ANDROID_HOME/platform-tools/adb`).
 
-**1 — Phase T: the terminal screen.** Port `TerminalScreen.swift`,
-`TerminalWidth.swift`, `AnsiParser` and the `TerminalProgram` contract to
-Kotlin. This is pure logic with no platform surface: it should be a close
-translation, and the iOS screen corpus + pyte cross-check are the gate.
-Then the Compose grid renderer and key routing, and the key strip
-(`up down left right esc tab canc`) — Android soft keyboards have no arrows
-either.
+**1 — Phase T: the terminal screen. DONE.** `TerminalScreen.swift`,
+`TerminalWidth.swift`, `AnsiParser` and the `TerminalProgram` contract are
+`kotlin/terminal/`, gated by `:screencheck` against the iOS corpus and the
+pyte cross-check — 202 checks, reading `verify/` fixtures directly so the
+platforms cannot drift. `PagerProgram` came across with them and carries the
+same 20 assertions `verify/main.swift` makes; `TopProgram` did not, because
+Kotlin msh has no `top` builtin to supply its snapshot.
+
+The platform half is in `kotlin/app/Terminal.kt`: session-side program
+hosting (screen + parser, launch, key routing, grid sizing, the inline-TUI
+last frame joining the scrollback), a Compose grid renderer (run-length
+styled rows, xterm 256-color, identity keyed on `screenGeneration` — the
+`.id()` fix from iOS), and the key strip `up down left right esc tab canc`.
+`less` reaches it through `Context.launchProgram`. The container no longer
+moves when the soft keyboard opens (`adjustNothing`), matching iOS.
 
 **2 — Phase F: the package manager. DONE.** `PackageManager.swift` is
 `kotlin/packages/` — semver, npm registry, hoisting resolver, integrity,
