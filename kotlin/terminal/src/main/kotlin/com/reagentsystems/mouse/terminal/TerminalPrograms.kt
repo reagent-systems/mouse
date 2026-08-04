@@ -212,3 +212,103 @@ object TerminalTty {
         return result.toString()
     }
 }
+
+/**
+ * `less`/`more` — the pager, and the proof program for the screen model. Wraps long lines,
+ * scrolls by line or page, and pins an inverse status bar to the bottom row, exactly the way
+ * a real pager exercises a real terminal.
+ *
+ * A direct port of `PagerProgram` in swift/Mouse/TerminalPrograms.swift, down to the key
+ * bindings and the status-bar text, so `verify/`'s pager fixtures gate both platforms.
+ */
+class PagerProgram(text: String, override val title: String) : TerminalProgram {
+    override val rendersScreen = true
+
+    private val lines: List<String> = (if (text.endsWith("\n")) text.dropLast(1) else text).split("\n")
+    private var wrapped: List<String> = emptyList()
+
+    /** First visible wrapped row. */
+    private var top = 0
+    private var rows = 24
+    private var columns = 80
+    private var io: TerminalProgramIO? = null
+
+    override fun start(io: TerminalProgramIO) {
+        this.io = io
+        rows = io.rows
+        columns = io.columns
+        rewrap()
+        io.write("\u001B[?1049h\u001B[?25l")
+        draw()
+    }
+
+    override fun input(text: String) {
+        when (text) {
+            "q", "\u0003" -> quit()
+            "j", "\r", "\n", "\u001B[B" -> scroll(1)
+            "k", "\u001B[A" -> scroll(-1)
+            " ", "f", "\u001B[6~" -> scroll(pageRows)
+            "b", "\u001B[5~" -> scroll(-pageRows)
+            "d" -> scroll(maxOf(1, pageRows / 2))
+            "u" -> scroll(-maxOf(1, pageRows / 2))
+            "g" -> { top = 0; draw() }
+            "G" -> { top = maxTop; draw() }
+        }
+    }
+
+    override fun resize(rows: Int, columns: Int) {
+        this.rows = rows
+        this.columns = columns
+        rewrap()
+        top = minOf(top, maxTop)
+        draw()
+    }
+
+    /** Rows available to content — everything above the status bar. */
+    private val pageRows: Int get() = maxOf(1, rows - 1)
+    private val maxTop: Int get() = maxOf(0, wrapped.size - pageRows)
+
+    private fun scroll(delta: Int) {
+        val target = minOf(maxTop, maxOf(0, top + delta))
+        if (target == top) return
+        top = target
+        draw()
+    }
+
+    private fun rewrap() {
+        val out = ArrayList<String>(lines.size)
+        for (line in lines) {
+            if (line.length <= columns || columns <= 0) { out.add(line); continue }
+            var rest = line
+            while (rest.length > columns) {
+                out.add(rest.substring(0, columns))
+                rest = rest.substring(columns)
+            }
+            out.add(rest)
+        }
+        wrapped = if (out.isEmpty()) listOf("") else out
+    }
+
+    private fun draw() {
+        val io = this.io ?: return
+        val out = StringBuilder("\u001B[H")
+        for (row in 0 until pageRows) {
+            val index = top + row
+            out.append("\u001B[2K")
+            if (index < wrapped.size) out.append(wrapped[index])
+            out.append("\r\n")
+        }
+        val bottom = minOf(top + pageRows, wrapped.size)
+        val percent = if (maxTop == 0) 100 else Math.round(top.toDouble() / maxTop * 100).toInt()
+        var status = " $title  ${top + 1}-$bottom/${wrapped.size}  $percent%  j/k space/b g/G q"
+        if (status.length > columns) status = status.substring(0, columns)
+        status += " ".repeat(maxOf(0, columns - status.length))
+        out.append("\u001B[7m").append(status).append("\u001B[27m")
+        io.write(out.toString())
+    }
+
+    private fun quit() {
+        io?.write("\u001B[?25h\u001B[?1049l")
+        io?.exit()
+    }
+}

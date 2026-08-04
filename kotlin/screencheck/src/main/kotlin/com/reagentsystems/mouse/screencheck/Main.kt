@@ -3,6 +3,7 @@ package com.reagentsystems.mouse.screencheck
 import com.reagentsystems.mouse.terminal.AnsiColor
 import com.reagentsystems.mouse.terminal.AnsiParser
 import com.reagentsystems.mouse.terminal.CellStyle
+import com.reagentsystems.mouse.terminal.PagerProgram
 import com.reagentsystems.mouse.terminal.TerminalKey
 import com.reagentsystems.mouse.terminal.TerminalProgram
 import com.reagentsystems.mouse.terminal.TerminalProgramIO
@@ -464,10 +465,11 @@ private fun keyCorpus() {
 // ------------------------------------------------- the TerminalProgram contract ---------------
 
 /**
- * iOS gates the program contract with PagerProgram and TopProgram. Those are the pager and the
- * process monitor, not the screen, and they are deliberately NOT ported yet — so the contract
- * itself is gated with the smallest program that can exercise every part of it: stdout draws,
- * stdin is keys, resize is SIGWINCH, exit restores.
+ * iOS gates the program contract with PagerProgram and TopProgram. The pager is now ported and
+ * gated below against the same assertions verify/main.swift makes; TopProgram is not, because
+ * Kotlin msh has no `top` builtin to supply its snapshot. The contract itself keeps its own
+ * smallest-possible program, which exercises every part of it: stdout draws, stdin is keys,
+ * resize is SIGWINCH, exit restores.
  */
 private class ContractProgram : TerminalProgram {
     override val title = "contract"
@@ -525,6 +527,74 @@ private fun programContract() {
     check(exited, "program exits on q")
     check(!screen.isAlternate, "exit restores the normal screen")
     check(screen.cursorVisible, "exit restores the cursor")
+}
+
+// ------------------------------------------------- verify/main.swift: PagerProgram ------------
+
+/** The pager's harness rig, same shape as `programIO` in verify/main.swift. */
+private class PagerRig(rows: Int, columns: Int) {
+    val screen = TerminalScreen(rows = rows, columns = columns)
+    private val parser = AnsiParser(screen)
+    var exited = false; private set
+    val io = TerminalProgramIO(
+        rows = rows,
+        columns = columns,
+        write = { parser.feed(it) },
+        exit = { exited = true },
+    )
+}
+
+private fun pagerProgram() {
+    // -- paging, ends, quit --
+    run {
+        val text = (1..30).joinToString("\n") { "line%02d".format(it) }
+        val rig = PagerRig(rows = 10, columns = 20)
+        val pager = PagerProgram(text, "less demo")
+        pager.start(rig.io)
+        check(rig.screen.isAlternate, "pager enters alt screen")
+        check(!rig.screen.cursorVisible, "pager hides cursor")
+        checkEqual(rig.screen.text(0), "line01", "pager first line")
+        checkEqual(rig.screen.text(8), "line09", "pager fills page")
+        check(rig.screen.text(9).contains("1-9/30"), "pager status range")
+        check(rig.screen.grid[9][0].style.inverse, "pager status is inverse")
+        pager.input(" ")
+        checkEqual(rig.screen.text(0), "line10", "pager pages forward")
+        pager.input("G")
+        checkEqual(rig.screen.text(0), "line22", "pager jumps to end")
+        checkEqual(rig.screen.text(8), "line30", "pager shows last line")
+        pager.input("k")
+        checkEqual(rig.screen.text(0), "line21", "pager scrolls back a line")
+        pager.input("g")
+        checkEqual(rig.screen.text(0), "line01", "pager jumps home")
+        pager.input("q")
+        check(rig.exited, "pager exits on q")
+        check(!rig.screen.isAlternate, "pager leaves alt screen")
+        check(rig.screen.cursorVisible, "pager restores cursor")
+    }
+    // -- wrapping and resize --
+    run {
+        val rig = PagerRig(rows = 5, columns = 10)
+        val pager = PagerProgram("abcdefghijKLMNOPQRST\nnext", "less wrap")
+        pager.start(rig.io)
+        checkEqual(rig.screen.text(0), "abcdefghij", "pager wraps long line (head)")
+        checkEqual(rig.screen.text(1), "KLMNOPQRST", "pager wraps long line (tail)")
+        checkEqual(rig.screen.text(2), "next", "pager continues after wrap")
+        // Twice around the screen resize, exactly as verify/main.swift does it: the program is
+        // told, the grid is resized under it, then it repaints into the new geometry.
+        pager.resize(rows = 5, columns = 20)
+        rig.screen.resize(rows = 5, columns = 20)
+        pager.resize(rows = 5, columns = 20)
+        checkEqual(rig.screen.text(0), "abcdefghijKLMNOPQRST", "pager rewraps on resize")
+        checkEqual(rig.screen.text(1), "next", "pager rewrap collapses rows")
+    }
+    // -- interrupt quits --
+    run {
+        val rig = PagerRig(rows = 5, columns = 10)
+        val pager = PagerProgram("x", "less int")
+        pager.start(rig.io)
+        pager.input("\u0003")
+        check(rig.exited, "pager exits on ^C")
+    }
 }
 
 // ------------------------------------------------------------- verify/altscreen ---------------
@@ -771,13 +841,14 @@ fun main() {
     screenCorpus()
     keyCorpus()
     programContract()
+    pagerProgram()
     altScreenCorpus()
     widthCorpus()
     wideTuiCorpus()
     ttyCorpus()
 
     if (failures == 0) {
-        println("SCREEN CORPUS: $checks checks — grid, parser, widths, keys, program contract, pyte frame — MATCH")
+        println("SCREEN CORPUS: $checks checks — grid, parser, widths, keys, program contract, pager, pyte frame — MATCH")
     } else {
         println("SCREEN CORPUS: $failures of $checks checks disagree with the iOS gate — MISMATCH")
         exitProcess(1)
