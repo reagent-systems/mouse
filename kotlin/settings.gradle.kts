@@ -21,3 +21,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Mouse"
 include(":app")
+// The terminal screen engine and its headless gate. Both are pure Kotlin/JVM — see
+// terminal/build.gradle.kts for why the screen does not live inside :app.
+include(":terminal")
+include(":screencheck")

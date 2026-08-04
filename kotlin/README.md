@@ -28,6 +28,34 @@ Compose + coroutines — even tar/gzip (`GZIPInputStream` + a hand-written tar
 reader), JSON (`org.json`), HTTP (`HttpURLConnection`), and checksums
 (`MessageDigest`) are the SDK's own.
 
+## Modules
+
+| Module | What it is |
+|---|---|
+| `:app` | The Android app — Compose, the carousel, workspaces, git, GitHub, `msh` |
+| `:terminal` | The terminal screen engine: grid, ANSI parser, Unicode width table, key encoding. Pure Kotlin/JVM — no Compose, no `android.*`, kotlin-stdlib only |
+| `:screencheck` | The headless gate for `:terminal` |
+
+`:terminal` is a module rather than a file in `:app` for the reason phase T
+learned on iOS: logic that shares a file with UI is logic no harness can
+reach. It runs on a JVM, so the screen is gated without an emulator.
+
+## Verifying the terminal screen
+
+```sh
+cd kotlin
+ANDROID_HOME=~/Library/Android/sdk ./gradlew :screencheck:run
+```
+
+The corpus is the iOS one ported assertion for assertion (`verify/main.swift`,
+`verify/altscreen`, `verify/widechars`, `verify/widetui`, `verify/tty`),
+reading the same checked-in fixtures — `verify/widechars/widths.txt` and the
+captured claude-code frame `verify/tty/cc-frame.bin` with pyte's rendering of
+it. Two platforms gated by different corpora is a parity claim nobody can
+falsify. There is no JUnit (zero third-party dependencies): the harness is a
+`main()` printing one verdict line ending in MATCH or MISMATCH, exiting
+non-zero on mismatch, like the Swift harnesses in `verify/`.
+
 ## Running on an emulator
 
 ### Android Studio (easiest)
