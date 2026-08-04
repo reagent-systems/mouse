@@ -2399,6 +2399,7 @@ fun main(args: Array<String>) {
         zlibCorpus(node, scratch)
         cipherCorpus(node, scratch)
         keyIdentifyCorpus(node, scratch)
+        keySignCorpus(node, scratch)
         esmCorpus(node, scratch)
         socketsCorpus(node)
         dnsCorpus(node, scratch)
@@ -2418,7 +2419,8 @@ fun main(args: Array<String>) {
                 "partition, process globals, event loop, cpu time, filesystem and module " +
                 "resolution vs real node, sockets vs real node peers on a real wire, the DNS wire " +
                 "format and resolvers vs real node, the TLS transport's streaming, key identity " +
-                "across PKCS#8/SEC1/PKCS#1/SPKI vs real node, node --check, " +
+                "across PKCS#8/SEC1/PKCS#1/SPKI vs real node, EC/RSA/Ed25519 signing graded both " +
+                "directions against real node, node --check, " +
                 "load smoke, verify/fsparity, verify/neterrors, verify/reqsock — MATCH",
         )
     } else {
@@ -2876,6 +2878,190 @@ private fun keyIdentifyCorpus(node: String?, parent: File) {
     )) {
         checkEqual(NodeKeys.identify(bad).type, "unknown", "malformed key — $label — is unknown")
     }
+}
+
+/**
+ * Signing and verifying against real node — BOTH DIRECTIONS, which is the only arrangement that
+ * catches a self-consistent mistake.
+ *
+ * A signature scheme that is wrong in a stable way verifies its own output perfectly. So node signs
+ * and this verifies; this signs and node verifies. Only the crossing checks agreement, and only the
+ * crossing catches an encoding that is internally coherent and not what node produces — which is
+ * exactly the failure mode `ieee-p1363` invites, since raw and DER signatures of the same key over
+ * the same bytes are both "valid" to something that only ever talks to itself.
+ *
+ * ECDSA is randomised, so signatures cannot be compared byte for byte the way the cipher corpus
+ * compares ciphertext. Verification is the equality that exists. RSA PKCS#1 v1.5 IS deterministic,
+ * and is compared byte for byte as well, because for that scheme an identical signature is a
+ * strictly stronger claim than a passing verify.
+ */
+private fun keySignCorpus(node: String?, parent: File) {
+    if (node == null) {
+        check(true, "key signing corpus skipped — no real node to grade against")
+        return
+    }
+    val scratch = File(parent, "keysign").also { it.mkdirs() }
+    val message = "the quick brown fox  with a NUL and ÿ a high byte"
+    val messageBase64 = Base64.getEncoder().encodeToString(message.toByteArray(Charsets.UTF_8))
+
+    // node generates the keys, signs the message with each, and reports what it produced. The
+    // `raw` column is node's `dsaEncoding: 'ieee-p1363'`, the flat r||s form the JCA never emits.
+    File(scratch, "plan.js").writeText(
+        """
+        const crypto = require('crypto');
+        const message = Buffer.from(${Json.write(messageBase64)}, 'base64');
+        const out = [];
+        function emit(name, priv, pub, algorithm, dsaEncoding) {
+          const options = dsaEncoding ? { key: priv, dsaEncoding } : priv;
+          const signature = crypto.sign(algorithm, message, options);
+          out.push([name, algorithm || '', dsaEncoding || '', Buffer.from(priv).toString('base64'),
+                    Buffer.from(pub).toString('base64'), signature.toString('base64')].join('\t'));
+        }
+        for (const curve of ['prime256v1', 'secp384r1', 'secp521r1']) {
+          const k = crypto.generateKeyPairSync('ec', { namedCurve: curve,
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+          for (const digest of ['sha1', 'sha256', 'sha384', 'sha512']) {
+            emit('ec ' + curve, k.privateKey, k.publicKey, digest, null);
+          }
+          emit('ec ' + curve + ' p1363', k.privateKey, k.publicKey, 'sha256', 'ieee-p1363');
+          // The same key as SEC1, so the wrapper this builds is exercised and not just PKCS#8.
+          const sec1 = crypto.createPrivateKey(k.privateKey)
+            .export({ type: 'sec1', format: 'pem' });
+          emit('ec ' + curve + ' sec1', sec1, k.publicKey, 'sha256', null);
+        }
+        {
+          const k = crypto.generateKeyPairSync('ed25519', {
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+          emit('ed25519', k.privateKey, k.publicKey, null, null);
+        }
+        for (const bits of [2048, 3072]) {
+          const k = crypto.generateKeyPairSync('rsa', { modulusLength: bits,
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+          for (const digest of ['sha1', 'sha256', 'sha512']) {
+            emit('rsa ' + bits, k.privateKey, k.publicKey, digest, null);
+          }
+          // PKCS#1 on both sides, so both re-wrappers are exercised.
+          const p1 = crypto.createPrivateKey(k.privateKey).export({ type: 'pkcs1', format: 'pem' });
+          const pub1 = crypto.createPublicKey(k.publicKey).export({ type: 'pkcs1', format: 'pem' });
+          out.push(['rsa ' + bits + ' pkcs1', 'sha256', '', Buffer.from(p1).toString('base64'),
+                    Buffer.from(pub1).toString('base64'),
+                    crypto.sign('sha256', message, p1).toString('base64')].join('\t'));
+        }
+        console.log(out.join('\n'));
+        """.trimIndent(),
+    )
+    val (status, text) = run(listOf(node, "plan.js"), scratch)
+    if (status != 0) {
+        check(false, "real node signed the corpus:\n${text.take(600)}")
+        return
+    }
+
+    val rows = text.trim().lines().mapNotNull { line ->
+        val parts = line.split("\t")
+        if (parts.size == 6) parts else null
+    }
+    // 18 EC (3 curves × {4 digests, p1363, sec1}) + 1 ed25519 + 8 RSA (2 sizes × {3 digests, pkcs1}).
+    check(rows.size == 27, "the signing corpus is complete — ${rows.size} rows, expected 27")
+
+    val ours = ArrayList<String>()
+    for (row in rows) {
+        val name = row[0]
+        val algorithm = row[1]
+        val dsaEncoding = row[2]
+        val publicBase64 = row[4]
+        val expected = row[5]
+        val privatePem = String(Base64.getDecoder().decode(row[3]), Charsets.UTF_8)
+        val publicPem = String(Base64.getDecoder().decode(publicBase64), Charsets.UTF_8)
+        val raw = dsaEncoding == "ieee-p1363"
+
+        // node signed → this verifies. With the public key, and again with the private one,
+        // because node accepts either and so must this.
+        check(
+            NodeKeys.verify(publicPem, messageBase64, expected, algorithm, raw),
+            "node's signature verifies here — $name/$algorithm${if (raw) " p1363" else ""}",
+        )
+        // node accepts a PRIVATE key where a public one would do, and so does this — except for
+        // Ed25519, where the public half cannot be recovered from the encoded seed without curve
+        // arithmetic this deliberately does not implement. That divergence is asserted here rather
+        // than left for someone to hit: if it is ever closed, this check fails and says so.
+        val fromPrivate = NodeKeys.verify(privatePem, messageBase64, expected, algorithm, raw)
+        if (name == "ed25519") {
+            check(
+                !fromPrivate,
+                "ed25519 refuses to verify from a private key — recovering its public half needs " +
+                    "a scalar multiplication the JCA does not expose",
+            )
+        } else {
+            check(fromPrivate, "…and verifies against the private key too — $name/$algorithm")
+        }
+
+        // this signs → node verifies. Collected and handed over in one batch below.
+        val mine = NodeKeys.sign(privatePem, messageBase64, algorithm, raw)
+        check(mine != null, "this signs — $name/$algorithm${if (raw) " p1363" else ""}")
+        ours.add(listOf(name, algorithm, dsaEncoding, publicBase64, mine ?: "").joinToString("\t"))
+
+        // RSA PKCS#1 v1.5 is deterministic: the bytes themselves must match, not merely verify.
+        if (name.startsWith("rsa")) {
+            checkEqual(mine ?: "<null>", expected, "byte-identical to node's — $name/$algorithm")
+        }
+    }
+
+    File(scratch, "ours.tsv").writeText(ours.joinToString("\n"))
+    File(scratch, "verify.js").writeText(
+        """
+        const crypto = require('crypto');
+        const fs = require('fs');
+        const message = Buffer.from(${Json.write(messageBase64)}, 'base64');
+        const out = [];
+        for (const line of fs.readFileSync('ours.tsv', 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          const [name, algorithm, dsaEncoding, pub, signature] = line.split('\t');
+          const pem = Buffer.from(pub, 'base64').toString('utf8');
+          let ok = false;
+          try {
+            const key = dsaEncoding ? { key: pem, dsaEncoding } : pem;
+            ok = crypto.verify(algorithm || null, message, key, Buffer.from(signature, 'base64'));
+          } catch (e) { ok = false; }
+          out.push(name + '/' + algorithm + (dsaEncoding ? ' p1363' : '') + '\t' + ok);
+        }
+        console.log(out.join('\n'));
+        """.trimIndent(),
+    )
+    val (verifyStatus, verifyText) = run(listOf(node, "verify.js"), scratch)
+    if (verifyStatus != 0) {
+        check(false, "real node verified our signatures:\n${verifyText.take(600)}")
+        return
+    }
+    var verified = 0
+    for (line in verifyText.trim().lines()) {
+        val parts = line.split("\t")
+        if (parts.size != 2) continue
+        verified += 1
+        check(parts[1] == "true", "real node verifies our signature — ${parts[0]}")
+    }
+    check(verified == rows.size, "node graded every signature — $verified of ${rows.size}")
+
+    // A tampered message must NOT verify. Without this the whole corpus would pass against a
+    // `verify` that returned true unconditionally.
+    val tampered = Base64.getEncoder().encodeToString("a different message".toByteArray())
+    val first = rows.first()
+    check(
+        !NodeKeys.verify(
+            String(Base64.getDecoder().decode(first[4]), Charsets.UTF_8),
+            tampered, first[5], first[1], false,
+        ),
+        "a signature over other bytes is refused",
+    )
+    check(
+        !NodeKeys.verify(
+            String(Base64.getDecoder().decode(first[4]), Charsets.UTF_8),
+            messageBase64, Base64.getEncoder().encodeToString(ByteArray(16)), first[1], false,
+        ),
+        "a malformed signature is refused rather than thrown on",
+    )
 }
 
 private fun zlibCorpus(node: String?, parent: File) {
