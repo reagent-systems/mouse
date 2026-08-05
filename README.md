@@ -3,7 +3,7 @@
 [![CI](https://github.com/reagent-systems/mouse/actions/workflows/ci.yml/badge.svg)](https://github.com/reagent-systems/mouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 
-**A coding IDE built for a phone — not shrunk from a desktop.**
+**The coding IDE built for a phone — not shrunk from a desktop.**
 
 Mouse is a native mobile app (iOS and Android) where an entire development
 environment lives in a gesture-driven shell: you swipe between editors, pinch
