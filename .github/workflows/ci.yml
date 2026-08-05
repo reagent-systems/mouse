@@ -11,25 +11,103 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ios:
-    name: Build (iOS Simulator)
-    runs-on: macos-15
+  # The four Kotlin harnesses. This is the repository's actual safety net — the platform builds
+  # below only prove the code COMPILES, and a green compile has hidden every interesting bug this
+  # project has had.
+  #
+  # THE REFERENCE TOOLS ARE NOT OPTIONAL HERE. Each harness grades against a real implementation —
+  # real `node`, real `pnpm`, real `/bin/sh` — and each SKIPS GRACEFULLY when it cannot find one,
+  # by design, so that a developer without pnpm still gets a useful run. On a build machine that
+  # same kindness is a trap: the suite reports MATCH having checked almost nothing.
+  #
+  # Grepping for the word "skipped" does NOT catch that, which was worth finding out before
+  # trusting it: a skip is recorded as `check(true, "… skipped — no real node …")`, and `check`
+  # prints only on FAILURE. The message never reaches the log, so such a guard is dead code that
+  # reads like protection.
+  #
+  # The COUNT is the signal that actually moves. A skipped corpus contributes one check where it
+  # would have contributed dozens, so the totals below are floors, and the run fails if any
+  # harness comes in under its own. That also catches a corpus being deleted or quietly shrinking,
+  # which no MATCH/MISMATCH check ever would.
+  gates:
+    name: Gates (screen, packages, node, shell)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install xcodegen
-        run: brew install xcodegen
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
 
-      - name: Generate project
-        working-directory: swift
-        run: xcodegen generate
+      # `:nodecheck` diffs its fixtures against real node v22 — the version the fixtures were
+      # generated from. A different major would report differences that are node's, not ours.
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
-      - name: Build
-        working-directory: swift
+      - name: Install pnpm
+        run: npm install --global pnpm
+
+      - name: Record the reference versions
         run: |
-          xcodebuild -project Mouse.xcodeproj -scheme Mouse \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO build
+          echo "node   $(node --version)"
+          echo "pnpm   $(pnpm --version)"
+          echo "sh     $(/bin/sh --version 2>&1 | head -1 || echo 'POSIX sh')"
+
+      - name: Run the gates
+        working-directory: kotlin
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon \
+            :screencheck:run :pkgcheck:run :nodecheck:run :shellcheck:run \
+            2>&1 | tee gates.log
+
+      # Floors, not equalities: the counts only ever go UP as corpora grow, and a build should not
+      # go red because someone added checks. Raise these when a harness grows enough to be worth
+      # protecting at the new level.
+      - name: Check the verdicts and the corpus sizes
+        working-directory: kotlin
+        env:
+          FLOOR_SCREEN: 238
+          FLOOR_PACKAGE: 140
+          FLOOR_NODE: 874
+          FLOOR_SHELL: 25
+        run: |
+          if grep -q 'MISMATCH' gates.log; then
+            echo "::error::a harness reported MISMATCH"
+            grep -E 'FAIL:|MISMATCH' gates.log | head -40
+            exit 1
+          fi
+
+          # "SCREEN CORPUS: 238 checks — … — MATCH", "SHELL LANGUAGE: 25 scripts — … — MATCH /bin/sh"
+          size() { grep -oE "^$1: [0-9]+ (checks|scripts)" gates.log | grep -oE '[0-9]+' | head -1; }
+          failed=0
+          for pair in "SCREEN CORPUS:$FLOOR_SCREEN" "PACKAGE MANAGER:$FLOOR_PACKAGE" \
+                      "NODE LAYER:$FLOOR_NODE" "SHELL LANGUAGE:$FLOOR_SHELL"; do
+            name="${pair%:*}"; floor="${pair##*:}"
+            got="$(size "$name")"
+            if [ -z "$got" ]; then
+              echo "::error::$name never reported a verdict — it did not run"
+              failed=1
+            elif [ "$got" -lt "$floor" ]; then
+              echo "::error::$name ran $got checks, below its floor of $floor — a corpus was skipped or removed"
+              failed=1
+            else
+              echo "$name: $got (floor $floor)"
+            fi
+          done
+          exit $failed
+
+      - name: Keep the gate log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-log
+          path: kotlin/gates.log
 
   android:
     name: Build (Android)
@@ -42,7 +120,73 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
 
+      # The runner image ships the Android SDK and sets ANDROID_HOME, so there is nothing to
+      # install; `local.properties` is deliberately not committed, which is what lets that work.
       - name: Build debug APK
         working-directory: kotlin
         run: ./gradlew assembleDebug --no-daemon
+
+      # The `release` build type has no signingConfig, so this is `app-release-unsigned.apk` and
+      # cannot be installed as it stands. It is built anyway because it is the variant that
+      # actually gets shipped, and a release-only compile failure should surface on the commit
+      # that caused it rather than at tag time.
+      - name: Build release APK (unsigned)
+        working-directory: kotlin
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Collect the APKs
+        run: |
+          mkdir -p out
+          cp kotlin/app/build/outputs/apk/debug/app-debug.apk \
+             "out/mouse-android-debug-${GITHUB_SHA::7}.apk"
+          cp kotlin/app/build/outputs/apk/release/app-release-unsigned.apk \
+             "out/mouse-android-release-unsigned-${GITHUB_SHA::7}.apk"
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: out/*.apk
+
+  ios:
+    name: Build (iOS Simulator)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      # The Xcode project is generated, not committed — AGENTS.md: after adding or removing a
+      # source file, `xcodegen generate`. Doing it here means CI builds the file list the repo
+      # actually declares rather than one somebody remembered to regenerate.
+      - name: Generate project
+        working-directory: swift
+        run: xcodegen generate
+
+      # Simulator, unsigned: a device build needs Apple signing secrets, which RELEASING.md
+      # records as not yet configured. This still compiles every line and links the app.
+      - name: Build
+        working-directory: swift
+        run: |
+          xcodebuild -project Mouse.xcodeproj -scheme Mouse \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Zip the simulator app
+        run: |
+          APP=$(find swift/build -name 'Mouse.app' -path '*Debug-iphonesimulator*' | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::no Mouse.app was produced"
+            exit 1
+          fi
+          ditto -c -k --keepParent "$APP" "mouse-ios-sim-${GITHUB_SHA::7}.zip"
+          ls -lh mouse-ios-sim-*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-sim-app
+          path: mouse-ios-sim-*.zip
