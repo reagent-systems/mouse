@@ -68,6 +68,23 @@ import kotlin.system.exitProcess
 private var failures = 0
 private var checks = 0
 
+/**
+ * Run one corpus and report how many checks it contributed.
+ *
+ * The totals are what the CI floor watches, and a total that moves between machines is
+ * unactionable on its own: the first Linux run came in one check short and reading the source for
+ * a likely culprit produced a WRONG answer, twice over. A per-corpus line turns "873 not 874" into
+ * the name of the corpus that differs, which is a thing that can be fixed rather than guessed at.
+ *
+ * Printed on every run, because the cost is one line each and the information is only useful when
+ * you did not know in advance that you would need it.
+ */
+private fun corpus(name: String, body: () -> Unit) {
+    val before = checks
+    body()
+    println("  corpus $name: ${checks - before}")
+}
+
 private fun check(condition: Boolean, label: String) {
     checks += 1
     if (!condition) {
@@ -2393,21 +2410,21 @@ fun main(args: Array<String>) {
     try {
         val node = nodeBinary()
         fsCorpus(node, scratch)
-        resolverCorpus(node, scratch)
-        cryptoCorpus(node, scratch)
-        rewriteImportsCorpus()
-        zlibCorpus(node, scratch)
-        cipherCorpus(node, scratch)
-        keyIdentifyCorpus(node, scratch)
-        keySignCorpus(node, scratch)
-        keyAgreeCorpus(node, scratch)
-        rsaCipherCorpus(node, scratch)
-        topLevelAwaitCorpus()
-        esmCorpus(node, scratch)
-        socketsCorpus(node)
-        dnsCorpus(node, scratch)
-        httpCorpus(node, scratch)
-        nodeCorpus(bootstrap, scratch)
+        corpus("resolver") { resolverCorpus(node, scratch) }
+        corpus("crypto") { cryptoCorpus(node, scratch) }
+        corpus("rewriteImports") { rewriteImportsCorpus() }
+        corpus("zlib") { zlibCorpus(node, scratch) }
+        corpus("cipher") { cipherCorpus(node, scratch) }
+        corpus("keyIdentify") { keyIdentifyCorpus(node, scratch) }
+        corpus("keySign") { keySignCorpus(node, scratch) }
+        corpus("keyAgree") { keyAgreeCorpus(node, scratch) }
+        corpus("rsaCipher") { rsaCipherCorpus(node, scratch) }
+        corpus("topLevelAwait") { topLevelAwaitCorpus() }
+        corpus("esm") { esmCorpus(node, scratch) }
+        corpus("sockets") { socketsCorpus(node) }
+        corpus("dns") { dnsCorpus(node, scratch) }
+        corpus("http") { httpCorpus(node, scratch) }
+        corpus("node") { nodeCorpus(bootstrap, scratch) }
     } finally {
         // `--args=--keep-scratch` leaves the smoke's directories in place. A smoke that fails is
         // graded on files it wrote (out.txt, err.txt, entry-error.txt) and deleting them is
