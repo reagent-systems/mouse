@@ -2,7 +2,8 @@
 
 Releases are cut from **`main`** by pushing a version tag. A GitHub Action
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) then builds
-both apps and drafts a GitHub Release with the artifacts attached.
+both apps and publishes a GitHub Release with the artifacts attached and
+generated notes.
 
 ## Versioning
 
@@ -27,8 +28,9 @@ in step:
    git push origin main v0.2.0
    ```
 4. The **Release** workflow runs, builds the Android APK and the iOS
-   simulator app, and opens a **draft** GitHub Release with generated notes.
-5. Review the draft, paste in the changelog highlights, and publish.
+   simulator app, and publishes a GitHub Release with generated notes and
+   both artifacts attached.
+5. Edit the published release to paste in the changelog highlights.
 
 You can also trigger it from the Actions tab (**Release → Run workflow**)
 with a tag name, without pushing a tag.

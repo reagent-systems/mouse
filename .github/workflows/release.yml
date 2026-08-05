@@ -98,7 +98,7 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: Mouse ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
-          draft: true
+          draft: false
           files: |
             artifacts/android-apk/mouse-android-*.apk
             artifacts/ios-sim-app/mouse-ios-sim-*.zip
