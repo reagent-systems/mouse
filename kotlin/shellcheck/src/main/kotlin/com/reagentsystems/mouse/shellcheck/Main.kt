@@ -196,10 +196,19 @@ private val corpus: List<Pair<String, String>> = listOf(
         echo never
     """.trimIndent(),
 
+    // `. file` only — NO operands after it. POSIX leaves arguments to the dot utility
+    // UNSPECIFIED, and the two /bin/sh implementations this corpus actually runs against disagree:
+    // bash (macOS /bin/sh) sets $1 for the sourced file, dash (Ubuntu /bin/sh) ignores the operand
+    // entirely. The corpus was green for a year because it had only ever been run on macOS; the
+    // first CI run on Linux reported `sourced arg1` against `sourced` and was RIGHT to.
+    //
+    // msh follows bash here, which is a defensible choice and is not what this case is for. A
+    // gate whose expected output depends on which sh the machine happens to ship is not gating
+    // the shell language, it is gating the machine.
     "eval-source" to """
         eval "echo evaluated $((1+1))"
-        echo 'echo sourced $1' > lib.sh
-        . ./lib.sh arg1
+        echo 'echo sourced' > lib.sh
+        . ./lib.sh
     """.trimIndent(),
 
     "subscript" to """

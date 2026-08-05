@@ -46,11 +46,14 @@ val runtimeCatalog by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("generated/runtimeCatalog"))
 }
 
-android.sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/runtimeCatalog"))
-
-tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
-    dependsOn(runtimeCatalog)
-}
+// The TASK, not the directory it happens to write to. A bare `layout.buildDirectory.dir(…)` is
+// just a path — it carries no link back to whatever produces it — so only the tasks named
+// explicitly below knew to run the copy first, and any OTHER consumer of the assets read an empty
+// directory or raced it. `generateReleaseLintVitalReportModel` is such a consumer, and it exists
+// only in the release variant, so `assembleDebug` stayed green while `assembleRelease` failed
+// Gradle's own validation. Handing `srcDir` the task provider makes Gradle wire every consumer,
+// present and future, instead of the two that were remembered.
+android.sourceSets.getByName("main").assets.srcDir(runtimeCatalog)
 
 dependencies {
     // The terminal screen engine. It is a separate pure-JVM module so it can be gated headlessly
