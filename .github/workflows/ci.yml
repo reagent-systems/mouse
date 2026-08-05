@@ -74,7 +74,7 @@ jobs:
         env:
           FLOOR_SCREEN: 238
           FLOOR_PACKAGE: 140
-          FLOOR_NODE: 874
+          FLOOR_NODE: 873
           FLOOR_SHELL: 25
         run: |
           if grep -q 'MISMATCH' gates.log; then

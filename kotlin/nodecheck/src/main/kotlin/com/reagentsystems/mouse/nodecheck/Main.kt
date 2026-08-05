@@ -366,10 +366,14 @@ private fun cpuCorpus() {
 
     // The reader itself only works where /proc does, which is Android and not this machine.
     val live = NodeCpu.read()
+    // One check either way. The `else` used to carry a bare `checks += 1` beside its `check`,
+    // counting two where the other branch counted one — so this harness reported 874 on a Mac and
+    // 873 on Linux for the same corpus, and the number was simply wrong on one of them. Found by
+    // CI's count floor, which is the only thing that has ever looked at these totals across two
+    // machines.
     if (File("/proc/self/stat").canRead()) {
         check(live != null, "/proc/self/stat is readable here and cpuUsage answers")
     } else {
-        checks += 1
         check(live == null, "with no /proc, cpuUsage answers null rather than inventing zeros")
     }
 }
