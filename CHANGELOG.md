@@ -7,6 +7,8 @@ carry breaking changes.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-05
+
 ### Added
 - Node layer: **the `performance` timeline is real** — `mark` and `measure` were empty
   functions with no entry buffer behind them. Marks and measures are recorded now, with
