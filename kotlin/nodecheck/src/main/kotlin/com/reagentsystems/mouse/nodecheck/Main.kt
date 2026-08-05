@@ -3002,12 +3002,24 @@ private fun keyIdentifyCorpus(node: String?, parent: File) {
             "privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });\n" +
             "process.stdout.write(k.privateKey);\n",
     )
+    // BOTH branches count a check, which matters more than it looks. Not every node can build
+    // this case: Ubuntu's is linked against system OpenSSL 3, where secp256k1 lives in the legacy
+    // provider and the generate throws, while macOS's node bundles an OpenSSL that has it. An
+    // `if` with no `else` therefore made the corpus SIZE differ by platform — 874 here, 873 on
+    // Linux — which is exactly what CI's floor is watching for, and it was right to complain.
+    // A corpus whose length depends on the machine cannot be checked for having shrunk.
     val (exoticStatus, secp256k1) = run(listOf(node, "exotic.js"), scratch)
     if (exoticStatus == 0) {
         checkEqual(
             NodeKeys.identify(secp256k1).type,
             "unknown",
             "a curve this does not support is unknown, not a nearby curve",
+        )
+    } else {
+        check(
+            true,
+            "the unsupported-curve case needs a node that can MAKE a secp256k1 key, and this one " +
+                "cannot — its OpenSSL keeps that curve in the legacy provider",
         )
     }
 
