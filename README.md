@@ -1,5 +1,9 @@
 # Mouse
 
+<p align="center">
+  <img src="docs/logo.png" alt="Mouse" width="200">
+</p>
+
 [![CI](https://github.com/reagent-systems/mouse/actions/workflows/ci.yml/badge.svg)](https://github.com/reagent-systems/mouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 
@@ -11,11 +15,17 @@ workspaces open and closed, and edit files with the file itself, right in
 place. It talks to GitHub directly — sign in, clone, edit, commit, push,
 pull — with no server, no git binary, and no dependencies beyond the platform.
 
-```
-　C・プ
-＼(　）
-  ｀｀
-```
+## Screenshots
+
+Design studies from [sketches/](sketches/).
+
+<p align="center">
+  <img src="docs/interface-ring.png" alt="A ring of lanes" width="30%">
+  &nbsp;
+  <img src="docs/interface-editor.png" alt="In-place editor container" width="30%">
+  &nbsp;
+  <img src="docs/interface-git-flow.png" alt="Swipe from editor to commit to graph" width="30%">
+</p>
 
 ## The interaction model
 
