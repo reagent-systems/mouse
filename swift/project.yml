@@ -29,7 +29,7 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.reagentsystems.mouse.swift
       # Keep in step with kotlin/app/build.gradle.kts versionName (see RELEASING.md).
-      MARKETING_VERSION: "0.1"
+      MARKETING_VERSION: "0.1.1"
       CURRENT_PROJECT_VERSION: "1"
       # libz (system zlib) for the git engine's packfile inflate — GitCore.inflateStream needs
       # exact zlib-member delimiting, which the Compression framework can't do.

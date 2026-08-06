@@ -7,6 +7,21 @@ carry breaking changes.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-06
+
+### Fixed
+- iOS: **swiping Files → Viewer (or container 6 → Terminal) no longer freezes the shell.**
+  Landing beside the Graph container mounts it as an off-screen edge preview, and mounting it
+  ran `git status` — which read and SHA-1 hashed every byte of every file in the workspace,
+  synchronously, on the main thread. The worktree diff now runs off the main thread behind a
+  (size, mtime) hash cache, and the walk holds one file's bytes at a time instead of the whole
+  tree's. New `verify/gitstatus` gate covers the ways the cache could lie.
+- iOS: **the key strip no longer dismisses the keyboard mid-program.** Tapping up/down/left/
+  right/esc/tab on a running TUI resigned the keyboard on every press — the strip's buttons
+  read as "tap outside a text input" to the global tap-to-dismiss recognizer. While a program
+  runs, the terminal registers a keyboard-hold region the recognizer skips; tapping outside
+  the container still dismisses.
+
 ## [0.1.0] - 2026-08-05
 
 ### Added
