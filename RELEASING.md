@@ -42,14 +42,21 @@ with a tag name, without pushing a tag.
 | `mouse-android-vX.Y.Z.apk` | Debug-signed APK | Sideload on any device (`adb install`) or an emulator |
 | `mouse-ios-sim-vX.Y.Z.zip` | Simulator `.app` | Reviewers running it in the iOS Simulator without Xcode |
 
-The iOS asset is a **simulator** build. A device-installable `.ipa` for
-TestFlight/App Store needs Apple signing, which requires secrets this repo
-does not yet carry:
+A `mouse-ios-vX.Y.Z.ipa` ships beside those: the `ios-ipa` job signs a device
+build with the repository's Apple secrets —
 
-- `APPLE_CERTIFICATE_P12` + `APPLE_CERTIFICATE_PASSWORD` (a Distribution cert)
-- `APPLE_PROVISIONING_PROFILE`
-- `APP_STORE_CONNECT_KEY` (for `xcrun altool`/`notarytool` upload)
+- `APPLE_CERTIFICATE_P12` + `APPLE_CERTIFICATE_PASSWORD` (the Distribution cert)
+- `APPLE_PROVISIONING_PROFILE` (an App Store profile for the bundle id)
+- `APP_STORE_CONNECT_KEY` + `APP_STORE_CONNECT_KEY_ID` + `APP_STORE_CONNECT_ISSUER_ID`
 
-When those are added as repository secrets, extend the `ios` job to sign,
-export an `.ipa`, and (optionally) upload to TestFlight. Until then, the
-App Store path is tracked on the [roadmap](ROADMAP.md) (v1.0).
+Signing is manual and pinned to the uploaded profile: its plist supplies the
+name, UUID and team at run time, so rotating a secret rotates the signing with
+no workflow change. Every run VALIDATES the package against App Store Connect;
+only a real tag push UPLOADS to TestFlight — a `workflow_dispatch` rehearsal
+proves the whole path without publishing a build. Validation and upload need
+the app record to exist in App Store Connect for the bundle id; until it does,
+the validate step fails naming exactly that.
+
+The certificate expires yearly. When the archive step starts failing with a
+signing error, re-export the cert and replace `APPLE_CERTIFICATE_P12` — nothing
+else changes.
