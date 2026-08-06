@@ -293,11 +293,46 @@ struct GitHubSignInView: View {
                 Text("signed in with GitHub")
                     .font(.custom(AppFont.asciiName, size: 13))
                     .opacity(0.7)
+
+                // The app's own controls. This container is the one that is about the APP
+                // rather than the workspace, which is why they live here and only appear
+                // once the sign-in has stopped needing the space.
+                @Bindable var settings = AppSettings.shared
+                VStack(spacing: 12) {
+                    Toggle(isOn: $settings.darkCanvas) {
+                        Text("dark")
+                            .font(.custom(AppFont.asciiName, size: 14))
+                    }
+                    .tint(.white.opacity(0.3))
+                    .frame(width: 132)
+                    Button {
+                        openURL(URL(string: "mailto:team@reagent-systems.com?subject=Mouse%20feedback")!)
+                    } label: {
+                        Text("feedback")
+                            .font(.custom(AppFont.asciiName, size: 14))
+                            .opacity(0.85)
+                    }
+                    Button {
+                        openURL(URL(string: "https://x.com/Reagent_Systems")!)
+                    } label: {
+                        Text("follow @Reagent_Systems")
+                            .font(.custom(AppFont.asciiName, size: 14))
+                            .opacity(0.85)
+                    }
+                    Button { AppSettings.shared.requestOnboarding() } label: {
+                        Text("rerun onboarding")
+                            .font(.custom(AppFont.asciiName, size: 14))
+                            .opacity(0.85)
+                    }
+                }
+                .padding(.top, 10)
+
                 Button { GitHubAuth.shared.signOut() } label: {
                     Text("sign out")
                         .font(.custom(AppFont.asciiName, size: 13))
                         .opacity(0.55)
                 }
+                .padding(.top, 6)
 
             case .failed(let message):
                 Text(message)

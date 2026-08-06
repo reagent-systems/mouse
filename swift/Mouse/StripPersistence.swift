@@ -93,9 +93,26 @@ extension CarouselDeck {
 
     @MainActor
     convenience init(restoring snapshot: RingSnapshot) {
+        // Kinds the catalog no longer carries (the retired numbered placeholders, 6–15) are
+        // culled here: the reserve just drops them; a lane HOLDING one pulls its replacement
+        // from the reserve, and failing that the lane collapses. Every ring was minted with
+        // the full catalog, so a surviving ring always has the real five somewhere in it.
+        var lanes = snapshot.lanes.map { Lane(current: $0.container.restore(), height: $0.height) }
+        var reserve = snapshot.reserve.map { $0.restore() }
+        let retired: (ContainerType) -> Bool = { $0.kind > 0 && !ContainerType.realKinds.contains($0.kind) }
+        reserve.removeAll(where: retired)
+        for index in lanes.indices where retired(lanes[index].current) {
+            guard !reserve.isEmpty else { continue }
+            lanes[index].current = reserve.removeFirst()
+        }
+        lanes.removeAll { retired($0.current) }
+        if lanes.isEmpty {
+            lanes = [Lane(current: reserve.isEmpty ? ContainerType.entry(kind: ContainerType.gitHubKind)
+                                                   : reserve.removeFirst())]
+        }
         self.init(
-            lanes: snapshot.lanes.map { Lane(current: $0.container.restore(), height: $0.height) },
-            reserve: snapshot.reserve.map { $0.restore() },
+            lanes: lanes,
+            reserve: reserve,
             removedStack: snapshot.removedStack,
             isOnboarding: snapshot.isOnboarding ?? false
         )

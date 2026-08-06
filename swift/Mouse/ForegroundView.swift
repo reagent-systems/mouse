@@ -111,6 +111,15 @@ struct ForegroundView: View {
                 StripPersistence.save(strip)
             }
         }
+        // "rerun onboarding" (the GitHub container): a fresh lesson ring arrives beside the
+        // current one and the strip travels to it. Beside rather than instead — the user's
+        // rings are their workspaces, and a tutorial must not cost them one. Graduation
+        // already removes the ring at the end: edge-swiping away from an onboarding ring
+        // retires it, same as the first run.
+        .onChange(of: AppSettings.shared.onboardingRuns) { _, _ in
+            strip.rings.insert(CarouselDeck.onboarding(), at: strip.currentIndex + 1)
+            strip.currentIndex += 1
+        }
     }
 
     /// Bring a ring's divider boost in line with its lessons and re-fit lane heights, in ONE
@@ -153,12 +162,13 @@ struct ForegroundView: View {
     }
 
     /// The ring navigation dots: one per ring, the current one filled — always visible,
-    /// display only (rings are still traveled by edge swipes). Black on the white canvas
-    /// when they sit in the safe-area gap; white when riding the container edge (SE).
+    /// display only (rings are still traveled by edge swipes). Canvas-chrome-colored when
+    /// they sit in the safe-area gap; white when riding the container edge (SE).
     private var ringDots: some View {
         let onCanvas = bottomInset >= 24
-        let stroke: Color = onCanvas ? .black.opacity(0.4) : .white.opacity(0.5)
-        let fill: Color = onCanvas ? .black : .white
+        let chrome = AppSettings.shared.canvasChrome
+        let stroke: Color = onCanvas ? chrome.opacity(0.4) : .white.opacity(0.5)
+        let fill: Color = onCanvas ? chrome : .white
         return HStack(spacing: 8) {
             ForEach(strip.rings.indices, id: \.self) { index in
                 Circle()
@@ -197,7 +207,7 @@ struct ForegroundView: View {
             if ring.isOnboarding && ring.edgeLessonActive {
                 Text(edgeSwiped ? "Edge Swiped." : "Edge Swipe?")
                     .font(.custom(AppFont.asciiName, size: 28))
-                    .foregroundStyle(.black)
+                    .foregroundStyle(AppSettings.shared.canvasChrome)
                     .fixedSize()
                     .rotationEffect(.degrees(-90))
                     .frame(width: 40)
@@ -639,12 +649,13 @@ struct CarouselLane: View {
 
                 if lane.current.usesGapLabel {
                     // The drag lesson's word rides the boundary as it travels; the spread word
-                    // holds still while its gap breathes. Both ride real swipes. Explicit black:
-                    // the gap shows the app's light background regardless of system appearance.
+                    // holds still while its gap breathes. Both ride real swipes. Canvas chrome,
+                    // not system appearance: the gap shows the app's own canvas, whichever theme
+                    // it is in.
                     let labelLift = lane.current.kind == ContainerType.dragPresetKind ? deck.dragPulse : 0
                     Text(lane.current.displayTitle)
                         .font(.custom(AppFont.asciiName, size: 28))
-                        .foregroundStyle(.black)
+                        .foregroundStyle(AppSettings.shared.canvasChrome)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         .offset(x: drag, y: -42)
                         // The lift goes through a GeometryEffect so it interpolates on the same
