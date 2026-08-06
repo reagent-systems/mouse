@@ -61,6 +61,7 @@ final class Workspace {
 
     /// The shared workspace for a repo: the live instance if any ring already has it, else a
     /// ready one if its tree is on disk from before, else a fresh one awaiting download.
+    @MainActor
     static func shared(for repoFullName: String) -> Workspace {
         if let live = byRepo[repoFullName] { return live }
         let fresh = Workspace(existing: repoFullName) ?? Workspace(downloading: repoFullName)
@@ -89,6 +90,7 @@ final class Workspace {
     /// Create (or reopen) a fresh local project — code without GitHub: an empty tree under
     /// `local/<name>`, ready immediately. Files come from the editor and the terminal
     /// (`touch`, redirects); persistence and restore work exactly like repo workspaces.
+    @MainActor
     static func local(named rawName: String) -> Workspace {
         let name = rawName
             .lowercased()
@@ -113,6 +115,7 @@ final class Workspace {
 
     /// Restore path: the shared workspace, seeded with persisted state if it isn't live yet
     /// (a second ring restoring the same repo just gets the first ring's instance).
+    @MainActor
     static func shared(
         existing repoFullName: String,
         modifiedPaths: [String],
@@ -276,7 +279,9 @@ final class Workspace {
     var localBranches: [String] = []
 
     /// Refresh the git-derived toolbar state from disk (after commit/checkout/merge/push, or on
-    /// ready). Cheap enough for a local tree; `status` hashes files but the trees are small.
+    /// ready). The ref and branch reads are a handful of tiny files under .git and stay
+    /// synchronous; the worktree diff is not in their class and goes through [scheduleStatus].
+    @MainActor
     func refreshGitState() {
         guard GitCore.hasRepo(root) else {
             unpushedCommits = false; hasUncommittedChanges = false; hasCommits = false; localBranches = []
@@ -291,7 +296,43 @@ final class Workspace {
         }
         hasCommits = true
         unpushedCommits = GitCore.remoteTrackingSha(branch: branch, in: root) != localSha
-        hasUncommittedChanges = ((try? GitCore.status(in: root))?.isClean == false)
+        Task { await scheduleStatus() }
+    }
+
+    /// True while a worktree diff is running, plus a rerun flag so a refresh that arrives
+    /// mid-diff is coalesced into exactly one follow-up instead of being lost or piled up.
+    private var statusInFlight = false
+    private var statusAgain = false
+
+    /// The worktree-vs-HEAD diff, OFF the main thread.
+    ///
+    /// This used to run synchronously inside `refreshGitState`, which view tasks call on the
+    /// main actor — and the graph container calls it just by MOUNTING, which includes becoming
+    /// the lane's off-screen edge preview after an ordinary swipe. `status` hashes whatever the
+    /// worktree cache hasn't seen, which after committing a fresh repo is the entire tree, so
+    /// the swipe that lands the graph next to the viewer froze the shell for the whole hash.
+    /// The swipe in the OTHER direction never mounts the graph, which is why the stall only
+    /// happened one way — a symptom worth recording because it looked like a rendering bug and
+    /// was actually a worktree walk.
+    @MainActor
+    private func scheduleStatus() async {
+        if statusInFlight {
+            statusAgain = true
+            return
+        }
+        statusInFlight = true
+        let root = self.root
+        // Same nesting as `refreshHistory`: the main-actor frame owns self, the detached task
+        // owns only `root` — which is what lets a non-Sendable model cross this boundary.
+        let clean = await Task.detached(priority: .utility) {
+            (try? GitCore.status(in: root))?.isClean
+        }.value
+        if let clean { hasUncommittedChanges = !clean }
+        statusInFlight = false
+        if statusAgain {
+            statusAgain = false
+            await scheduleStatus()
+        }
     }
 
     /// The "owner/name" this project pushes to: an existing origin, else the signed-in user's
@@ -323,7 +364,10 @@ final class Workspace {
     func clearModified() { modifiedPaths = [] }
 
     /// Reopen an already-downloaded workspace. Fails if the tree is gone. Private: all creation
-    /// goes through the shared registry above.
+    /// goes through the shared registry above — which the registry's own comment already calls
+    /// main-thread-only; the annotation makes the compiler hold callers to it, which is what
+    /// lets `refreshGitState` hand the worktree diff to a background task safely.
+    @MainActor
     private init?(existing repoFullName: String, modifiedPaths: [String] = [], syncedSha: String? = nil) {
         let dir = Self.directory(for: repoFullName)
         guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
