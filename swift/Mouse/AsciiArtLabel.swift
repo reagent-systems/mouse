@@ -5,12 +5,15 @@ struct AsciiArtLabel: UIViewRepresentable {
     let text: String
     let font: UIFont
     var gradientShift: CGFloat = 0
+    var dark: Bool = false
 
     func makeUIView(context: Context) -> AsciiArtTextView {
         let view = AsciiArtTextView(font: font)
         view.configure(text: text, font: font)
+        view.setDark(dark)
         context.coordinator.lastText = text
         context.coordinator.lastFont = font
+        context.coordinator.lastDark = dark
         return view
     }
 
@@ -22,6 +25,10 @@ struct AsciiArtLabel: UIViewRepresentable {
             context.coordinator.lastText = text
             context.coordinator.lastFont = font
         }
+        if context.coordinator.lastDark != dark {
+            view.setDark(dark)
+            context.coordinator.lastDark = dark
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -31,6 +38,7 @@ struct AsciiArtLabel: UIViewRepresentable {
     final class Coordinator {
         var lastText: String?
         var lastFont: UIFont?
+        var lastDark: Bool?
     }
 }
 
@@ -67,6 +75,11 @@ final class AsciiArtTextView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func setDark(_ dark: Bool) {
+        gradientLayer.colors = (dark ? AsciiArtStyle.darkColors : AsciiArtStyle.desktopColors)
+            .map(\.cgColor)
     }
 
     func configure(text: String, font: UIFont) {

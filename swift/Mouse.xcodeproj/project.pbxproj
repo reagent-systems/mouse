@@ -28,6 +28,7 @@
 		4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A88D15C6B606882BE9F472E /* PackageManager.swift */; };
 		516851F9284F04C69F6B3DA1 /* Runtimes.json in Resources */ = {isa = PBXBuildFile; fileRef = C698F23621B02ACFD773CEFC /* Runtimes.json */; };
 		5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 525AB48D09A783EF07137189 /* TerminalScreen.swift */; };
+		5430CDE9E255DBF12E04A8E5 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
 		5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAE14386F75AAF0B835E324C /* GitHubPush.swift */; };
 		6E38F06822105BFE7C367992 /* GitCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 179217813E4A44F9859669C5 /* GitCore.swift */; };
@@ -64,6 +65,7 @@
 		5A7FDD7DE14447F992EB32D3 /* Shell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Shell.swift; sourceTree = "<group>"; };
 		5B23A8EB8050D0EFED1198A4 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
+		7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundView.swift; sourceTree = "<group>"; };
 		933C6240D3EEE403A1818213 /* NodeDNS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeDNS.swift; sourceTree = "<group>"; };
 		98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Bold.ttf"; sourceTree = "<group>"; };
@@ -91,6 +93,7 @@
 			isa = PBXGroup;
 			children = (
 				C5808E2C3F3EE351EB16E5DD /* AppFont.swift */,
+				7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */,
 				0E73E50FC2D809F76902185C /* AsciiArt.swift */,
 				21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */,
 				B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */,
@@ -225,6 +228,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */,
+				5430CDE9E255DBF12E04A8E5 /* AppSettings.swift in Sources */,
 				8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */,
 				356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */,
 				3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */,
@@ -281,7 +285,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.1;
+				MARKETING_VERSION = 0.1.2;
 				OTHER_LDFLAGS = "-lz -lresolv";
 				PRODUCT_BUNDLE_IDENTIFIER = com.reagentsystems.mouse.swift;
 				SDKROOT = iphoneos;
@@ -307,7 +311,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.1;
+				MARKETING_VERSION = 0.1.2;
 				OTHER_LDFLAGS = "-lz -lresolv";
 				PRODUCT_BUNDLE_IDENTIFIER = com.reagentsystems.mouse.swift;
 				SDKROOT = iphoneos;

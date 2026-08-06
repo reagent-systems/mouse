@@ -27,7 +27,7 @@ struct AsciiLogoBackground: View {
                 logo(elapsedMs: 0)
             }
         }
-        .background(Color.white)
+        .background(AppSettings.shared.canvasColor)
         .ignoresSafeArea()
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -40,9 +40,10 @@ struct AsciiLogoBackground: View {
         let gradientShift = AsciiArtStyle.gradientShift(elapsedMs: elapsedMs)
 
         return ZStack {
-            Color.white
+            AppSettings.shared.canvasColor
 
-            AsciiArtLabel(text: AsciiArt.logo, font: AppFont.ascii, gradientShift: gradientShift)
+            AsciiArtLabel(text: AsciiArt.logo, font: AppFont.ascii,
+                          gradientShift: gradientShift, dark: AppSettings.shared.darkCanvas)
                 .fixedSize(horizontal: true, vertical: true)
                 .scaleEffect(breathe)
                 .rotation3DEffect(.degrees(rotateX), axis: (x: 1, y: 0, z: 0), perspective: 0.001)

@@ -7,6 +7,21 @@ carry breaking changes.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-06
+
+### Added
+- iOS: **the GitHub container grows the app's own controls**, shown once signed in: a
+  `dark` toggle (dark-gray canvas, the ascii logo in near-dark tints of the same hues,
+  canvas chrome flipped to white), `feedback` (mail to team@reagent-systems.com),
+  `follow @Reagent_Systems` (x.com), and `rerun onboarding` — a fresh lesson ring arrives
+  beside the current one and retires at graduation, same as the first run.
+
+### Removed
+- iOS: **the numbered placeholder containers (kinds 6–15) are retired.** The ring now
+  carries the five real containers, as Android's already did. A persisted strip that still
+  holds a placeholder drops it at restore; a lane showing one pulls its replacement from
+  the reserve.
+
 ## [0.1.1] - 2026-08-06
 
 ### Fixed

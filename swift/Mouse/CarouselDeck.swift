@@ -355,25 +355,22 @@ final class RingStrip {
 }
 
 extension ContainerType {
-    static let palette: [Color] = [
-        .black, .blue, .purple, .indigo, .teal, .brown, .pink, .orange,
-        .green, .red, .cyan, .mint, .yellow, .gray, .secondary,
-    ]
-
-    /// The catalog of 15 distinct container types.
+    /// The catalog: the five real containers, in ring order. The colored numbered
+    /// placeholders (kinds 6–15) that filled the ring out before the real surfaces existed
+    /// are retired — Android's deck already ships only these five, and a snapshot that still
+    /// carries a placeholder drops it at restore.
     static func catalog() -> [ContainerType] {
-        (1...15).map { entry(kind: $0) }
+        [gitHubKind, filesKind, viewerKind, graphKind, terminalKind].map { entry(kind: $0) }
     }
 
     /// Build an instance of a given catalog type — fresh by default, or with a persisted identity.
     static func entry(kind: Int, id: UUID = UUID()) -> ContainerType {
-        let k = (kind - 1) % 15 + 1
-        return ContainerType(
+        ContainerType(
             id: id,
-            kind: k,
-            title: realTitles[k] ?? "\(k)",
-            color: realKinds.contains(k) ? .black : palette[(k - 1) % palette.count],
-            content: .resolve(kind: k)
+            kind: kind,
+            title: realTitles[kind] ?? "\(kind)",
+            color: .black,
+            content: .resolve(kind: kind)
         )
     }
 
