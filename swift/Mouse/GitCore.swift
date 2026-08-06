@@ -335,7 +335,19 @@ enum GitCore {
         var isClean: Bool { added.isEmpty && modified.isEmpty && deleted.isEmpty }
     }
 
-    /// Worktree vs HEAD, by hashing files (no index, no mtime cache: trees here are small).
+    /// (size, mtime) → sha, keyed by absolute file path — the trust git's own index places in
+    /// the same pair. "Trees here are small" was this file's original excuse for having no
+    /// cache, and it expired the first time a workspace carried node_modules or an installed
+    /// runtime: `status` re-read and re-hashed EVERY byte of every file per call, and the graph
+    /// container calls it just by MOUNTING — including as the lane's off-screen edge preview
+    /// after an ordinary swipe. On a real phone that read as the shell itself spiking CPU and
+    /// memory. Never evicts, like the other registries; a stale entry for a deleted file is
+    /// dead weight, not a wrong answer, because only paths the walk actually visits consult it.
+    private static let hashCacheLock = NSLock()
+    nonisolated(unsafe) private static var hashCache: [String: (size: Int, mtime: Double, sha: String)] = [:]
+
+    /// Worktree vs HEAD, by hashing files — through [hashCache], so only files whose (size,
+    /// mtime) moved since the last call are actually read.
     static func status(in root: URL) throws -> Status {
         let headFiles: [String: String]
         if let head = try? headCommit(in: root) {
@@ -363,16 +375,43 @@ enum GitCore {
 
     private static func collectWorktreeHashes(directory: URL, prefix: String, root: URL, into result: inout [String: String]) {
         let fm = FileManager.default
-        let children = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        let children = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
         for child in children {
             let name = child.lastPathComponent
             if name == ".git" { continue }
             let path = prefix.isEmpty ? name : "\(prefix)/\(name)"
-            let isDirectory = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            if isDirectory {
+            let values = try? child.resourceValues(forKeys: Set(keys))
+            if values?.isDirectory == true {
                 collectWorktreeHashes(directory: child, prefix: path, root: root, into: &result)
-            } else if let data = try? Data(contentsOf: child) {
-                result[path] = hashObject(.blob, data)
+                continue
+            }
+            let size = values?.fileSize ?? -1
+            let mtime = values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? -1
+            let cacheable = size >= 0 && mtime >= 0
+            if cacheable {
+                hashCacheLock.lock()
+                let hit = hashCache[child.path]
+                hashCacheLock.unlock()
+                if let hit, hit.size == size, hit.mtime == mtime {
+                    result[path] = hit.sha
+                    continue
+                }
+            }
+            // autoreleasepool per file: `Data(contentsOf:)` parks its buffer in the pool, and a
+            // recursion over thousands of files otherwise holds every file's bytes at once —
+            // which is a memory footprint the size of the worktree, released only when the walk
+            // ends. That, not the hashing, was the RAM half of the spike.
+            let sha: String? = autoreleasepool {
+                guard let data = try? Data(contentsOf: child) else { return nil }
+                return hashObject(.blob, data)
+            }
+            guard let sha else { continue }
+            result[path] = sha
+            if cacheable {
+                hashCacheLock.lock()
+                hashCache[child.path] = (size, mtime, sha)
+                hashCacheLock.unlock()
             }
         }
     }

@@ -68,10 +68,11 @@ extension RingStrip {
         )
     }
 
+    @MainActor
     convenience init(restoring snapshot: StripSnapshot) {
         // Shared content first, so instance restoration resolves to the restored objects.
         ContainerContent.restoreSharedContents(snapshot.sharedContents)
-        let rings = snapshot.rings.map(CarouselDeck.init(restoring:))
+        let rings = snapshot.rings.map { CarouselDeck(restoring: $0) }
         self.init(rings: rings, currentIndex: max(0, min(snapshot.currentIndex, rings.count - 1)))
     }
 }
@@ -90,6 +91,7 @@ extension CarouselDeck {
         )
     }
 
+    @MainActor
     convenience init(restoring snapshot: RingSnapshot) {
         self.init(
             lanes: snapshot.lanes.map { Lane(current: $0.container.restore(), height: $0.height) },
@@ -176,6 +178,7 @@ enum StripPersistence {
     }
 
     /// The saved strip, or `nil` when there's nothing (or nothing usable) on disk.
+    @MainActor
     static func load() -> RingStrip? {
         guard let data = try? Data(contentsOf: fileURL),
               let snapshot = try? JSONDecoder().decode(StripSnapshot.self, from: data),
