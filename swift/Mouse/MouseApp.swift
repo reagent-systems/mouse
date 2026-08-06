@@ -68,6 +68,26 @@ private struct KeyboardFloatingHost<Content: View>: UIViewControllerRepresentabl
     }
 }
 
+/// Window regions where a tap must NOT dismiss the keyboard.
+///
+/// The dismiss recognizer below fires on any tap outside a text input, and for most of the app
+/// that is the right reading of a tap. A terminal running a program is the exception: its key
+/// strip and screen are buttons and output, not text inputs, yet tapping them is how the program
+/// is DRIVEN — an arrow tap that also drops the keyboard makes a TUI menu undrivable one
+/// keystroke at a time, which is exactly how it read on a phone. So the terminal registers its
+/// frame while a program runs, and taps inside any registered region keep the keyboard. Taps
+/// outside — another container, the gap between lanes — still dismiss, which is the half of the
+/// rule worth keeping.
+@MainActor
+enum KeyboardHoldRegions {
+    private static var frames: [UUID: CGRect] = [:]
+    static func set(_ id: UUID, frame: CGRect) { frames[id] = frame }
+    static func clear(_ id: UUID) { frames[id] = nil }
+    static func contains(_ point: CGPoint) -> Bool {
+        frames.values.contains { $0.contains(point) }
+    }
+}
+
 final class KeyboardDismissCoordinator: NSObject, UIGestureRecognizerDelegate {
     @objc func dismissKeyboard() {
         UIApplication.shared.sendAction(
@@ -75,8 +95,10 @@ final class KeyboardDismissCoordinator: NSObject, UIGestureRecognizerDelegate {
         )
     }
 
-    /// Skip taps that land inside a text input (or one of its subviews).
+    /// Skip taps that land inside a text input (or one of its subviews), and taps inside a
+    /// keyboard-hold region (a terminal with a program running — see [KeyboardHoldRegions]).
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if KeyboardHoldRegions.contains(touch.location(in: nil)) { return false }
         var view = touch.view
         while let current = view {
             if current is UITextInput { return false }

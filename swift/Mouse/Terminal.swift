@@ -7,6 +7,8 @@ struct TerminalContainerView: View {
     let deck: CarouselDeck?
 
     @State private var promptFocused = false
+    /// This container's entry in [KeyboardHoldRegions] while a program runs.
+    @State private var holdRegionID = UUID()
 
     var body: some View {
         Group {
@@ -93,6 +95,22 @@ struct TerminalContainerView: View {
                 .padding(16)
                 .contentShape(Rectangle())
                 .onTapGesture { promptFocused = true }
+                // While a program runs, taps in this container are PROGRAM INPUT (the key
+                // strip, the screen) and must not double as keyboard dismissal. The region
+                // follows the container's real frame, so an edge-preview terminal registers
+                // an off-screen rect no tap can land in.
+                .background {
+                    if terminal.program != nil {
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear { KeyboardHoldRegions.set(holdRegionID, frame: geo.frame(in: .global)) }
+                                .onChange(of: geo.frame(in: .global)) { _, frame in
+                                    KeyboardHoldRegions.set(holdRegionID, frame: frame)
+                                }
+                                .onDisappear { KeyboardHoldRegions.clear(holdRegionID) }
+                        }
+                    }
+                }
             } else {
                 Text("open a project in the Files container")
                     .font(.custom(AppFont.asciiName, size: 14))

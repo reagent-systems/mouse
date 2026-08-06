@@ -281,7 +281,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 0.1.1;
 				OTHER_LDFLAGS = "-lz -lresolv";
 				PRODUCT_BUNDLE_IDENTIFIER = com.reagentsystems.mouse.swift;
 				SDKROOT = iphoneos;
@@ -307,7 +307,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 0.1.1;
 				OTHER_LDFLAGS = "-lz -lresolv";
 				PRODUCT_BUNDLE_IDENTIFIER = com.reagentsystems.mouse.swift;
 				SDKROOT = iphoneos;
