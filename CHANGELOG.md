@@ -7,6 +7,21 @@ carry breaking changes.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-06
+
+### Changed
+- iOS: the dark-canvas switch is now a word, like every other control in the app: it reads
+  `dark mode` on the light canvas and `light mode` on the dark one — named for where it
+  takes you, and it flips with the tap.
+
+### Added
+- Release CI: **a signed, device-installable iOS `.ipa`.** The Release workflow imports the
+  Distribution certificate and provisioning profile from repository secrets into a throwaway
+  keychain, archives with manual signing pinned to that profile, validates the package with
+  App Store Connect on every run, and uploads to TestFlight on tag pushes (a rehearsal
+  dispatch validates but never publishes). The `.ipa` ships as a release asset beside the
+  simulator zip and the Android APK.
+
 ## [0.1.2] - 2026-08-06
 
 ### Added

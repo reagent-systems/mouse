@@ -297,14 +297,14 @@ struct GitHubSignInView: View {
                 // The app's own controls. This container is the one that is about the APP
                 // rather than the workspace, which is why they live here and only appear
                 // once the sign-in has stopped needing the space.
-                @Bindable var settings = AppSettings.shared
                 VStack(spacing: 12) {
-                    Toggle(isOn: $settings.darkCanvas) {
-                        Text("dark")
+                    // Named for where it TAKES you, not where you are — a tap is an action,
+                    // and the other rows here are actions too. The word flips with the canvas.
+                    Button { AppSettings.shared.darkCanvas.toggle() } label: {
+                        Text(AppSettings.shared.darkCanvas ? "light mode" : "dark mode")
                             .font(.custom(AppFont.asciiName, size: 14))
+                            .opacity(0.85)
                     }
-                    .tint(.white.opacity(0.3))
-                    .frame(width: 132)
                     Button {
                         openURL(URL(string: "mailto:team@reagent-systems.com?subject=Mouse%20feedback")!)
                     } label: {

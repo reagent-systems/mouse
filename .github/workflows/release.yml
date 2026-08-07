@@ -81,9 +81,129 @@ jobs:
           name: ios-sim-app
           path: mouse-ios-sim-*.zip
 
+  # The signed, device-installable build. Runs only where the signing secrets live; a fork
+  # without them gets a clear first-step failure instead of a cryptic xcodebuild one.
+  #
+  # Signing is MANUAL and pinned to the uploaded profile — the profile's own plist supplies
+  # its name, UUID and team, so nothing is hardcoded here and replacing the secret replaces
+  # the signing. The App Store Connect API key authenticates validation (every run) and the
+  # TestFlight upload (tag pushes only, so a rehearsal dispatch cannot publish a build).
+  ios-ipa:
+    name: iOS signed IPA
+    runs-on: macos-15
+    env:
+      BUNDLE_ID: com.reagentsystems.mouse.swift
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the signing secrets exist
+        env:
+          P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          if [ -z "$P12" ] || [ -z "$PROFILE" ]; then
+            echo "::error::APPLE_CERTIFICATE_P12 / APPLE_PROVISIONING_PROFILE are not configured — see RELEASING.md"
+            exit 1
+          fi
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate project
+        working-directory: swift
+        run: xcodegen generate
+
+      - name: Import the certificate into a throwaway keychain
+        env:
+          P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import $RUNNER_TEMP/cert.p12 -P "$P12_PASSWORD" -A             -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm $RUNNER_TEMP/cert.p12
+
+      - name: Install the provisioning profile
+        env:
+          PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          echo "$PROFILE" | base64 --decode > $RUNNER_TEMP/profile.mobileprovision
+          security cms -D -i $RUNNER_TEMP/profile.mobileprovision > $RUNNER_TEMP/profile.plist
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' $RUNNER_TEMP/profile.plist)
+          NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' $RUNNER_TEMP/profile.plist)
+          TEAM=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' $RUNNER_TEMP/profile.plist)
+          mkdir -p ~/Library/MobileDevice/"Provisioning Profiles"
+          cp $RUNNER_TEMP/profile.mobileprovision             ~/Library/MobileDevice/"Provisioning Profiles"/$UUID.mobileprovision
+          echo "PROFILE_NAME=$NAME" >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAM" >> $GITHUB_ENV
+
+      - name: Archive
+        working-directory: swift
+        run: |
+          xcodebuild archive -project Mouse.xcodeproj -scheme Mouse             -destination 'generic/platform=iOS'             -archivePath build/Mouse.xcarchive             CODE_SIGN_STYLE=Manual             DEVELOPMENT_TEAM="$TEAM_ID"             CODE_SIGN_IDENTITY="Apple Distribution"             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+
+      - name: Export the IPA
+        working-directory: swift
+        run: |
+          cat > build/exportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict><key>$BUNDLE_ID</key><string>$PROFILE_NAME</string></dict>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive             -archivePath build/Mouse.xcarchive             -exportPath build/ipa             -exportOptionsPlist build/exportOptions.plist
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          cp build/ipa/*.ipa "../mouse-ios-${TAG}.ipa"
+
+      - name: Stage the App Store Connect key
+        env:
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "$ASC_KEY" | base64 --decode > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+
+      # Every run proves the ASC credentials and the package; only a real tag push publishes.
+      - name: Validate with App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --validate-app -f mouse-ios-*.ipa -t ios             --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Upload to TestFlight
+        if: github.event_name == 'push'
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app -f mouse-ios-*.ipa -t ios             --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: mouse-ios-*.ipa
+
+      - name: Delete the throwaway keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/signing.keychain-db || true
+          rm -f ~/private_keys/AuthKey_*.p8
+
   release:
     name: Publish release
-    needs: [android, ios]
+    needs: [android, ios, ios-ipa]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,3 +222,4 @@ jobs:
           files: |
             artifacts/android-apk/mouse-android-*.apk
             artifacts/ios-sim-app/mouse-ios-sim-*.zip
+            artifacts/ios-ipa/mouse-ios-*.ipa
