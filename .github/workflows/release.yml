@@ -96,15 +96,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Shapes only, never contents: every one of these has been stored EMPTY at least once,
+      # and an empty secret otherwise surfaces as a cryptic failure half an hour downstream.
       - name: Check the signing secrets exist
         env:
           P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          if [ -z "$P12" ] || [ -z "$PROFILE" ]; then
-            echo "::error::APPLE_CERTIFICATE_P12 / APPLE_PROVISIONING_PROFILE are not configured — see RELEASING.md"
-            exit 1
-          fi
+          failed=0
+          [ -n "$P12" ]     || { echo "::error::APPLE_CERTIFICATE_P12 is empty"; failed=1; }
+          [ -n "$PROFILE" ] || { echo "::error::APPLE_PROVISIONING_PROFILE is empty"; failed=1; }
+          [ -n "$ASC_KEY" ] || { echo "::error::APP_STORE_CONNECT_KEY is empty"; failed=1; }
+          case "$ASC_KEY_ID" in
+            [A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]) ;;
+            *) echo "::error::APP_STORE_CONNECT_KEY_ID is not a 10-character key id"; failed=1 ;;
+          esac
+          case "$ASC_ISSUER_ID" in
+            *-*-*-*-*) ;;
+            *) echo "::error::APP_STORE_CONNECT_ISSUER_ID is not a UUID"; failed=1 ;;
+          esac
+          [ $failed -eq 0 ] || { echo "see RELEASING.md"; exit 1; }
+
+      # The image's DEFAULT Xcode trails what App Store Connect accepts: uploads must be built
+      # with the iOS 26 SDK, and the default 16.4 ships 18.5 — validation refused exactly that.
+      # Newest installed wins, and the chosen version is printed so a refusal names its SDK.
+      - name: Select the newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -166,6 +189,14 @@ jobs:
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           cp build/ipa/*.ipa "../mouse-ios-${TAG}.ipa"
 
+      # BEFORE validation: a refused package is still a built, signed package, and the
+      # artifact is how it gets inspected. Losing the .ipa to a validation failure cost a
+      # full archive cycle once.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: mouse-ios-*.ipa
+
       - name: Stage the App Store Connect key
         env:
           ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
@@ -189,11 +220,6 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           xcrun altool --upload-app -f mouse-ios-*.ipa -t ios             --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios-ipa
-          path: mouse-ios-*.ipa
 
       - name: Delete the throwaway keychain
         if: always()
