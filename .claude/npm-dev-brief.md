@@ -1,5 +1,45 @@
 # Goal: `npm run dev` works for Node dev servers on iOS
 
+## CURRENT BLOCKER (iteration 9): the PINNED ESM divergence is no longer acceptable
+
+Fixed so far, in order, each verified on the simulator: the restart storm
+(project rooted at `/`, commit d27265e), and `import` as a method name
+(commit d2cd024). SSR now reaches svelte's compiler, which throws at
+`1-parse/state/element.js:946`, i.e. `start: locator(start)`.
+
+`locator` is undefined, and the reason is our own known divergence:
+
+    svelte/src/compiler/state.js:50   export let locator;      // undefined at import time
+    svelte/src/compiler/state.js:59   locator = (i) => { … };  // assigned LATER
+    …/1-parse/state/element.js:17     import { locator } from '../../../state.js';
+
+Real ESM named imports are LIVE bindings, so `locator` becomes the function.
+Ours are a SNAPSHOT — the transpiler emits
+`const locator = __esmBinding(ns, 'locator')` — so it is frozen at `undefined`
+forever. This is precisely the divergence `verify/esmgrammar` records as
+"1 pinned divergence (named imports are a snapshot; the namespace form is live)".
+It is not a cosmetic gap: it breaks Svelte, and it will break any library that
+exports a `let` and assigns it during initialisation.
+
+### What the fix requires
+Named imports must read through the namespace at USE time, not at import time.
+The transpiler currently emits one `const` per binding; making it live means
+rewriting every REFERENCE to `ns.name`, which needs identifier-level rewriting
+with scope awareness (shadowing, object keys, property access after a dot,
+strings/comments already masked). That is a real piece of work in
+`transpileESM` and it must be gated by extending verify/esmgrammar with a
+live-binding case that FAILS today:
+
+    // mod.js
+    export let value = 'before';
+    export function set() { value = 'after'; }
+    // main.js
+    import { value, set } from './mod.js';
+    set();
+    console.log(value);   // real node: 'after'   ours today: 'before'
+
+Do that gate FIRST so the fix has something to turn green.
+
 The loop prompt points here. Read this file every iteration.
 
 ## The target, concretely
