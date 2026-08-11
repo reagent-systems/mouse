@@ -138,10 +138,37 @@ final class TerminalSession {
     /// Interrupt a running command (any keypress triggers this). Prints the classic ^C
     /// immediately; the command's own cancellation cleanup (ping's statistics line) follows
     /// as it winds down.
+    /// When `canc` last sent a program ^C — the arming half of the two-press kill.
+    private var interruptedAt: Date?
+
     func interrupt() {
         if let program {
             // ^C is a keystroke to a program — it decides what to do (and the host stops it
-            // when it has no SIGINT handler of its own).
+            // when it has no SIGINT handler of its own). That is the law's answer, and it has
+            // a hole a real package fell into: a program that finished its work but left a
+            // raw-mode stdin listener alive (`sv`'s closing screen) reads the byte and does
+            // nothing, forever, and the terminal is held hostage. So a SECOND canc within ten
+            // seconds is the shell's answer: take the terminal back. A real terminal's close
+            // button, worn by canc on the second press. Ten, not two: the real cadence is
+            // tap, wait to see whether anything happened, tap again — and a window sized to
+            // a double-tap re-armed instead of killing, which was measured, not guessed.
+            if let at = interruptedAt, Date().timeIntervalSince(at) < 10 {
+                interruptedAt = nil
+                append("killed \(program.title)", .error)
+                program.terminate()
+                // Termination flows through the program's own exit path (io.exit → the
+                // session's cleanup), which is what keeps engines from leaking. A program too
+                // far gone to run even that still must not keep the screen: reclaim it
+                // directly after a beat, if the same program is somehow still installed.
+                let held = ObjectIdentifier(program as AnyObject)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    guard let self, let current = self.program,
+                          ObjectIdentifier(current as AnyObject) == held else { return }
+                    self.programExited()
+                }
+                return
+            }
+            interruptedAt = Date()
             program.input("\u{3}")
             return
         }
@@ -249,6 +276,7 @@ final class TerminalSession {
         }
         program = nil
         programOnScreen = false
+        interruptedAt = nil
         parser.respond = nil
         // A crashed-out program must not strand the terminal on the alt screen.
         if screen.isAlternate { parser.feed("\u{1b}[?25h\u{1b}[?1049l") }

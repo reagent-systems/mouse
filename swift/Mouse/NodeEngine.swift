@@ -17100,6 +17100,40 @@ final class NodeEngine: @unchecked Sendable {
         Server.prototype.listen = function() {
           const args = Array.prototype.slice.call(arguments);
           const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+          // Listening twice without an intervening close is a PROGRAMMING ERROR in node, and it
+          // throws ERR_SERVER_ALREADY_LISTEN. This used to allocate a second host socket and
+          // orphan the first — invisible on a machine whose process exits and frees the fd, fatal
+          // here where the engine outlives every program. vite's dev server calls listen again on
+          // EADDRINUSE and, through SvelteKit's warmup/restart, on a server already bound; each
+          // silent re-listen leaked a LISTENING socket, and a real device ran up thousands (3607
+          // measured) before the port walk buried the terminal in "Port N is in use". Throwing is
+          // both correct and the fix: node's own EADDRINUSE retry closes first, and callers that
+          // relied on the silent second bind were leaking on node too.
+          // Listening again while a socket is already claimed used to allocate a SECOND host
+          // socket and orphan the first. On a machine whose process exits that is invisible; here
+          // the engine outlives every program, so each one leaked a LISTENING fd — a real device
+          // reached 3607 of them, and vite's port walk then reported thousands of ports "in use"
+          // (they were: by us) until the terminal was unusable.
+          //
+          // node throws ERR_SERVER_ALREADY_LISTEN here, and that was tried first. It is the wrong
+          // answer for this engine, because vite REACHES this path legitimately: its
+          // `createServerCloseFn` only closes a server it has seen emit 'listening'
+          // (`if (hasListened) server.close(…); else resolve()`), so a restart following a failed
+          // first bind re-listens a server it never closed. Throwing there killed a dev server
+          // that had already printed its URL.
+          //
+          // So the previous socket is RELEASED and the new listen proceeds. That fixes the leak —
+          // the only fd in flight is the one the caller asked for — without inventing a fatal
+          // error on a path real packages take. The divergence from node is deliberate and is the
+          // conservative direction: node's throw protects a caller from losing track of a socket,
+          // and here nothing is lost, because the socket is closed rather than orphaned.
+          if (this._sid) {
+            bridge.netDestroy(this._sid);
+            this._sid = 0;
+            this.listening = false;
+            this._address = null;
+          }
+          this._closing = false;
           let port = 0, host = '0.0.0.0', backlog = 511;
           // A path listens on a socket FILE.
           const unixPath = (args[0] && typeof args[0] === 'object' && args[0].path) ? String(args[0].path)
@@ -17194,6 +17228,12 @@ final class NodeEngine: @unchecked Sendable {
             }
             case 'error':
               this.listening = false;
+              // The bind failed, so there is no host socket behind `_sid` — clear it, both to
+              // free the guard above (node's EADDRINUSE retry re-listens the same server) and
+              // because `_sid` is now the marker for "a socket is claimed", mirroring node's
+              // `_handle`. Leaving it set turned the legitimate retry into a false
+              // ERR_SERVER_ALREADY_LISTEN.
+              this._sid = null;
               this.emit('error', Object.assign(new Error(payload.message), { code: payload.code }));
               break;
             case 'close':
