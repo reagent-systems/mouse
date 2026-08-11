@@ -105,8 +105,33 @@ quick edit. THE OWNER SHOULD PICK, because option A changes what users see.
      compares paths by string (vite computes root-relative paths constantly), so it must be
      proven against the real dev server, not just a unit gate.
 
-Recommendation: try B behind the gate below FIRST, because it is cheap to test and reversible;
-fall back to A if path comparisons break.
+**CORRECTION (iteration 6): OPTION B IS IMPOSSIBLE. Do not attempt it.** It assumed chokidar
+uses the realpath of the watch target for its bookkeeping. It does not. In vite's inlined
+chokidar, `_handleDir` reads:
+
+    const parentDir$1 = this.fsw._getWatchedDir(sysPath$2.dirname(dir));   // 13263
+    const tracked     = parentDir$1.has(sysPath$2.basename(dir));          // 13264
+    parentDir$1.add(sysPath$2.basename(dir));                              // 13268
+
+`dir` — the path as passed in — drives dirname/basename; `realpath` is only consulted for the
+`_symlinkPaths` check further down. So changing what realpath answers cannot remove the
+empty-basename child. OPTION A IS THE ONLY FIX.
+
+### Option A, implementation plan (verified call sites)
+
+1. `swift/Mouse/Shell.swift:1474` and `:1485` — both launch node with `cwd: "/" + cwd`. Change to
+   a NAMED root, e.g. `/project`, joined with msh's relative cwd:
+   `"/project" + (cwd.isEmpty ? "" : "/" + cwd)`.
+2. `swift/Mouse/NodeEngine.swift:2492 realURL(_:)` is the single virtual->real resolver. It
+   already walks `mounts` with prefix matching, so the named root can be added as an ALIAS that
+   resolves to the same workspace URL as `/`. Both `/project/src/a.js` and `/src/a.js` then work,
+   which keeps existing behaviour intact while giving vite a root with a real basename.
+3. Because vite derives every path from its own `root`, it will consistently see `/project/...`
+   and never mix the two spellings. The thing to watch for in verification is anything that
+   hands a program a `/`-rooted path AFTER startup (the Viewer's openFile hook, msh's own path
+   clamping) — those still speak `/`, which is fine as long as nothing string-compares the two.
+4. Stack traces will read `mouse:///project/...`. Cosmetic, but docs and any gate pinning
+   `mouse:///` paths must move with it.
 
 ### The gate this needs, whichever option wins
 A harness that watches a tree whose root is the VIRTUAL ROOT with chokidar, changes nothing, and
