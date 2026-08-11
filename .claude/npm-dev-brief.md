@@ -58,6 +58,45 @@ Two measurements, both on the simulator with the real project:
 So the restart trigger is NOT the file watcher, and there is a SECOND, separate bug: a new file
 in a watched directory produces no event, which also means HMR cannot work.
 
+## ROOT CAUSE FOUND (iteration 4) — the project sits at `/`, and chokidar cannot cope
+
+Instrumenting the INLINED chokidar's removal diff produced the answer in one run:
+
+    REMOVE dir=/ item= currentSize=14 prevN=3
+
+The item being removed is the EMPTY STRING, and `currentSize=14` proves the directory read is
+healthy. The mechanism:
+
+- Our workspace is mounted so the project root is literally `/`.
+- chokidar's `_handleDir` does `_getWatchedDir(dirname(dir)).add(basename(dir))`.
+- For `dir === '/'`, POSIX says `dirname('/') === '/'` and `basename('/') === ''` (node agrees;
+  our path module is CORRECT here — this is not a path bug).
+- So chokidar adds an empty-string child INTO THE ROOT'S OWN watched-dir record.
+- On the next `_handleRead('/')`, `current` holds the real 14-15 entries and never contains `''`,
+  so the diff removes `''` -> `_remove('/', '')` -> that resolves back to the root itself and
+  tears down the whole tracked tree, emitting `unlink` for EVERY file, including vite.config.ts.
+- vite sees the config unlinked -> restarts -> new watcher -> same thing ~3s later. The loop.
+
+On a real machine a project is never at `/`, so `dirname` returns a real parent and `basename` a
+real name; this edge case never fires. It is our virtual-filesystem layout that triggers it, so
+the fix belongs in swift/ and is general — it will fix watching for React/Vite/anything, and HMR
+along with it.
+
+### The fix to implement next — decide between these two
+1. **Give the workspace a non-root virtual path** (e.g. cwd `/project`, or a mount alias) so the
+   watched root has a real basename. The engine already has a `mounts` concept
+   (`NodeEngine(root:mounts:)`, `normalizeMountPrefix`, NodeEngine.swift ~193-201, 2476-2494) and
+   programs are launched with an explicit `cwd` (TerminalPrograms.swift ~341/397/441). Smallest
+   version: keep `/` working as it does today AND expose the same tree at a named path, then
+   launch node programs with that as cwd so tools resolve `root` to the named path.
+   Risk: user-visible paths change (msh prompt, Viewer, error traces) — check before committing.
+2. **Make the root behave like a named directory to watchers only** — riskier and more magical;
+   prefer 1 unless 1 proves invasive.
+
+Whichever is chosen: gate it. A harness that watches a directory tree whose root is `/` and
+asserts that NO unlink is emitted when nothing is deleted would have caught this, and there is
+currently no such gate (verify/chokidar passes because it does not watch the virtual root).
+
 ## ITERATION 3 — THE EVENT IS `unlink`, FOR EVERY FILE IN THE PROJECT
 
 Captured with a deep stack at vite's config-change branch, on a cleanly started server:
