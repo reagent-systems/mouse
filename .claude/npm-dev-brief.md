@@ -58,6 +58,32 @@ Two measurements, both on the simulator with the real project:
 So the restart trigger is NOT the file watcher, and there is a SECOND, separate bug: a new file
 in a watched directory produces no event, which also means HMR cannot work.
 
+## ITERATION 2 — A PROCESS TRAP THAT INVALIDATED MEASUREMENTS, AND A LEAK REFINEMENT
+
+READ THIS BEFORE MEASURING ANYTHING.
+
+1. **The dev server keeps running.** After `npm run dev`, the terminal is owned by the vite
+   PROGRAM. Anything typed afterwards goes to vite as KEYSTROKES, not to msh. Several
+   iteration-2 measurements were contaminated this way: `who.txt` kept showing output from a
+   previous run because the new `npm run dev` never actually started — the text went into the
+   running program. ALWAYS confirm the prompt reads `~ $` (kill with canc TWICE) before typing a
+   command, and confirm the command echoed on screen before trusting any result.
+
+2. **The listener leak is only HALF fixed.** b1133b6 releases the previous socket when the SAME
+   server object re-listens. But vite's restart builds a NEW http.Server each time, binds a new
+   port, and never closes the old one (its `createServerCloseFn` skips closing a server it never
+   saw emit 'listening'). So every restart still leaks one bound port: observed climbing
+   5173 -> 5174 -> ... -> 6087 inside ONE app session. The leak is a SYMPTOM of the restart loop,
+   so fixing the loop mostly removes it — but a server that is garbage-collected without close
+   should still release its fd, and that is worth fixing on its own.
+
+3. Reading chokidar did not settle the trigger and cost a lot of cycles. Both chokidar copies
+   (v4.0.3 in node_modules, v3 inlined in vite's bundle) gate `add` on `initialAdd &&
+   ignoreInitial`, and vite passes `ignoreInitial: true` (config.js:16779). The fsevents
+   `emitAdd` with its `forceAdd` bypass is NOT our path. So the leak of an `add` is still
+   unexplained by reading alone — MEASURE it: instrument chokidar's own `_emit` in node_modules
+   to append event+path+initialAdd to a file, with the dev server started cleanly per (1).
+
 ### THE TRIGGER IS NOW IDENTIFIED (iteration 1, measured)
 
 A stack capture at vite's config-change branch names the caller:
