@@ -198,9 +198,35 @@ final class NodeEngine: @unchecked Sendable {
         self.env = env
         self.shell = shell
         self.tty = tty
-        self.mounts = mounts.map { (normalizeMountPrefix($0.prefix), $0.url) }
-            .sorted { $0.prefix.count > $1.prefix.count }
+        // The workspace answers to a NAMED path as well as to "/", and a program is launched
+        // with the named one as its cwd. Both spellings resolve to the same directory, so
+        // nothing that already speaks "/" changes.
+        //
+        // This exists because a project rooted at "/" breaks file watching, and the failure is
+        // spectacular rather than subtle. chokidar records a directory under its parent:
+        // `_getWatchedDir(dirname(dir)).add(basename(dir))`. For dir == "/", POSIX says
+        // dirname is "/" and basename is "" — node agrees, our path module is right — so it
+        // files an EMPTY-NAMED child inside the root's own record. The next directory read
+        // never lists "", the diff calls it deleted, and removing "" resolves back to the root
+        // and tears down the whole tracked tree: an `unlink` for every file in the project.
+        // vite sees its config unlinked, restarts, builds a fresh watcher, and does it again
+        // about three seconds later — the restart storm, and with it the dependency scan dying
+        // as ERR_CLOSED_SERVER. No other platform hits this because no real project lives at
+        // the filesystem root.
+        //
+        // Caveat, recorded rather than hidden: a workspace containing a top-level directory
+        // with this name is shadowed by the alias, since the prefix is matched before the root
+        // fallback. `/project/x` would reach `<workspace>/x`, and the real one needs
+        // `/project/project/x`.
+        var resolved: [(prefix: String, url: URL)] =
+            mounts.map { (prefix: normalizeMountPrefix($0.prefix), url: $0.url) }
+        resolved.append((prefix: Self.namedRoot, url: root))
+        self.mounts = resolved.sorted { $0.prefix.count > $1.prefix.count }
     }
+
+    /// The workspace's named spelling — what a program gets as its cwd, so its own root has a
+    /// real basename. See the note in `init`.
+    static let namedRoot = "/project" 
 
     /// Attach the terminal after init — the host program can't hand closures over itself
     /// to its own initializer. Must happen before `run`.
