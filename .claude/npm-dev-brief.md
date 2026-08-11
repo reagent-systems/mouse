@@ -58,6 +58,43 @@ Two measurements, both on the simulator with the real project:
 So the restart trigger is NOT the file watcher, and there is a SECOND, separate bug: a new file
 in a watched directory produces no event, which also means HMR cannot work.
 
+## ITERATION 3 — THE EVENT IS `unlink`, FOR EVERY FILE IN THE PROJECT
+
+Captured with a deep stack at vite's config-change branch, on a cleanly started server:
+
+    === TYPE=delete FILE=/vite.config.ts
+    === TYPE=delete FILE=/static/robots.txt
+    === TYPE=delete FILE=/.gitignore
+    === TYPE=delete FILE=/.npmrc
+    ...
+
+chokidar is telling vite that EVERY FILE IN THE PROJECT WAS DELETED. Nothing was deleted. The
+config's unlink is what restarts the server; the restart builds a new watcher, which shortly
+declares everything deleted again. That is the loop, and it is an `unlink` storm, not an `add`.
+(The iteration-1 guess of a leaked initial-scan `add` was WRONG — it is `delete`.)
+
+Directory reading is NOT the cause. Measured on device in that project:
+  - `fs.promises.readdir('.', { withFileTypes: true })` -> n=18, correct names, `isFile()` works.
+  - `readdirp('.', { depth: 0, type: 'all' })` -> n=18, every entry listed.
+So the reads chokidar depends on are healthy.
+
+### Where the unlink must come from — instrument these two, in vite's INLINED chokidar
+IMPORTANT: vite bundles its OWN chokidar inside `node_modules/vite/dist/node/chunks/config.js`
+(see the `initialAdd && ignoreInitial` sites there). `node_modules/chokidar` (v4) is a DIFFERENT
+copy used by other packages. Instrument the INLINED one — the unlink reaching vite comes from it.
+
+1. `_handleRead`'s directory diff: it builds `current` from a readdirp stream and then does
+   `previous.getChildren().filter(item => !current.has(item)).forEach(item => this.fsw._remove(...))`.
+   If `current` ends up EMPTY (stream yields nothing, or every entry is filtered out) while
+   `previous` holds all the files, every file is removed -> unlink for each. This is the prime
+   suspect and matches the symptom exactly.
+2. `_handleFile`'s listener catch: `catch { this.fsw._remove(dirname, basename) }` when
+   `stat(file)` throws after a watch event.
+
+Decisive next step: add a logging line inside the inlined chokidar's `_remove` that appends
+`item` plus `new Error().stack` (with `Error.stackTraceLimit = 60`) to a file using the module's
+`fs` binding. That names which of the two paths fires, and the fix follows from it.
+
 ## ITERATION 2 — A PROCESS TRAP THAT INVALIDATED MEASUREMENTS, AND A LEAK REFINEMENT
 
 READ THIS BEFORE MEASURING ANYTHING.
