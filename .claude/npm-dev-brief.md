@@ -82,7 +82,39 @@ real name; this edge case never fires. It is our virtual-filesystem layout that 
 the fix belongs in swift/ and is general — it will fix watching for React/Vite/anything, and HMR
 along with it.
 
-### The fix to implement next — decide between these two
+### IMPLEMENTATION SCOPE, measured in iteration 5
+
+The trigger is one line: `Shell.swift:1474` (and `:1485`) launch node with `cwd: "/" + cwd`, so at
+the workspace root a program's cwd is exactly `/`. vite takes that as `root`, chokidar watches
+`/`, and the empty-basename bug fires.
+
+Changing the project's virtual root is NOT a one-line change: the whole engine is `/`-rooted —
+the module resolver and loader emit `mouse:///…` paths, stack traces and the source-context
+header print them, the Viewer's openFile hook receives them, and msh clamps paths to the root.
+Any rename shows up in all of those, which is why this needs a deliberate choice rather than a
+quick edit. THE OWNER SHOULD PICK, because option A changes what users see.
+
+  A. Root the workspace at a NAMED virtual path (e.g. `/project`) instead of `/`.
+     Correct and general — real projects are never at `/`, which is exactly why no other
+     platform hits this. Cost: user-visible paths change everywhere (prompt, traces, Viewer),
+     and every gate that asserts a `/`-rooted path needs updating.
+  B. Keep `/` as the workspace root, but make the path chokidar WATCHES have a real basename —
+     e.g. have `fs.realpathSync('/')` answer a named alias that also resolves, since chokidar
+     calls realpath on its watch target and uses the result for its bookkeeping.
+     Much smaller blast radius, but two names for one directory can desynchronise anything that
+     compares paths by string (vite computes root-relative paths constantly), so it must be
+     proven against the real dev server, not just a unit gate.
+
+Recommendation: try B behind the gate below FIRST, because it is cheap to test and reversible;
+fall back to A if path comparisons break.
+
+### The gate this needs, whichever option wins
+A harness that watches a tree whose root is the VIRTUAL ROOT with chokidar, changes nothing, and
+asserts that NO `unlink` is emitted within a few seconds. That is the exact shape of the bug and
+nothing in verify/ covers it today (verify/chokidar watches a subdirectory, which is why it has
+always passed).
+
+### The original two options (superseded by the scope note above)
 1. **Give the workspace a non-root virtual path** (e.g. cwd `/project`, or a mount alias) so the
    watched root has a real basename. The engine already has a `mounts` concept
    (`NodeEngine(root:mounts:)`, `normalizeMountPrefix`, NodeEngine.swift ~193-201, 2476-2494) and
