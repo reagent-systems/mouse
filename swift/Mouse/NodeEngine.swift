@@ -3265,7 +3265,15 @@ final class NodeEngine: @unchecked Sendable {
                 while end < count, isIdent(bytes[end]) { end += 1 }
                 let word = String(decoding: bytes[index..<end], as: UTF8.self)
                 let precededByDot = lastCode == 0x2e
-                if word == "import", !precededByDot, !mask {
+                // `import` is a legal METHOD NAME, and vite's ModuleRunner uses it:
+                // `async import(url) { … }`. That is a definition, not a dynamic import, and
+                // rewriting it to `__dynamicImport(__mouseRequire, url) { … }` deleted the
+                // method — SvelteKit's SSR then died on "runner.import is not a function".
+                // `.import(` was already guarded by the dot; a modifier in front of it is the
+                // other way the name appears, and `async import(…)` is not a valid expression,
+                // so skipping these can never miss a real dynamic import.
+                let definitionModifier = ["async", "static", "get", "set"].contains(lastWord)
+                if word == "import", !precededByDot, !definitionModifier, !mask {
                     var probe = end
                     while probe < count, bytes[probe] == 0x20 || bytes[probe] == 0x09
                             || bytes[probe] == 0x0a || bytes[probe] == 0x0d { probe += 1 }
