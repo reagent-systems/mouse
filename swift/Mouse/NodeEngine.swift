@@ -386,6 +386,7 @@ final class NodeEngine: @unchecked Sendable {
             if !handled, exitCode == nil {
                 err += sourceContext(of: fatalValue)
                 err += remapStack(fatal.hasSuffix("\n") ? fatal : fatal + "\n")
+                err += causeChain(of: fatalValue)
                 exitCode = 1
             }
         }
@@ -434,6 +435,42 @@ final class NodeEngine: @unchecked Sendable {
         context.objectForKeyedSubscript("__mouseEmitExit")?.call(withArguments: [exitCode ?? 0])
 
         return Result(out: out, err: err, status: exitCode ?? 0)
+    }
+
+    /// The `[cause]:` chain under an uncaught error, the way node has printed it since 16.9 —
+    /// each level indented two more spaces, message first, frames remapped like the top error's.
+    /// Without this, a library that wraps its real failure (`new Error(summary, { cause })`)
+    /// prints only the summary: rolldown's loader threw "Cannot find native binding" with npm
+    /// advice attached, while the actual refusal — JavaScriptCore declining a thread-built wasm
+    /// module — sat unprinted in the cause. The one honest error surface was hiding the honest
+    /// error.
+    ///
+    /// Two deliberate divergences from node's rendering, which is `util.inspect`'s: no `{`/`}`
+    /// object braces around nested errors, and no "... N lines matching cause stack trace ..."
+    /// elision — the plain chain reads better on a phone column and elides nothing.
+    private func causeChain(of error: JSValue?) -> String {
+        var text = ""
+        var current = error?.forProperty("cause")
+        var depth = 1
+        // A cause cycle would loop forever; eight levels prints every chain a real package
+        // throws (rolldown's is six) without needing identity tracking across JSValues.
+        while let value = current, !value.isUndefined, !value.isNull, depth <= 8 {
+            let message = value.toString() ?? "?"
+            // JSC stacks carry frames only — no leading "Error: message" line like V8's.
+            var body = message
+            if value.isObject, let stack = value.forProperty("stack"), !stack.isUndefined,
+               let frames = stack.toString(), !frames.isEmpty {
+                body += "\n" + remapStack(frames.hasSuffix("\n") ? String(frames.dropLast()) : frames)
+            }
+            let indent = String(repeating: "  ", count: depth)
+            let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
+            for (index, line) in lines.enumerated() {
+                text += indent + (index == 0 ? "[cause]: " : "  ") + line + "\n"
+            }
+            current = value.isObject ? value.forProperty("cause") : nil
+            depth += 1
+        }
+        return text
     }
 
     /// `sourceURL` names the module in stack traces. Without it JSC reports every frame as a
@@ -6468,6 +6505,31 @@ final class NodeEngine: @unchecked Sendable {
           const stack = reason.stack;
           text = stack && String(stack).indexOf(reason.message) >= 0
             ? String(stack) : String(reason) + (stack ? '\n' + stack : '');
+          // The `[cause]:` chain, as node prints it since 16.9 — each level indented two more
+          // spaces, frames under the message. A library that wraps its real failure
+          // (`new Error(summary, { cause })`) otherwise prints ONLY the summary: rolldown's
+          // loader says "Cannot find native binding" with npm advice, while the true refusal —
+          // the engine declining a thread-built wasm module — sat unprinted in the cause. No
+          // object braces and no stack elision, unlike node's inspect: the plain chain elides
+          // nothing, which on a phone column is the point.
+          let cause = reason.cause;
+          let depth = 1;
+          while (cause !== undefined && cause !== null && depth <= 8) {
+            const indent = '  '.repeat(depth);
+            let body = String(cause && cause.message !== undefined ? cause : cause);
+            if (cause instanceof Error) {
+              body = String(cause);
+              if (cause.stack && String(cause.stack).length) {
+                body += '\n' + String(cause.stack).replace(/\n$/, '');
+              }
+            }
+            const lines = body.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              text += '\n' + indent + (i === 0 ? '[cause]: ' : '  ') + lines[i];
+            }
+            cause = (cause instanceof Error || typeof cause === 'object') && cause ? cause.cause : undefined;
+            depth += 1;
+          }
         } else {
           // node wraps a non-Error rejection rather than printing it bare.
           text = 'UnhandledPromiseRejection: This error originated either by throwing inside of ' +

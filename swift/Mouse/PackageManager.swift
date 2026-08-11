@@ -410,16 +410,34 @@ enum PackageManager {
         "esbuild": "esbuild-wasm",
     ]
 
-    /// The same idea as `wasmSubstitutes`, but for the shape napi-rs uses: a package lists every
-    /// platform's binary in `optionalDependencies` and its loader tries them in turn, ending at
-    /// `…-wasm32-wasi` — the author's own portable build, published for platforms they do not
-    /// ship a binary for. Every native one is skipped here (none can load on iOS) and that one
-    /// is installed, so the loader's last resort is the one that is present. rolldown, which
-    /// vite 7 bundles with, is exactly this shape.
-    static func wasiBinding(of package: ResolvedPackage) -> (name: String, requirement: String)? {
+    /// The same idea as `wasmSubstitutes`, but for the shape napi-rs uses: a package lists its
+    /// platform binaries in `optionalDependencies` and its loader tries them in turn, with
+    /// `…-wasm32-wasi` — the author's own portable build — as the last resort. Every native one
+    /// is skipped here (none can load on iOS) and the wasi one is installed, so the loader's
+    /// last resort is the one that is present.
+    ///
+    /// Two shapes, because the ecosystem moved. Originally the wasi build sat IN
+    /// `optionalDependencies` and this function just found it. rolldown 1.x STOPPED listing it
+    /// — the natives are all that remain — which on a phone turned `npm run dev` of a vite 8
+    /// project into rolldown's "Cannot find native binding" spew: the loader's wasi branch
+    /// probes `@rolldown/binding-wasm32-wasi` by name, but nothing had installed it. So when
+    /// the listing is gone, the name is DERIVED from the natives' own naming shape
+    /// (`@scope/binding-<platform>-<arch>` → `…-wasm32-wasi`), pinned to the package's exact
+    /// version — napi-rs publishes every binding in lockstep. A derived name is a GUESS about
+    /// the registry, so it resolves as `optional`: a package with no wasi build installs
+    /// exactly as before rather than failing the whole tree.
+    static func wasiBinding(of package: ResolvedPackage) -> (name: String, requirement: String, derived: Bool)? {
         for (name, requirement) in package.optionalDependencies.sorted(by: { $0.key < $1.key })
         where name.hasSuffix("-wasm32-wasi") {
-            return (name, requirement)
+            return (name, requirement, false)
+        }
+        for name in package.optionalDependencies.keys.sorted() {
+            for platform in ["-darwin-", "-linux-", "-win32-", "-freebsd-", "-android-", "-openharmony-"] {
+                if let range = name.range(of: platform) {
+                    let stem = String(name[..<range.lowerBound])
+                    return (stem + "-wasm32-wasi", package.version, true)
+                }
+            }
         }
         return nil
     }
@@ -460,7 +478,16 @@ enum PackageManager {
                 queue.append((depName, depRequirement, path))
             }
             if let wasi = wasiBinding(of: package) {
-                queue.append((wasi.name, wasi.requirement, path))
+                if wasi.derived {
+                    // The guessed name may not exist; probe before it joins the tree, so a
+                    // package that truly has no wasi build installs exactly as it always did.
+                    if let probed = try? await session.resolve(name: wasi.name, requirement: wasi.requirement) {
+                        _ = probed
+                        queue.append((wasi.name, wasi.requirement, path))
+                    }
+                } else {
+                    queue.append((wasi.name, wasi.requirement, path))
+                }
             }
         }
         return placements
