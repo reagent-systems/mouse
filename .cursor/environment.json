@@ -1,0 +1,17 @@
+{
+  "name": "Mouse",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "site",
+      "command": "cd site && python3 -m http.server 8765 --bind 0.0.0.0",
+      "description": "Marketing site (site/) at http://localhost:8765"
+    }
+  ],
+  "ports": [
+    {
+      "name": "site",
+      "port": 8765
+    }
+  ]
+}
