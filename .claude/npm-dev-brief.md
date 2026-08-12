@@ -21,14 +21,20 @@ that left svelte's `dev` a snapshot after all — prose inside a string read as
 code, and shorthand properties written one per line.
 
 ### Still open
-- `error.stack` on JSC carries no `Name: message` header the way V8's does.
-  Every framework that logs `err.stack` — SvelteKit's `format_server_error`,
-  vite's optimizer — therefore prints frames with no message, which cost most
-  of the diagnosis time in this loop and costs a user the same. `stack` is an
-  own writable data property on both JS-created and engine-thrown errors, so
-  creation cannot be hooked; the honest fix is wrapping the error constructors,
-  which covers everything thrown by JS and leaves engine-thrown TypeErrors to
-  `util.inspect`, which already rebuilds the header.
+- ~~`error.stack` carries no `Name: message` header.~~ Done for every error
+  JAVASCRIPT constructs — the error constructors are wrapped and the stack is
+  V8-shaped, gated by `verify/stackshape` against real node. An error the ENGINE
+  throws still reads as bare frames through `.stack`, because JSC materialises
+  `stack` during construction and no hook sees that; console and util.inspect
+  rebuild the header for those. Worth knowing if a message ever goes missing
+  again: the remaining hole is engine-thrown TypeErrors read via `.stack`.
+- `verify/nodejs` has ONE pre-existing mismatch, `event-sequences`: `http client
+  request` and `http server side` both report TIMED OUT where node reports
+  `socket,response,res-end,close` and `request,res-finish,req-end`. Measured
+  against the engine as it was before the stack work — same 104 lines, same one
+  mismatch — so it is not fallout from that, and it was not introduced by this
+  loop. `verify/http` passes, so it is narrower than "http is broken". Unclaimed
+  and unfixed; someone should take it.
 - ~~Nothing gates a watcher rooted at the program root.~~ `verify/watchroot`
   now does, driving the real shell so it pins the launch cwd itself. Run against
   the previous launch path it fails, so it catches the regression. It does not

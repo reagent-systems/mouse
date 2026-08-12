@@ -4941,6 +4941,90 @@ final class NodeEngine: @unchecked Sendable {
       };
       globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 1; } };
       globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 16384; } };
+      // A V8 stack reads "TypeError: message" and then "    at fn (file:line:col)" lines. JSC
+      // gives the frames alone, "fn@file:line:col", with no first line at all — so on this
+      // engine anything that logs `err.stack` prints frames and no reason. SvelteKit's
+      // format_server_error prints exactly that and nothing else, which is why a page that
+      // failed to render showed forty frames and never said what went wrong; and vite's
+      // ssrRewriteStacktrace matches `/^ {4}at /`, so no SSR frame was ever mapped back to the
+      // .svelte file it came from either.
+      //
+      // JSC materialises `stack` as an own data property while the error is being constructed —
+      // on errors the ENGINE throws as much as on ones JavaScript builds — so there is no hook
+      // that sees every error. What is reachable is every error JavaScript constructs, which is
+      // what a library throws on purpose, and that is what this covers. A TypeError the engine
+      // raises still reads as bare frames through `.stack`; console and util.inspect rebuild the
+      // header for those, as they already did.
+      globalThis.__mouseV8Frames = function(raw) {
+        const out = [];
+        for (const line of String(raw || '').split('\n')) {
+          if (!line) continue;
+          if (/^\s+at\s/.test(line)) { out.push(line); continue; }   // already V8-shaped
+          const at = line.lastIndexOf('@');
+          if (at < 0) { out.push('    at ' + line); continue; }
+          const name = line.slice(0, at);
+          const where = line.slice(at + 1) || '<anonymous>';
+          out.push(name ? '    at ' + name + ' (' + where + ')' : '    at ' + where);
+        }
+        return out.join('\n');
+      };
+      (function() {
+        const kinds = [Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError];
+        if (typeof AggregateError === 'function') kinds.push(AggregateError);
+        const replacements = new Map();
+        for (const Native of kinds) {
+          // Named, and the name is load-bearing: the frames JSC captures include this function
+          // and whatever native frames sit under it, none of which are part of the error's
+          // history — V8 does not show the Error constructor either. Counting frames off the top
+          // guessed wrong (it left `at Wrapped (<anonymous>)` as the innermost frame), so the
+          // cut is made at the marker instead.
+          const Wrapped = function __mouseErrorConstructor() {
+            const error = Reflect.construct(Native, arguments, new.target || Wrapped);
+            const lines = String(error.stack || '').split('\n');
+            const mine = lines.findIndex(function(l) { return l.indexOf('__mouseErrorConstructor@') === 0; });
+            const raw = (mine >= 0 ? lines.slice(mine + 1) : lines).join('\n');
+            let text = null;
+            // An ACCESSOR, not a value: building the string costs a split and a join over every
+            // frame, and the overwhelming majority of errors are constructed, caught and never
+            // asked for a stack. It also matches V8, where `stack` is lazy — and vite's
+            // rebindErrorStacktrace, which reads the descriptor before overwriting, takes the
+            // configurable branch either way.
+            Object.defineProperty(error, 'stack', {
+              configurable: true,
+              enumerable: false,
+              get: function() {
+                if (text === null) {
+                  const header = (error.name || 'Error')
+                    + (error.message ? ': ' + error.message : '');
+                  const frames = globalThis.__mouseV8Frames(raw);
+                  text = frames ? header + '\n' + frames : header;
+                }
+                return text;
+              },
+              set: function(value) { text = value; },
+            });
+            return error;
+          };
+          // The prototype is the native one, untouched, so `instanceof` keeps answering for
+          // errors the engine threw as well as these, and `e.constructor === Error` stays true.
+          Wrapped.prototype = Native.prototype;
+          Object.defineProperty(Native.prototype, 'constructor',
+                                { value: Wrapped, writable: true, configurable: true });
+          Object.defineProperty(Wrapped, 'name', { value: Native.name, configurable: true });
+          for (const key of Object.getOwnPropertyNames(Native)) {
+            if (key === 'prototype' || key === 'name' || key === 'length') continue;
+            const descriptor = Object.getOwnPropertyDescriptor(Native, key);
+            if (descriptor) Object.defineProperty(Wrapped, key, descriptor);
+          }
+          replacements.set(Native, Wrapped);
+        }
+        // `TypeError.__proto__ === Error` in the language, and code reads it; keep the shape.
+        for (const [Native, Wrapped] of replacements) {
+          const parent = replacements.get(Object.getPrototypeOf(Native));
+          if (parent) Object.setPrototypeOf(Wrapped, parent);
+          globalThis[Native.name] = Wrapped;
+        }
+      })();
       // V8's stack-trace protocol: when Error.prepareStackTrace is set, captureStackTrace
       // hands it structured CallSite objects (depd — under express — walks them). JSC's
       // native captureStackTrace ignores the protocol, so emulate it from JSC stack lines
@@ -4972,7 +5056,7 @@ final class NodeEngine: @unchecked Sendable {
           target.stack = Error.prepareStackTrace(target, callSites);
         } else {
           target.stack = (target.name || 'Error') + (target.message ? ': ' + target.message : '') + '\n'
-            + raw.map(function(l){ return '    at ' + l; }).join('\n');
+            + globalThis.__mouseV8Frames(raw.join('\n'));
         }
       };
       globalThis.atob = function(base64) { return Buffer.from(String(base64), 'base64').toString('binary'); };
