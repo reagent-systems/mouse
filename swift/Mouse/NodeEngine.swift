@@ -12299,8 +12299,12 @@ final class NodeEngine: @unchecked Sendable {
           if (hasBody && (this.method === 'GET' || this.method === 'HEAD')) {
             throw new TypeError('Request with GET/HEAD method cannot have body.');
           }
-          defineBody(this, !hasBody ? Buffer.alloc(0)
-                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))), hasBody);
+          // __toBytes, not String(): a Uint8Array is BYTES, and stringifying one yields its
+          // decimal listing. That is literally what went over the wire — a rendered page
+          // arrived as "60,33,100,111,99,..." instead of "<!doctype html>" — because
+          // `new Response(new TextEncoder().encode(html))` is how a framework returns a page,
+          // and a Uint8Array is not a Buffer.
+          defineBody(this, !hasBody ? Buffer.alloc(0) : __toBytes(body), hasBody);
         }
         clone() {
           if (this.bodyUsed) throw new TypeError('Body is unusable: Body has already been read');
@@ -12330,8 +12334,12 @@ final class NodeEngine: @unchecked Sendable {
           // A ReadableStream body stays a stream — that is what makes a streaming response
           // readable as it arrives instead of after it finishes.
           if (body && typeof body.getReader === 'function') { defineStreamBody(this, body); return; }
-          defineBody(this, !hasBody ? Buffer.alloc(0)
-                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))), hasBody);
+          // __toBytes, not String(): a Uint8Array is BYTES, and stringifying one yields its
+          // decimal listing. That is literally what went over the wire — a rendered page
+          // arrived as "60,33,100,111,99,..." instead of "<!doctype html>" — because
+          // `new Response(new TextEncoder().encode(html))` is how a framework returns a page,
+          // and a Uint8Array is not a Buffer.
+          defineBody(this, !hasBody ? Buffer.alloc(0) : __toBytes(body), hasBody);
         }
         get ok() { return this.status >= 200 && this.status < 300; }
         clone() {
