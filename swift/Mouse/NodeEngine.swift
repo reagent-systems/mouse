@@ -17511,7 +17511,10 @@ final class NodeEngine: @unchecked Sendable {
             this._address = null;
           }
           this._closing = false;
-          let port = 0, host = '0.0.0.0', backlog = 511;
+          // EMPTY, not '0.0.0.0': the host being absent is information the socket layer needs,
+          // because node's no-host wildcard is dual-stack `::` and not IPv4's `0.0.0.0`. Naming
+          // the IPv4 wildcard here threw that away before it could be acted on.
+          let port = 0, host = '', backlog = 511;
           // A path listens on a socket FILE.
           const unixPath = (args[0] && typeof args[0] === 'object' && args[0].path) ? String(args[0].path)
             : (typeof args[0] === 'string' && !/^\d+$/.test(args[0]) ? args[0] : null);
@@ -17526,7 +17529,7 @@ final class NodeEngine: @unchecked Sendable {
           }
           if (args[0] && typeof args[0] === 'object') {
             port = args[0].port || 0;
-            host = args[0].host || '0.0.0.0';
+            host = args[0].host || '';
             backlog = args[0].backlog || backlog;
           } else {
             port = Number(args[0]) || 0;

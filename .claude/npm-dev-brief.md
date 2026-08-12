@@ -28,18 +28,19 @@ code, and shorthand properties written one per line.
   `stack` during construction and no hook sees that; console and util.inspect
   rebuild the header for those. Worth knowing if a message ever goes missing
   again: the remaining hole is engine-thrown TypeErrors read via `.stack`.
-- `verify/nodejs` has ONE pre-existing mismatch, `event-sequences`: `http client
-  request` and `http server side` both report TIMED OUT where node reports
-  `socket,response,res-end,close` and `request,res-finish,req-end`. Measured
-  against the engine as it was before the stack work — same 104 lines, same one
-  mismatch — so it is not fallout from that, and it was not introduced by this
-  loop. `verify/http` passes, so it is narrower than "http is broken". Unclaimed
-  and unfixed; someone should take it.
-- ~~Nothing gates a watcher rooted at the program root.~~ `verify/watchroot`
-  now does, driving the real shell so it pins the launch cwd itself. Run against
-  the previous launch path it fails, so it catches the regression. It does not
-  reproduce the storm: standalone chokidar over a root this size stays quiet even
-  from `/`, and the tearing needed the dev server's own watcher and churn.
+- ~~`verify/nodejs` has a pre-existing `event-sequences` mismatch.~~ Fixed, and
+  the cause was worth having: `listen()` with no host bound `0.0.0.0`, IPv4
+  only, where node binds `::` with IPV6_V6ONLY off. `localhost` resolves to
+  `::1` first on this platform, so a program that called its own server BY NAME
+  was refused — `http.get({ port })`, which is how node's own docs write it.
+  Sockets given an explicit '127.0.0.1' always worked, which is exactly why it
+  hid for so long.
+- `verify/devserver` was FLAKY and is no longer: it slept a fixed six seconds
+  for vite to boot, which is enough alone and not enough beside a parallel
+  build. It now polls for the server. Worth remembering how it read: a red run
+  during a busy sweep looked exactly like a regression, and was bisected across
+  five commits before two clean re-runs showed the same binary passing. When a
+  gate fails once under load, re-run it before believing it.
 - **Tailwind 4 cannot run here, and the reason is not ours to fix.** Restoring
   `tailwindcss()` to `local__test-2/vite.config.ts` gets past lightningcss now
   (substituted, gated by `verify/lightningcss`) and then stops at
