@@ -1,6 +1,42 @@
 # Goal: `npm run dev` works for Node dev servers on iOS
 
-## CURRENT BLOCKER (iteration 9): the PINNED ESM divergence is no longer acceptable
+## MET — SvelteKit, on the simulator, curled from the Mac
+
+    VITE v7.3.6  ready in 19343 ms      started once, no restart loop
+    curl http://localhost:5173/         HTTP 200, 33105 bytes, the rendered app
+    node_modules/.vite/deps             20 dependencies pre-bundled
+
+The scan no longer fails. The one remaining sighting of "Failed to run
+dependency scan" came from a harness that called `server.close()` while the
+scan was still in flight — vite's own `ERR_CLOSED_SERVER`, correctly reported.
+Left open, the scan completes and writes its metadata.
+
+The five fixes, in the order they were found, each verified on the simulator:
+the restart storm (a project rooted at `/`, so chokidar filed an empty-named
+child in the root's own record and tore the tree down every three seconds —
+launch cwd is now `/project`), `import` as a method name, ESM named imports as
+live bindings rather than snapshots, `Request`/`Response` bodies built from
+typed arrays instead of `String(body)`, and the two misreadings of source text
+that left svelte's `dev` a snapshot after all — prose inside a string read as
+code, and shorthand properties written one per line.
+
+### Still open
+- `error.stack` on JSC carries no `Name: message` header the way V8's does.
+  Every framework that logs `err.stack` — SvelteKit's `format_server_error`,
+  vite's optimizer — therefore prints frames with no message, which cost most
+  of the diagnosis time in this loop and costs a user the same. `stack` is an
+  own writable data property on both JS-created and engine-thrown errors, so
+  creation cannot be hooked; the honest fix is wrapping the error constructors,
+  which covers everything thrown by JS and leaves engine-thrown TypeErrors to
+  `util.inspect`, which already rebuilds the header.
+- Nothing gates a watcher rooted at the program root asserting no `unlink` when
+  nothing changed. `verify/chokidar` watches a subdirectory, which is why the
+  restart storm was invisible to the suite.
+- `tailwindcss()` is still removed from `local__test-2/vite.config.ts` from
+  debugging. Restoring it needs `lightningcss` → `lightningcss-wasm` in
+  `PackageManager.wasmSubstitutes`.
+
+## History — blocker at iteration 9: the PINNED ESM divergence
 
 Fixed so far, in order, each verified on the simulator: the restart storm
 (project rooted at `/`, commit d27265e), and `import` as a method name
