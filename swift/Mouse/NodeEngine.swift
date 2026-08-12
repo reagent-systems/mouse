@@ -3498,9 +3498,14 @@ final class NodeEngine: @unchecked Sendable {
                     // reference rewrite. It is only safe where the name cannot be something else,
                     // so `shadows` refuses whenever the module also DECLARES that name; those
                     // fall back to the copy, which is exactly today's behaviour and no worse.
-                    if !liveBindings || shadows(binding.alias) {
-                        lines.append("const \(binding.alias) = __esmBinding(\(temp), '\(binding.source)');")
-                    } else {
+                    // The declaration is ALWAYS emitted, even when the name is promoted to a
+                    // live binding. The rewrite below skips any occurrence it cannot classify,
+                    // and without a declaration to fall back on such a name would simply not
+                    // exist — svelte's a11y constants died as "Can't find variable: AXObjects"
+                    // for exactly that reason. With the const still there, a missed reference
+                    // reads the old snapshot: the previous behaviour, not a crash.
+                    lines.append("const \(binding.alias) = __esmBinding(\(temp), '\(binding.source)');")
+                    if liveBindings && !shadows(binding.alias) {
                         live.append((alias: binding.alias, temp: temp, source: binding.source))
                     }
                 }
@@ -3719,6 +3724,23 @@ final class NodeEngine: @unchecked Sendable {
                         if before >= 0 {
                             let previous = maskNS.character(at: before)
                             if previous == 0x2e || previous == 0x23 { continue }   // .name  #name
+                        }
+                        // A DECLARATION of the name is never a read — including the
+                        // `const x = __esmBinding(…)` emitted just above, which would otherwise
+                        // become `const __esm1.x = …`.
+                        var keywordEnd = before + 1
+                        var keywordStart = before
+                        while keywordStart >= 0, maskNS.character(at: keywordStart) != 0x20,
+                              maskNS.character(at: keywordStart) != 0x09,
+                              maskNS.character(at: keywordStart) != 0x0a,
+                              maskNS.character(at: keywordStart) != 0x3b,
+                              maskNS.character(at: keywordStart) != 0x7b { keywordStart -= 1 }
+                        keywordStart += 1
+                        if keywordEnd > keywordStart {
+                            let keyword = maskNS.substring(with: NSRange(location: keywordStart,
+                                                                         length: keywordEnd - keywordStart))
+                            if keyword == "const" || keyword == "let" || keyword == "var"
+                                || keyword == "function" || keyword == "class" { continue }
                         }
                         var after = at + match.range.length
                         while after < maskNS.length,
@@ -5752,6 +5774,11 @@ final class NodeEngine: @unchecked Sendable {
           return Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
         }
         if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
+        // An ARRAY of numbers is bytes, which is what `Buffer.from([…])` means in node. Falling
+        // through to String() turned one into its own decimal listing: a SvelteKit error page
+        // arrived over the wire as "60,33,100,111,99,116,..." — the source text of
+        // `<!doctype html>` rendered as comma-separated character codes.
+        if (Array.isArray(value)) return Buffer.from(value);
         return Buffer.from(String(value), encoding && encoding !== 'buffer' ? encoding : 'utf8');
       };
       // TypeScript, compiled by the project's OWN typescript package — the ts-node model, and
