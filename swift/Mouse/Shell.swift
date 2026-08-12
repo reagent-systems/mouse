@@ -1471,7 +1471,7 @@ final class MouseShell {
             let engine = NodeEngine(root: context.root, env: env, shell: bridge, mounts: runtimeMounts)
             let program = NodeProgram(
                 title: title, source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
-                cwd: NodeEngine.namedRoot + (cwd.isEmpty ? "" : "/" + cwd), engine: engine,
+                cwd: engine.namedRoot + (cwd.isEmpty ? "" : "/" + cwd), engine: engine,
                 transcript: { line, isError in context.emit(Output(text: line, isError: isError)) },
                 clearTranscript: { context.clear() },
                 onExit: { context.reloadTree() })
@@ -1482,7 +1482,7 @@ final class MouseShell {
         defer { nodeDepth -= 1 }
         let engine = NodeEngine(root: context.root, env: env, shell: bridge, mounts: runtimeMounts)
         let result = await engine.run(source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
-                                      cwd: NodeEngine.namedRoot + (cwd.isEmpty ? "" : "/" + cwd), stdin: stdin)
+                                      cwd: engine.namedRoot + (cwd.isEmpty ? "" : "/" + cwd), stdin: stdin)
         context.reloadTree()   // scripts write files
         return IO(out: result.out, err: result.err, status: result.status)
     }

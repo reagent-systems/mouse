@@ -26,6 +26,12 @@ typed arrays instead of `String(body)`, and the two misreadings of source text
 that left svelte's `dev` a snapshot after all — prose inside a string read as
 code, and shorthand properties written one per line.
 
+A full suite run (146 harnesses) found the one thing the loop had left behind:
+the `/project` alias SHADOWED a real top-level directory of that name, and two
+harnesses keep their packages in exactly such a directory. The alias now steps
+aside to `/project-2` when the workspace already holds that name. Read
+`engine.namedRoot`; do not assume the default.
+
 ### Still open
 - ~~`error.stack` carries no `Name: message` header.~~ Done for every error
   JAVASCRIPT constructs — the error constructors are wrapped and the stack is

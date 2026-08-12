@@ -69,8 +69,8 @@ let nodeText = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(),
 process.waitUntilExit()
 
 let engine = NodeEngine(root: base, env: ["PATH": "/usr/bin"])
-let mine = await engine.run(source: script, path: NodeEngine.namedRoot + "/probe.js",
-                            argv: ["node", "probe.js"], cwd: NodeEngine.namedRoot, stdin: "")
+let mine = await engine.run(source: script, path: engine.namedRoot + "/probe.js",
+                            argv: ["node", "probe.js"], cwd: engine.namedRoot, stdin: "")
 
 func lines(_ text: String) -> [String] {
     text.trimmingCharacters(in: .whitespacesAndNewlines)

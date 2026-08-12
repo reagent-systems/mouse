@@ -214,19 +214,39 @@ final class NodeEngine: @unchecked Sendable {
         // as ERR_CLOSED_SERVER. No other platform hits this because no real project lives at
         // the filesystem root.
         //
-        // Caveat, recorded rather than hidden: a workspace containing a top-level directory
-        // with this name is shadowed by the alias, since the prefix is matched before the root
-        // fallback. `/project/x` would reach `<workspace>/x`, and the real one needs
-        // `/project/project/x`.
+        // The name is CHOSEN, not fixed, because the alias is matched before the root and would
+        // otherwise shadow a real directory of the same name: `/project/x` would reach
+        // `<workspace>/x` and the true `<workspace>/project/x` could not be addressed at all.
+        // That was written down as a caveat and it is not hypothetical — two harnesses here keep
+        // their packages in a directory called `project`, and both stopped finding them. So a
+        // workspace that already has that name gets `/project-2`, and both paths stay reachable.
+        // A local copy of the normaliser: the instance method would capture `self` here, and
+        // `namedRoot` is not assigned yet.
+        func normalizedPrefix(_ prefix: String) -> String {
+            var text = prefix.hasPrefix("/") ? prefix : "/" + prefix
+            while text.count > 1 && text.hasSuffix("/") { text.removeLast() }
+            return text
+        }
         var resolved: [(prefix: String, url: URL)] =
-            mounts.map { (prefix: normalizeMountPrefix($0.prefix), url: $0.url) }
-        resolved.append((prefix: Self.namedRoot, url: root))
+            mounts.map { (prefix: normalizedPrefix($0.prefix), url: $0.url) }
+        let existing = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        let claimed = Set(resolved.map(\.prefix))
+        var name = Self.defaultNamedRoot
+        var attempt = 2
+        while existing.contains(String(name.dropFirst())) || claimed.contains(name) {
+            name = "\(Self.defaultNamedRoot)-\(attempt)"
+            attempt += 1
+        }
+        self.namedRoot = name
+        resolved.append((prefix: name, url: root))
         self.mounts = resolved.sorted { $0.prefix.count > $1.prefix.count }
     }
 
     /// The workspace's named spelling — what a program gets as its cwd, so its own root has a
-    /// real basename. See the note in `init`.
-    static let namedRoot = "/project" 
+    /// real basename. Per engine, because it steps aside for a real directory of the same name;
+    /// read it from the engine rather than assuming the default. See the note in `init`.
+    let namedRoot: String
+    static let defaultNamedRoot = "/project"
 
     /// Attach the terminal after init — the host program can't hand closures over itself
     /// to its own initializer. Must happen before `run`.

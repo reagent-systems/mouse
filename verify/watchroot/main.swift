@@ -96,7 +96,10 @@ let cwd = field("CWD ") ?? "(none)"
 // The root a program starts at must have a parent and a basename. "/" has neither, and that is
 // the entire bug: `dirname("/")` is "/" and `basename("/")` is "".
 check(cwd != "/", "a program does not start at \"/\" — it starts at \(cwd)")
-check(cwd == NodeEngine.namedRoot, "the launch cwd is the named root \(NodeEngine.namedRoot), got \(cwd)")
+// Asked of an engine over this same workspace rather than assumed: the name steps aside when the
+// workspace already holds a directory of that name, so there is no single right answer to hardcode.
+let expectedRoot = NodeEngine(root: base, env: [:]).namedRoot
+check(cwd == expectedRoot, "the launch cwd is the named root \(expectedRoot), got \(cwd)")
 
 let events = field("EVENTS ") ?? "(no output)"
 // The storm reported every file in the project as deleted. Nothing was deleted here.

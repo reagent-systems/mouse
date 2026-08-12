@@ -58,8 +58,8 @@ console.log('COMPOSE ' + typeof css.composeVisitors);
 console.log('BUNDLE ' + typeof css.bundle);
 """
 let engine = NodeEngine(root: scratch, env: ["PATH": "/usr/bin"])
-let run = await engine.run(source: script, path: NodeEngine.namedRoot + "/probe.js",
-                           argv: ["node", "probe.js"], cwd: NodeEngine.namedRoot, stdin: "")
+let run = await engine.run(source: script, path: engine.namedRoot + "/probe.js",
+                           argv: ["node", "probe.js"], cwd: engine.namedRoot, stdin: "")
 let lines = run.out.split(separator: "\n").map(String.init)
 func line(_ prefix: String) -> String? {
     lines.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
