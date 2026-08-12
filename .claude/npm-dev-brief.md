@@ -32,9 +32,20 @@ code, and shorthand properties written one per line.
 - Nothing gates a watcher rooted at the program root asserting no `unlink` when
   nothing changed. `verify/chokidar` watches a subdirectory, which is why the
   restart storm was invisible to the suite.
-- `tailwindcss()` is still removed from `local__test-2/vite.config.ts` from
-  debugging. Restoring it needs `lightningcss` → `lightningcss-wasm` in
-  `PackageManager.wasmSubstitutes`.
+- **Tailwind 4 cannot run here, and the reason is not ours to fix.** Restoring
+  `tailwindcss()` to `local__test-2/vite.config.ts` gets past lightningcss now
+  (substituted, gated by `verify/lightningcss`) and then stops at
+  `@tailwindcss/oxide`. Its wasi build declares SHARED memory, and JSC answers
+  `WebAssembly.Module doesn't parse at byte 398: shared memory is not enabled`.
+  Measured, so nobody re-derives it: `new WebAssembly.Memory({shared: true})`
+  succeeds, but a module whose memory section carries the shared flag does not
+  parse. The gate is `JSC::Options::useSharedArrayBuffer`, and it is RESTRICTED
+  in Apple's build — `JSC_useSharedArrayBuffer=true` in the environment is
+  accepted as a name (a bogus name next to it is rejected, so the parse
+  happened) and `JSC_dumpOptions=1` still prints
+  `useSharedArrayBuffer=false (default: false)`. So the config keeps tailwind
+  out, and the project runs. This also bounds every other napi-rs wasi binding
+  built with threads.
 
 ## History — blocker at iteration 9: the PINNED ESM divergence
 

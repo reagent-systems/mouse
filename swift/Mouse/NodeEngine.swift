@@ -5242,9 +5242,19 @@ final class NodeEngine: @unchecked Sendable {
             this.password = credentials && credentials.indexOf(':') >= 0 ? credentials.slice(credentials.indexOf(':') + 1) : '';
             this.hostname = match[3] || '';
             this.port = match[4] || '';
+            // `file:` is a SPECIAL scheme in the URL standard: its serialization always carries
+            // the authority marker even though it never has a real host, and `localhost` IS the
+            // empty host. Ours kept whatever the text happened to say, so `new URL('file:' + p)`
+            // — which is the `import.meta.url` polyfill esbuild emits, and how lightningcss-wasm
+            // locates its own .wasm — stayed `file:/project/…` with a single slash. `fs` then
+            // went looking for a file whose name started with `file:`. Only `file:` is handled
+            // here; `http:/host/x`, which the standard also re-reads as an authority, is left as
+            // it was.
+            const isFile = this.protocol === 'file:';
+            if (isFile && this.hostname.toLowerCase() === 'localhost') this.hostname = '';
             this.host = this.hostname + (this.port ? ':' + this.port : '');
             // A hierarchical URL always has a path; node reports '/' where the text has none.
-            const hierarchical = text.indexOf('//') === this.protocol.length;
+            const hierarchical = isFile || text.indexOf('//') === this.protocol.length;
             this._hierarchical = hierarchical;
             // A path is percent-encoded text, not raw text. Existing '%' escapes are left alone
             // (re-encoding them would corrupt any URL that arrived already encoded); everything
@@ -11606,7 +11616,10 @@ final class NodeEngine: @unchecked Sendable {
           // contract, appending an mtime to `searchParams` to cache-bust an ESM config import,
           // which needs an actual URL object rather than a bare { href }.
           fileURLToPath: function(url) {
-            const href = typeof url === 'string' ? url : String((url && url.href) || url);
+            let href = typeof url === 'string' ? url : String((url && url.href) || url);
+            // A file URL written with one slash is the same URL; node parses the string before
+            // reading it, so `fileURLToPath('file:/a')` is '/a' rather than a scheme complaint.
+            if (/^file:(?!\/\/)/i.test(href)) { try { href = new URL(href).href; } catch (error) {} }
             if (!/^file:\/\//i.test(href)) {
               const error = new TypeError('The URL must be of scheme file');
               error.code = 'ERR_INVALID_URL_SCHEME';

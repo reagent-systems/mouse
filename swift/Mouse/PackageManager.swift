@@ -408,6 +408,16 @@ enum PackageManager {
     static let wasmSubstitutes: [String: String] = [
         "rollup": "@rollup/wasm-node",
         "esbuild": "esbuild-wasm",
+        // lightningcss loads `lightningcss-<platform>-<arch>` or a sibling `.node` and has no
+        // wasi branch to fall back to, so on a phone it is simply a missing module — and it is
+        // not optional: vite reaches for it as a CSS transformer, and tailwind 4 pulls it in
+        // through `@tailwindcss/node`. Its authors publish `lightningcss-wasm` at the SAME
+        // version, and that package's `node` export condition is a synchronous build: it reads
+        // its own wasm with `fs.readFileSync`, instantiates it at module scope, and exports the
+        // same transform/bundle/Features/composeVisitors surface the native one does. No
+        // `await init()` for the caller, which is what makes it substitutable at all — the
+        // package that depends on it calls a sync function and gets one.
+        "lightningcss": "lightningcss-wasm",
     ]
 
     /// The same idea as `wasmSubstitutes`, but for the shape napi-rs uses: a package lists its

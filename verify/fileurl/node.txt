@@ -34,5 +34,10 @@ cachebust file:///cfg/eslint.config.mjs?mtime=12345
 cachebust encoded file:///a/b%20c.js?mtime=7
 accepts URL object /a/b c.js
 accepts localhost /a/b.js
+special file:/a/b.js -> file:///a/b.js host="" origin=null
+special file: -> file:/// host="" origin=null
+special file://localhost/a/b.js -> file:///a/b.js host="" origin=null
+special relative file:///a/b/c.wasm
+special toPath /a/b.js
 reject https://example.com/a -> ERR_INVALID_URL_SCHEME
 reject file://otherhost/a -> ERR_INVALID_FILE_URL_HOST
