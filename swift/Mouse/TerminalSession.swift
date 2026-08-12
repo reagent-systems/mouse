@@ -154,18 +154,7 @@ final class TerminalSession {
             // a double-tap re-armed instead of killing, which was measured, not guessed.
             if let at = interruptedAt, Date().timeIntervalSince(at) < 10 {
                 interruptedAt = nil
-                append("killed \(program.title)", .error)
-                program.terminate()
-                // Termination flows through the program's own exit path (io.exit → the
-                // session's cleanup), which is what keeps engines from leaking. A program too
-                // far gone to run even that still must not keep the screen: reclaim it
-                // directly after a beat, if the same program is somehow still installed.
-                let held = ObjectIdentifier(program as AnyObject)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    guard let self, let current = self.program,
-                          ObjectIdentifier(current as AnyObject) == held else { return }
-                    self.programExited()
-                }
+                forceStop(program)
                 return
             }
             interruptedAt = Date()
@@ -174,6 +163,33 @@ final class TerminalSession {
         }
         guard isRunning else { return }
         append("^C", .command)
+        runningTask?.cancel()
+    }
+
+    /// Take the terminal back without asking the program first. The program does not get a vote
+    /// here, unlike `interrupt`'s first press: this is the close button.
+    private func forceStop(_ program: TerminalProgram) {
+        append("killed \(program.title)", .error)
+        program.terminate()
+        // Termination flows through the program's own exit path (io.exit → the session's
+        // cleanup), which is what keeps engines from leaking. A program too far gone to run even
+        // that still must not keep the screen: reclaim it directly after a beat, if the same
+        // program is somehow still installed.
+        let held = ObjectIdentifier(program as AnyObject)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, let current = self.program,
+                  ObjectIdentifier(current as AnyObject) == held else { return }
+            self.programExited()
+        }
+    }
+
+    /// Leaving the project takes its terminal with it. A program started here belongs to the
+    /// workspace that is going away — a dev server left running would hold its port with nothing
+    /// on screen able to reach it, which is the "a running program could not be stopped at all"
+    /// trap in a new costume. So it is stopped outright rather than sent a ^C it may ignore;
+    /// vite, for one, treats ^C as a keystroke and keeps serving.
+    func stopForProjectChange() {
+        if let program { forceStop(program) }
         runningTask?.cancel()
     }
 

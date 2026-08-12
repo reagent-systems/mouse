@@ -162,6 +162,18 @@ final class CarouselDeck {
         ringTerminal = session
         return session
     }
+
+    /// Go back to the project picker. Everything the ring was holding belonged to the project it
+    /// is leaving: the terminal (and whatever it was running), the open file, the workspace
+    /// itself. Dropping the session without stopping it would strand a running dev server on its
+    /// port with no screen able to reach it.
+    @MainActor
+    func leaveWorkspace() {
+        ringTerminal?.stopForProjectChange()
+        ringTerminal = nil
+        openFilePath = nil
+        workspace = nil
+    }
     /// Extra divider height while a gap-label lesson needs room for its word. Animated model
     /// state (not derived at render time) so divider growth and the compensating lane re-fit
     /// share one transaction — the stack's total height never wavers. Set by the view layer.
