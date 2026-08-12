@@ -12,6 +12,17 @@ compiled), `hmr` (the watcher's edit pushed down a real WebSocket), `firstrun`
 (`npm create vite` scaffolds, installs and serves, end to end), `vite`, `npmrun`
 and `tscwatch`.
 
+The WATCHER — the subsystem the storm lived in — was finally exercised on the
+device rather than inferred from a quiet log. Appending a line to
+`src/routes/+page.svelte` in the running workspace:
+
+    ~3s later   curl returns 33133 bytes instead of 33105, marker present
+    terminal    1 line: `[vite] (ssr) page reload src/routes/+page.svelte`
+    reverted    ~3s later, back to 33105 bytes, marker gone
+
+One reload, naming the file that actually changed. Not a restart, not an unlink,
+not a storm. That is the original bug's exact inverse, measured where it lived.
+
 The scan no longer fails. The one remaining sighting of "Failed to run
 dependency scan" came from a harness that called `server.close()` while the
 scan was still in flight — vite's own `ERR_CLOSED_SERVER`, correctly reported.
