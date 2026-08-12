@@ -68,8 +68,22 @@ Each verified on the simulator, each with its evidence in its commit message.
 
 - **An error the ENGINE throws still has no header when read through `.stack`.**
   JSC materialises `stack` during construction, on its own errors as much as
-  ours, and no hook sees that moment. Errors JavaScript constructs are covered;
-  console and util.inspect rebuild the header for the rest.
+  ours, so nothing catches the moment an engine error is born. Errors JavaScript
+  constructs are covered (`verify/stackshape`); console and util.inspect rebuild
+  the header for the rest.
+
+  There IS one more approach, designed and deliberately not attempted, so nobody
+  has to rediscover it or start it blind. `stack` is writable, and the engine
+  already rewrites every ESM module — so `catch (e) {` could become
+  `catch (e) { __mouseFixStack(e);`, giving an engine-thrown error its header at
+  the moment code catches it. That is exactly where SvelteKit caught the
+  TypeError this loop chased. Why it was not done: it is a fifth rewrite in
+  `transpileESM`, and two of the four already there shipped bugs found only by a
+  real bundle failing (`svelte.dev` inside a string, shorthand across newlines).
+  It would cover only transpiled ESM, not the CJS vite bundles its own chokidar
+  into. And it needs its own gate for `catch` with no binding, a rethrown `e`,
+  and a `catch` inside a template or a comment. Worth doing on a fresh context
+  with room to gate it properly; not worth starting at the end of one.
 
 ## The target, concretely
 
