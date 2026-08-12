@@ -3085,7 +3085,7 @@ final class NodeEngine: @unchecked Sendable {
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
     /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
     /// without this a stale rewrite would be reused after an engine update.
-    private static let transpilerVersion = 7
+    private static let transpilerVersion = 8
 
     /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
     /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
@@ -3333,6 +3333,32 @@ final class NodeEngine: @unchecked Sendable {
         return rewriteImportForms(source, meta: false).text
     }
 
+    /// Blanks the INSIDE of every quoted string, keeping the quotes, every other character and
+    /// the total length. Only the shadow test uses this: it asks whether a module declares a
+    /// name, and prose can hold any word.
+    static func blankQuotedStrings(_ text: String) -> String {
+        let ns = text as NSString
+        var chars = [unichar](repeating: 0, count: ns.length)
+        ns.getCharacters(&chars)
+        var i = 0
+        while i < chars.count {
+            let quote = chars[i]
+            guard quote == 0x27 || quote == 0x22 else { i += 1; continue }
+            var j = i + 1
+            // A quoted string ends at its quote or at the line end — an unterminated quote is an
+            // apostrophe in a comment the mask already blanked, and must not eat the rest of the file.
+            while j < chars.count, chars[j] != quote, chars[j] != 0x0a {
+                j += chars[j] == 0x5c ? 2 : 1
+            }
+            let end = min(j, chars.count)
+            if end > i + 1 {
+                for k in (i + 1)..<end where chars[k] != 0x0a { chars[k] = 0x20 }
+            }
+            i = end + 1
+        }
+        return String(utf16CodeUnits: chars, count: chars.count)
+    }
+
     static func transpileESM(_ source: String, liveBindings: Bool = true) -> String {
         var text = source
         // Emitted BEFORE the body: function declarations are hoisted, so a cycle reaching back
@@ -3441,7 +3467,17 @@ final class NodeEngine: @unchecked Sendable {
         var live: [(alias: String, temp: String, source: String)] = []
         // The whole source as code-only text, computed once: declarations cannot be introduced by
         // our own rewrites, so the shadowing question is answered against the ORIGINAL.
-        let shadowMask = rewriteImportForms(source, meta: false, mask: true).text
+        //
+        // The general mask keeps QUOTED STRINGS verbatim, because the import patterns read
+        // specifiers out of them. The shadow test never wants a string's contents, and reading
+        // them costs correctness: svelte's compiler throws an error whose text is a
+        // `https://svelte.dev/...` link, and the `dev` in that URL sat inside the enclosing
+        // call's parentheses, so the parameter-list pattern below decided the module bound its
+        // own `dev`. It does not — `dev` is `export let dev` in the compiler's state module,
+        // assigned per compile — and left as a copy it read `false` forever. Components then
+        // compiled HALF in dev mode: `push_element` emitted, the `FILENAME` it reads not, and
+        // every SvelteKit page died in svelte's own renderer.
+        let shadowMask = blankQuotedStrings(rewriteImportForms(source, meta: false, mask: true).text)
         /// Does this module bind `name` itself anywhere — a declaration, a parameter, a catch, a
         /// destructure? Then the name is not unambiguously the import, and it is left as a copy.
         /// Deliberately over-eager: a false "yes" costs live-ness, a false "no" corrupts code.
@@ -3450,7 +3486,10 @@ final class NodeEngine: @unchecked Sendable {
             let patterns = [
                 "\\b(?:let|const|var|function|class)\\s+\\Q\(name)\\E\\b",
                 "\\bcatch\\s*\\(\\s*\\Q\(name)\\E\\b",
-                "\\bfunction\\b[^(){]*\\([^)]*\\b" + n + "\\b[^)]*\\)",
+                // `b.function(…)` is a CALL to a method named function, never a declaration, and
+                // its arguments are not parameters. Without the lookbehind, any name appearing
+                // anywhere inside such a call read as a shadow.
+                "(?<![.\\w$])function\\b[^(){]*\\([^)]*\\b" + n + "\\b[^)]*\\)",
                 "\\([^()]*\\b" + n + "\\b[^()]*\\)\\s*=>",
                 "\\b" + n + "\\s*=>",
                 "[\\{,]\\s*\\b" + n + "\\b\\s*[,\\}][^=;\\n]*=[^=]",
@@ -3717,10 +3756,15 @@ final class NodeEngine: @unchecked Sendable {
                             probe += 1
                         }
                         if quote != 0 { continue }                                   // inside a string
+                        // NEWLINES are whitespace here. A property list is written one per line,
+                        // so `{\n  a,\n  b\n}` put a newline between `,` and the name and every
+                        // entry failed the property-start test below — the shorthand became
+                        // `{ a, ns.b }`, which does not parse, and the whole module silently fell
+                        // back to snapshot bindings. svelte's compiler keeps its visitors in
+                        // exactly that shape.
+                        func isSpace(_ c: unichar) -> Bool { c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d }
                         var before = at - 1
-                        while before >= 0, maskNS.character(at: before) == 0x20 || maskNS.character(at: before) == 0x09 {
-                            before -= 1
-                        }
+                        while before >= 0, isSpace(maskNS.character(at: before)) { before -= 1 }
                         if before >= 0 {
                             let previous = maskNS.character(at: before)
                             if previous == 0x2e || previous == 0x23 { continue }   // .name  #name
@@ -3743,8 +3787,7 @@ final class NodeEngine: @unchecked Sendable {
                                 || keyword == "function" || keyword == "class" { continue }
                         }
                         var after = at + match.range.length
-                        while after < maskNS.length,
-                              maskNS.character(at: after) == 0x20 || maskNS.character(at: after) == 0x09 { after += 1 }
+                        while after < maskNS.length, isSpace(maskNS.character(at: after)) { after += 1 }
                         let next: unichar = after < maskNS.length ? maskNS.character(at: after) : 0
                         if next == 0x3a { continue }                                // `name:` is a key
                         let read = "\(binding.temp).\(binding.source)"

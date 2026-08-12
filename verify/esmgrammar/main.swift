@@ -212,6 +212,49 @@ let cases: [Case] = [
             console.log(send('a'));
             console.log(resend('b'));
             """]),
+    // Two ways the live-binding rewrite read the source wrong, both found in svelte's compiler
+    // and both silent: the module kept working, it just saw the value the binding held at import
+    // time. `dev` here is the real shape — `export let dev`, assigned per compile — and the URL
+    // in the thrown message is the real reason it stopped being live: `svelte.dev` sat inside the
+    // enclosing call's parentheses, so `dev` read as that call's parameter. The visitor table is
+    // the other one: shorthand properties written one per line, where the comma and the name are
+    // on different lines.
+    Case(name: "live-through-prose-and-tables", files: [
+        "state.mjs": """
+            export let dev;
+            export function set_dev(value) { dev = value; }
+            """,
+        "visitors.mjs": """
+            export const AssignmentExpression = 'assign';
+            export const AwaitExpression = 'await';
+            """,
+        "transform.mjs": """
+            import { dev } from './state.mjs';
+            import { AssignmentExpression, AwaitExpression } from './visitors.mjs';
+            const b = {
+              function(name, body) {
+                if (name === null) {
+                  throw new Error('no longer valid. See https://svelte.dev/docs/svelte/v5-migration-guide for more');
+                }
+                return name + body;
+              },
+            };
+            export const visitors = {
+              _: 'scope',
+              AssignmentExpression,
+              AwaitExpression
+            };
+            export function transform() {
+              return [dev, b.function('n', 'b'), visitors.AssignmentExpression].join(',');
+            }
+            """,
+        "main.mjs": """
+            import { set_dev } from './state.mjs';
+            import { transform } from './transform.mjs';
+            console.log(transform());
+            set_dev(true);
+            console.log(transform());
+            """]),
     Case(name: "code-in-strings", files: [
         "main.mjs": """
             const emitted = [
