@@ -291,26 +291,52 @@ final class SocketTable: @unchecked Sendable {
                                  ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                                  ai_addr: nil, ai_next: nil)
             var list: UnsafeMutablePointer<addrinfo>?
-            let name = host.isEmpty ? "0.0.0.0" : host
-            let status = getaddrinfo(name, String(port), &hints, &list)
-            guard status == 0, let first = list else {
+            // NO HOST means the wildcard, and node's wildcard is `::` with IPV6_V6ONLY off — one
+            // dual-stack socket that answers IPv6 and IPv4 alike. Ours bound "0.0.0.0", IPv4
+            // only, and `localhost` resolves to ::1 FIRST on this platform, so a program that
+            // called its own server by name was refused: `http.get({ port })` with no host, which
+            // is how node's own docs write it, could not reach a server this engine had just
+            // started. Sockets given an explicit '127.0.0.1' worked, which is exactly why it hid.
+            let wildcard = host.isEmpty
+            let status = getaddrinfo(wildcard ? nil : host, String(port), &hints, &list)
+            guard status == 0, let list else {
                 fail(id: id, handler: handler, message: "getaddrinfo \(host)", code: "EADDRNOTAVAIL")
                 return
             }
             defer { freeaddrinfo(list) }
+            let name = wildcard ? "::" : host
 
-            let fd = socket(first.pointee.ai_family, SOCK_STREAM, 0)
-            guard fd >= 0 else {
-                fail(id: id, handler: handler, message: "socket failed", code: errnoCode())
-                return
+            var candidates: [addrinfo] = []
+            var cursor: UnsafeMutablePointer<addrinfo>? = list
+            while let current = cursor { candidates.append(current.pointee); cursor = current.pointee.ai_next }
+            // IPv6 first for the wildcard, because only the v6 socket can carry both families.
+            if wildcard {
+                candidates = candidates.filter { $0.ai_family == AF_INET6 }
+                    + candidates.filter { $0.ai_family != AF_INET6 }
             }
-            var one: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-            guard bind(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0 else {
-                let code = errnoCode()
-                close(fd)
-                fail(id: id, handler: handler, message: "listen \(code) \(name):\(port)", code: code)
+
+            var fd: Int32 = -1
+            var lastCode = "EADDRNOTAVAIL"
+            for candidate in candidates {
+                let trial = socket(candidate.ai_family, SOCK_STREAM, 0)
+                if trial < 0 { lastCode = errnoCode(); continue }
+                var one: Int32 = 1
+                setsockopt(trial, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+                setsockopt(trial, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+                if wildcard, candidate.ai_family == AF_INET6 {
+                    var off: Int32 = 0
+                    setsockopt(trial, IPPROTO_IPV6, IPV6_V6ONLY, &off, socklen_t(MemoryLayout<Int32>.size))
+                }
+                if bind(trial, candidate.ai_addr, candidate.ai_addrlen) == 0 { fd = trial; break }
+                lastCode = errnoCode()
+                close(trial)
+                // A port already taken is an ANSWER, not a reason to try the other family:
+                // falling through would quietly hand out a second server on a busy port and
+                // turn EADDRINUSE — which callers act on — into silence.
+                if lastCode == "EADDRINUSE" || lastCode == "EACCES" { break }
+            }
+            guard fd >= 0 else {
+                fail(id: id, handler: handler, message: "listen \(lastCode) \(name):\(port)", code: lastCode)
                 return
             }
             guard Darwin.listen(fd, Int32(backlog)) == 0 else {

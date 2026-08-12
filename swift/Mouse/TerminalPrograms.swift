@@ -112,6 +112,11 @@ protocol TerminalProgram: AnyObject {
     func input(_ text: String)
     /// The visible grid changed size (rotation): adopt it and repaint.
     func resize(rows: Int, columns: Int)
+    /// The shell is taking the terminal back — stop, release everything, and exit. No veto:
+    /// this is `canc` pressed twice, the phone's close button, for a program that ignored ^C.
+    /// (`sv`'s closing screen kept a raw stdin listener alive after its work was done — the
+    /// ^C byte was the law's answer, and the byte went nowhere, forever.)
+    func terminate()
 }
 
 /// The kernel side of a running program: its stdout, its exit(2), and the screen geometry it
@@ -230,6 +235,8 @@ final class PagerProgram: TerminalProgram {
         io?.write("\u{1b}[?25h\u{1b}[?1049l")
         io?.exit()
     }
+
+    func terminate() { quit() }
 }
 
 /// `top` as a live program: repaints the same facts the one-shot builtin prints, on a
@@ -292,6 +299,8 @@ final class TopProgram: TerminalProgram {
         io?.write("\u{1b}[?25h\u{1b}[?1049l")
         io?.exit()
     }
+
+    func terminate() { quit() }
 }
 
 /// A Node program holding the terminal: the join between phase T (the screen) and phase G
@@ -459,6 +468,14 @@ final class NodeProgram: TerminalProgram {
 
     func resize(rows: Int, columns: Int) {
         engine.resizeTTY(rows: rows, columns: columns)
+    }
+
+    /// Unconditional, unlike ^C: the engine's own kill switch — the same one `child.kill()`
+    /// uses for a spawned child — ends the loop on its next wakeup with exit 130, and
+    /// everything downstream is the ORDINARY exit path (result, io.exit, teardown), so
+    /// nothing leaks. A SIGINT handler that shrugged does not get consulted a second time.
+    func terminate() {
+        engine.terminate()
     }
 
     private func rawModeChanged(_ raw: Bool) {

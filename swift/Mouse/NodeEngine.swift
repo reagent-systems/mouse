@@ -198,9 +198,55 @@ final class NodeEngine: @unchecked Sendable {
         self.env = env
         self.shell = shell
         self.tty = tty
-        self.mounts = mounts.map { (normalizeMountPrefix($0.prefix), $0.url) }
-            .sorted { $0.prefix.count > $1.prefix.count }
+        // The workspace answers to a NAMED path as well as to "/", and a program is launched
+        // with the named one as its cwd. Both spellings resolve to the same directory, so
+        // nothing that already speaks "/" changes.
+        //
+        // This exists because a project rooted at "/" breaks file watching, and the failure is
+        // spectacular rather than subtle. chokidar records a directory under its parent:
+        // `_getWatchedDir(dirname(dir)).add(basename(dir))`. For dir == "/", POSIX says
+        // dirname is "/" and basename is "" — node agrees, our path module is right — so it
+        // files an EMPTY-NAMED child inside the root's own record. The next directory read
+        // never lists "", the diff calls it deleted, and removing "" resolves back to the root
+        // and tears down the whole tracked tree: an `unlink` for every file in the project.
+        // vite sees its config unlinked, restarts, builds a fresh watcher, and does it again
+        // about three seconds later — the restart storm, and with it the dependency scan dying
+        // as ERR_CLOSED_SERVER. No other platform hits this because no real project lives at
+        // the filesystem root.
+        //
+        // The name is CHOSEN, not fixed, because the alias is matched before the root and would
+        // otherwise shadow a real directory of the same name: `/project/x` would reach
+        // `<workspace>/x` and the true `<workspace>/project/x` could not be addressed at all.
+        // That was written down as a caveat and it is not hypothetical — two harnesses here keep
+        // their packages in a directory called `project`, and both stopped finding them. So a
+        // workspace that already has that name gets `/project-2`, and both paths stay reachable.
+        // A local copy of the normaliser: the instance method would capture `self` here, and
+        // `namedRoot` is not assigned yet.
+        func normalizedPrefix(_ prefix: String) -> String {
+            var text = prefix.hasPrefix("/") ? prefix : "/" + prefix
+            while text.count > 1 && text.hasSuffix("/") { text.removeLast() }
+            return text
+        }
+        var resolved: [(prefix: String, url: URL)] =
+            mounts.map { (prefix: normalizedPrefix($0.prefix), url: $0.url) }
+        let existing = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        let claimed = Set(resolved.map(\.prefix))
+        var name = Self.defaultNamedRoot
+        var attempt = 2
+        while existing.contains(String(name.dropFirst())) || claimed.contains(name) {
+            name = "\(Self.defaultNamedRoot)-\(attempt)"
+            attempt += 1
+        }
+        self.namedRoot = name
+        resolved.append((prefix: name, url: root))
+        self.mounts = resolved.sorted { $0.prefix.count > $1.prefix.count }
     }
+
+    /// The workspace's named spelling — what a program gets as its cwd, so its own root has a
+    /// real basename. Per engine, because it steps aside for a real directory of the same name;
+    /// read it from the engine rather than assuming the default. See the note in `init`.
+    let namedRoot: String
+    static let defaultNamedRoot = "/project"
 
     /// Attach the terminal after init — the host program can't hand closures over itself
     /// to its own initializer. Must happen before `run`.
@@ -386,6 +432,7 @@ final class NodeEngine: @unchecked Sendable {
             if !handled, exitCode == nil {
                 err += sourceContext(of: fatalValue)
                 err += remapStack(fatal.hasSuffix("\n") ? fatal : fatal + "\n")
+                err += causeChain(of: fatalValue)
                 exitCode = 1
             }
         }
@@ -434,6 +481,42 @@ final class NodeEngine: @unchecked Sendable {
         context.objectForKeyedSubscript("__mouseEmitExit")?.call(withArguments: [exitCode ?? 0])
 
         return Result(out: out, err: err, status: exitCode ?? 0)
+    }
+
+    /// The `[cause]:` chain under an uncaught error, the way node has printed it since 16.9 —
+    /// each level indented two more spaces, message first, frames remapped like the top error's.
+    /// Without this, a library that wraps its real failure (`new Error(summary, { cause })`)
+    /// prints only the summary: rolldown's loader threw "Cannot find native binding" with npm
+    /// advice attached, while the actual refusal — JavaScriptCore declining a thread-built wasm
+    /// module — sat unprinted in the cause. The one honest error surface was hiding the honest
+    /// error.
+    ///
+    /// Two deliberate divergences from node's rendering, which is `util.inspect`'s: no `{`/`}`
+    /// object braces around nested errors, and no "... N lines matching cause stack trace ..."
+    /// elision — the plain chain reads better on a phone column and elides nothing.
+    private func causeChain(of error: JSValue?) -> String {
+        var text = ""
+        var current = error?.forProperty("cause")
+        var depth = 1
+        // A cause cycle would loop forever; eight levels prints every chain a real package
+        // throws (rolldown's is six) without needing identity tracking across JSValues.
+        while let value = current, !value.isUndefined, !value.isNull, depth <= 8 {
+            let message = value.toString() ?? "?"
+            // JSC stacks carry frames only — no leading "Error: message" line like V8's.
+            var body = message
+            if value.isObject, let stack = value.forProperty("stack"), !stack.isUndefined,
+               let frames = stack.toString(), !frames.isEmpty {
+                body += "\n" + remapStack(frames.hasSuffix("\n") ? String(frames.dropLast()) : frames)
+            }
+            let indent = String(repeating: "  ", count: depth)
+            let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
+            for (index, line) in lines.enumerated() {
+                text += indent + (index == 0 ? "[cause]: " : "  ") + line + "\n"
+            }
+            current = value.isObject ? value.forProperty("cause") : nil
+            depth += 1
+        }
+        return text
     }
 
     /// `sourceURL` names the module in stack traces. Without it JSC reports every frame as a
@@ -2848,6 +2931,7 @@ final class NodeEngine: @unchecked Sendable {
             }
             registerSourceMap(id: id, source: source)
             let esm = isESModule(id: id, source: source)
+            let rawSource = source
             if esm {
                 source = transpileCached(source)
             } else if source.contains("import") {
@@ -2857,7 +2941,22 @@ final class NodeEngine: @unchecked Sendable {
             }
             // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
             // dependency); CJS stays a plain sync function.
-            guard let function = wrapModule(source, async: esm, sourceURL: id) else {
+            var function = wrapModule(source, async: esm, sourceURL: id)
+            if function == nil, esm {
+                // Live bindings are a REFERENCE REWRITE, and a rewrite over third-party code is
+                // never provably safe: minified bundles put an imported name in places a scanner
+                // cannot always classify (a class field, a template substitution, an object
+                // shorthand). Any miss shows up as a SyntaxError, which is exactly the signal
+                // needed — so the module is transpiled again with bindings left as copies, which
+                // is what this engine did for its whole life before. Correct where it can be,
+                // never worse than before where it cannot.
+                let snapshot = transpileCached(rawSource, liveBindings: false)
+                if let retried = wrapModule(snapshot, async: true, sourceURL: id) {
+                    source = snapshot
+                    function = retried
+                }
+            }
+            guard let function else {
                 return throwInJS("Cannot parse '\(id)'" + (lastParseProblem.map { ": " + $0 } ?? ""))
             }
             let module = context.evaluateScript("({exports: {}})")!
@@ -3006,7 +3105,7 @@ final class NodeEngine: @unchecked Sendable {
     /// are assigned at EOF (function/class hoist; const/let are bound by then).
     /// Bumped whenever `transpileESM` changes: the cache is content-addressed by SOURCE, so
     /// without this a stale rewrite would be reused after an engine update.
-    private static let transpilerVersion = 7
+    private static let transpilerVersion = 8
 
     /// Transpiling a big bundle is the dominant cost of launching a bundled CLI —
     /// claude-code's 9.3 MB takes ~1.85 s of the ~2.4 s load, every launch. The result is a
@@ -3023,16 +3122,17 @@ final class NodeEngine: @unchecked Sendable {
         return directory
     }()
 
-    private func transpileCached(_ source: String) -> String {
+    private func transpileCached(_ source: String, liveBindings: Bool = true) -> String {
         guard source.utf8.count >= Self.transpileCacheThreshold,
               let directory = Self.transpileCacheDirectory else {
-            return Self.transpileESM(source)
+            return Self.transpileESM(source, liveBindings: liveBindings)
         }
         let digest = SHA256.hash(data: Data(source.utf8))
-        let name = digest.map { String(format: "%02x", $0) }.joined() + "-v\(Self.transpilerVersion).cjs"
+        let name = digest.map { String(format: "%02x", $0) }.joined()
+            + (liveBindings ? "" : "-snap") + "-v\(Self.transpilerVersion).cjs"
         let file = directory.appendingPathComponent(name)
         if let cached = try? String(contentsOf: file, encoding: .utf8) { return cached }
-        let transpiled = Self.transpileESM(source)
+        let transpiled = Self.transpileESM(source, liveBindings: liveBindings)
         try? transpiled.write(to: file, atomically: true, encoding: .utf8)
         return transpiled
     }
@@ -3202,7 +3302,15 @@ final class NodeEngine: @unchecked Sendable {
                 while end < count, isIdent(bytes[end]) { end += 1 }
                 let word = String(decoding: bytes[index..<end], as: UTF8.self)
                 let precededByDot = lastCode == 0x2e
-                if word == "import", !precededByDot, !mask {
+                // `import` is a legal METHOD NAME, and vite's ModuleRunner uses it:
+                // `async import(url) { … }`. That is a definition, not a dynamic import, and
+                // rewriting it to `__dynamicImport(__mouseRequire, url) { … }` deleted the
+                // method — SvelteKit's SSR then died on "runner.import is not a function".
+                // `.import(` was already guarded by the dot; a modifier in front of it is the
+                // other way the name appears, and `async import(…)` is not a valid expression,
+                // so skipping these can never miss a real dynamic import.
+                let definitionModifier = ["async", "static", "get", "set"].contains(lastWord)
+                if word == "import", !precededByDot, !definitionModifier, !mask {
                     var probe = end
                     while probe < count, bytes[probe] == 0x20 || bytes[probe] == 0x09
                             || bytes[probe] == 0x0a || bytes[probe] == 0x0d { probe += 1 }
@@ -3245,13 +3353,38 @@ final class NodeEngine: @unchecked Sendable {
         return rewriteImportForms(source, meta: false).text
     }
 
-    static func transpileESM(_ source: String) -> String {
+    /// Blanks the INSIDE of every quoted string, keeping the quotes, every other character and
+    /// the total length. Only the shadow test uses this: it asks whether a module declares a
+    /// name, and prose can hold any word.
+    static func blankQuotedStrings(_ text: String) -> String {
+        let ns = text as NSString
+        var chars = [unichar](repeating: 0, count: ns.length)
+        ns.getCharacters(&chars)
+        var i = 0
+        while i < chars.count {
+            let quote = chars[i]
+            guard quote == 0x27 || quote == 0x22 else { i += 1; continue }
+            var j = i + 1
+            // A quoted string ends at its quote or at the line end — an unterminated quote is an
+            // apostrophe in a comment the mask already blanked, and must not eat the rest of the file.
+            while j < chars.count, chars[j] != quote, chars[j] != 0x0a {
+                j += chars[j] == 0x5c ? 2 : 1
+            }
+            let end = min(j, chars.count)
+            if end > i + 1 {
+                for k in (i + 1)..<end where chars[k] != 0x0a { chars[k] = 0x20 }
+            }
+            i = end + 1
+        }
+        return String(utf16CodeUnits: chars, count: chars.count)
+    }
+
+    static func transpileESM(_ source: String, liveBindings: Bool = true) -> String {
         var text = source
         // Emitted BEFORE the body: function declarations are hoisted, so a cycle reaching back
         // into this module finds them, and every export reads through a getter rather than
         // being frozen at end-of-module.
         var prologue: [String] = []
-        var epilogue: [String] = []
         var counter = 0
         var maskCache: String?
 
@@ -3268,7 +3401,7 @@ final class NodeEngine: @unchecked Sendable {
         // bytes with strings, comments and regexes blanked — and then applied to the text at
         // those offsets. A bundle emits JavaScript as data: vite's worker shim is the literal
         // line `export default function WorkerWrapper(options) {` inside a template string, and
-        // rewriting it both corrupted the code vite serves and left the epilogue assigning a
+        // rewriting it both corrupted the code vite serves and left an export assigning a
         // binding that does not exist. The mask is recomputed per pass because each pass
         // changes the text; scanning is linear and this is cached by content anyway.
         func replace(_ pattern: String, _ transform: (NSTextCheckingResult, NSString) -> String) {
@@ -3348,6 +3481,48 @@ final class NodeEngine: @unchecked Sendable {
                 .joined(separator: ", ")
         }
 
+        // Named imports promoted to live bindings: alias -> `<temp>.<source>`, applied to every
+        // reference in a final pass. See the note at the emission site.
+        var live: [(alias: String, temp: String, source: String)] = []
+        // The whole source as code-only text, computed once: declarations cannot be introduced by
+        // our own rewrites, so the shadowing question is answered against the ORIGINAL.
+        //
+        // The general mask keeps QUOTED STRINGS verbatim, because the import patterns read
+        // specifiers out of them. The shadow test never wants a string's contents, and reading
+        // them costs correctness: svelte's compiler throws an error whose text is a
+        // `https://svelte.dev/...` link, and the `dev` in that URL sat inside the enclosing
+        // call's parentheses, so the parameter-list pattern below decided the module bound its
+        // own `dev`. It does not — `dev` is `export let dev` in the compiler's state module,
+        // assigned per compile — and left as a copy it read `false` forever. Components then
+        // compiled HALF in dev mode: `push_element` emitted, the `FILENAME` it reads not, and
+        // every SvelteKit page died in svelte's own renderer.
+        let shadowMask = blankQuotedStrings(rewriteImportForms(source, meta: false, mask: true).text)
+        /// Does this module bind `name` itself anywhere — a declaration, a parameter, a catch, a
+        /// destructure? Then the name is not unambiguously the import, and it is left as a copy.
+        /// Deliberately over-eager: a false "yes" costs live-ness, a false "no" corrupts code.
+        func shadows(_ name: String) -> Bool {
+            let n = NSRegularExpression.escapedPattern(for: name)
+            let patterns = [
+                "\\b(?:let|const|var|function|class)\\s+\\Q\(name)\\E\\b",
+                "\\bcatch\\s*\\(\\s*\\Q\(name)\\E\\b",
+                // `b.function(…)` is a CALL to a method named function, never a declaration, and
+                // its arguments are not parameters. Without the lookbehind, any name appearing
+                // anywhere inside such a call read as a shadow.
+                "(?<![.\\w$])function\\b[^(){]*\\([^)]*\\b" + n + "\\b[^)]*\\)",
+                "\\([^()]*\\b" + n + "\\b[^()]*\\)\\s*=>",
+                "\\b" + n + "\\s*=>",
+                "[\\{,]\\s*\\b" + n + "\\b\\s*[,\\}][^=;\\n]*=[^=]",
+            ]
+            for pattern in patterns {
+                if let regex = try? NSRegularExpression(pattern: pattern),
+                   regex.firstMatch(in: shadowMask,
+                                    range: NSRange(location: 0, length: (shadowMask as NSString).length)) != nil {
+                    return true
+                }
+            }
+            return false
+        }
+
         // Every import site awaits ONLY a genuinely-pending (top-level-await) dependency:
         // `if (x instanceof Promise) x = await x`. A fully-sync dependency evaluates without
         // suspension, so sync modules stay sync under the async wrapper; a TLA dependency
@@ -3371,7 +3546,26 @@ final class NodeEngine: @unchecked Sendable {
                 // closed. Destructuring reads it at import time and turns a legal cycle into a
                 // ReferenceError, which is what execa's send.js ↔ strict.js pair hit.
                 for binding in bindings(named) {
+                    // A named import is a LIVE BINDING in real ESM: the importer sees a value the
+                    // exporter assigns later. A `const` copies it once, and svelte's compiler is
+                    // the case that made this matter — `export let locator;` is undefined at
+                    // import time and filled in during init, so a copy stays undefined forever
+                    // and the parser dies calling it.
+                    //
+                    // Live means reading through the namespace where the name is USED, which is a
+                    // reference rewrite. It is only safe where the name cannot be something else,
+                    // so `shadows` refuses whenever the module also DECLARES that name; those
+                    // fall back to the copy, which is exactly today's behaviour and no worse.
+                    // The declaration is ALWAYS emitted, even when the name is promoted to a
+                    // live binding. The rewrite below skips any occurrence it cannot classify,
+                    // and without a declaration to fall back on such a name would simply not
+                    // exist — svelte's a11y constants died as "Can't find variable: AXObjects"
+                    // for exactly that reason. With the const still there, a missed reference
+                    // reads the old snapshot: the previous behaviour, not a crash.
                     lines.append("const \(binding.alias) = __esmBinding(\(temp), '\(binding.source)');")
+                    if liveBindings && !shadows(binding.alias) {
+                        live.append((alias: binding.alias, temp: temp, source: binding.source))
+                    }
                 }
             }
             if let namespace = group(match, 3, ns) {
@@ -3539,12 +3733,142 @@ final class NodeEngine: @unchecked Sendable {
         // assignment put a phantom key into `Object.keys(ns)`, into a spread of it, and into
         // anything that walks a module's exports. Defined this way the interop check still
         // sees it and nothing that ENUMERATES does.
+        // Live bindings, applied last: every remaining reference to a promoted alias becomes a
+        // read through the namespace, so a value the exporter assigns later is seen. Only names
+        // `shadows` cleared get here, so a bare occurrence is the import and nothing else.
+        //
+        // Three shapes have to be told apart, and the mask makes that safe by blanking strings,
+        // comments and regexes first:
+        //   `{ locator }`        object shorthand  -> `{ locator: __esm1.locator }` (a bare
+        //                        `__esm1.locator` there is a syntax error)
+        //   `{ locator: … }`     a KEY, not a read -> left alone
+        //   `locator`            everything else   -> `__esm1.locator`
+        // `.locator` is skipped by the preceding-character test, which is what already kept
+        // `runner.import` intact.
+        var body = prologue.joined(separator: " ") + " " + text + "\n;"
+        if !live.isEmpty {
+            let mask = rewriteImportForms(body, meta: false, mask: true).text
+            let ns = body as NSString
+            let maskNS = mask as NSString
+            if maskNS.length == ns.length {
+                var edits: [(range: NSRange, replacement: String)] = []
+                for binding in live {
+                    let pattern = "\\b" + NSRegularExpression.escapedPattern(for: binding.alias) + "\\b"
+                    guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                    for match in regex.matches(in: mask, range: NSRange(location: 0, length: maskNS.length)) {
+                        let at = match.range.location
+                        // Only code. The mask blanks comments, templates and regexes, but it
+                        // keeps QUOTED strings verbatim on purpose — the import patterns read
+                        // specifiers out of them — so a quoted `send` passes the mask test and
+                        // has to be excluded here. Without this, `from './send.mjs'` became
+                        // `from './__esm1.send.mjs'` and the module vanished.
+                        guard maskNS.substring(with: match.range) == ns.substring(with: match.range) else { continue }
+                        var quote: unichar = 0
+                        var lineStart = at
+                        while lineStart > 0, maskNS.character(at: lineStart - 1) != 0x0a { lineStart -= 1 }
+                        var probe = lineStart
+                        while probe < at {
+                            let c = maskNS.character(at: probe)
+                            if c == 0x5c { probe += 2; continue }                    // escape
+                            if quote == 0, c == 0x27 || c == 0x22 { quote = c }
+                            else if quote != 0, c == quote { quote = 0 }
+                            probe += 1
+                        }
+                        if quote != 0 { continue }                                   // inside a string
+                        // NEWLINES are whitespace here. A property list is written one per line,
+                        // so `{\n  a,\n  b\n}` put a newline between `,` and the name and every
+                        // entry failed the property-start test below — the shorthand became
+                        // `{ a, ns.b }`, which does not parse, and the whole module silently fell
+                        // back to snapshot bindings. svelte's compiler keeps its visitors in
+                        // exactly that shape.
+                        func isSpace(_ c: unichar) -> Bool { c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d }
+                        var before = at - 1
+                        while before >= 0, isSpace(maskNS.character(at: before)) { before -= 1 }
+                        if before >= 0 {
+                            let previous = maskNS.character(at: before)
+                            if previous == 0x2e || previous == 0x23 { continue }   // .name  #name
+                        }
+                        // A DECLARATION of the name is never a read — including the
+                        // `const x = __esmBinding(…)` emitted just above, which would otherwise
+                        // become `const __esm1.x = …`.
+                        let keywordEnd = before + 1
+                        var keywordStart = before
+                        while keywordStart >= 0, maskNS.character(at: keywordStart) != 0x20,
+                              maskNS.character(at: keywordStart) != 0x09,
+                              maskNS.character(at: keywordStart) != 0x0a,
+                              maskNS.character(at: keywordStart) != 0x3b,
+                              maskNS.character(at: keywordStart) != 0x7b { keywordStart -= 1 }
+                        keywordStart += 1
+                        if keywordEnd > keywordStart {
+                            let keyword = maskNS.substring(with: NSRange(location: keywordStart,
+                                                                         length: keywordEnd - keywordStart))
+                            if keyword == "const" || keyword == "let" || keyword == "var"
+                                || keyword == "function" || keyword == "class" { continue }
+                        }
+                        var after = at + match.range.length
+                        while after < maskNS.length, isSpace(maskNS.character(at: after)) { after += 1 }
+                        let next: unichar = after < maskNS.length ? maskNS.character(at: after) : 0
+                        if next == 0x3a { continue }                                // `name:` is a key
+                        let read = "\(binding.temp).\(binding.source)"
+                        // Object shorthand needs the ENCLOSING bracket, not the preceding
+                        // character: `f(a, named)` and `{ a, named }` both sit after a comma,
+                        // and rewriting the first to `named: …` is a syntax error inside a call
+                        // — which is exactly what broke import-forms. Walk back over balanced
+                        // pairs to whatever bracket actually contains this name.
+                        var enclosing: unichar = 0
+                        var scan = before
+                        var depth = 0
+                        while scan >= 0 {
+                            let c = maskNS.character(at: scan)
+                            if c == 0x29 || c == 0x5d || c == 0x7d { depth += 1 }
+                            else if c == 0x28 || c == 0x5b || c == 0x7b {
+                                if depth == 0 { enclosing = c; break }
+                                depth -= 1
+                            } else if depth == 0 && (c == 0x3b) { break }
+                            scan -= 1
+                        }
+                        // `${ name }` is a template SUBSTITUTION, not an object: its brace is
+                        // preceded by `$`, and treating it as shorthand emitted `name: …` inside
+                        // a template expression — which is how vite's own cli.js stopped parsing.
+                        var braceIsObject = enclosing == 0x7b
+                        if braceIsObject, scan > 0, maskNS.character(at: scan - 1) == 0x24 {
+                            braceIsObject = false
+                        }
+                        // Shorthand needs BOTH: the enclosing bracket is an object brace, and
+                        // the name sits at the start of a property — directly after `{` or `,`.
+                        // Without the second test, `{ key: imported }` matched (the scan walks
+                        // back past the colon to the brace) and produced
+                        // `{ key: imported: ns.imported }`, which is how fdir stopped parsing.
+                        let previousChar: unichar = before >= 0 ? maskNS.character(at: before) : 0
+                        let atPropertyStart = previousChar == 0x7b || previousChar == 0x2c
+                        let shorthand = braceIsObject && atPropertyStart && (next == 0x2c || next == 0x7d)
+                        edits.append((match.range, shorthand ? "\(binding.alias): \(read)" : read))
+                    }
+                }
+                if !edits.isEmpty {
+                    var result = ""
+                    var cursor = 0
+                    for edit in edits.sorted(by: { $0.range.location < $1.range.location }) {
+                        guard edit.range.location >= cursor else { continue }
+                        result += ns.substring(with: NSRange(location: cursor,
+                                                             length: edit.range.location - cursor))
+                        result += edit.replacement
+                        cursor = edit.range.location + edit.range.length
+                    }
+                    if cursor < ns.length {
+                        result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+                    }
+                    body = result
+                }
+            }
+        }
+
         // Everything before the body goes on ONE line and everything after it on the last, for
         // the same reason the wrapper does: a module's line 5 has to still be line 5. The
         // prologue was four lines of live-export getters, so an ESM stack pointed four lines
         // past the throw.
         return "Object.defineProperty(module.exports, '__esModule', { value: true }); try { "
-            + prologue.joined(separator: " ") + " " + text + "\n;" + epilogue.joined(separator: " ")
+            + body
             + " ;module.__esmDone = true; } catch (__esmThrown) { module.__esmError = __esmThrown; throw __esmThrown; }"
     }
 
@@ -4637,6 +4961,90 @@ final class NodeEngine: @unchecked Sendable {
       };
       globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 1; } };
       globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = options && options.highWaterMark || 16384; } };
+      // A V8 stack reads "TypeError: message" and then "    at fn (file:line:col)" lines. JSC
+      // gives the frames alone, "fn@file:line:col", with no first line at all — so on this
+      // engine anything that logs `err.stack` prints frames and no reason. SvelteKit's
+      // format_server_error prints exactly that and nothing else, which is why a page that
+      // failed to render showed forty frames and never said what went wrong; and vite's
+      // ssrRewriteStacktrace matches `/^ {4}at /`, so no SSR frame was ever mapped back to the
+      // .svelte file it came from either.
+      //
+      // JSC materialises `stack` as an own data property while the error is being constructed —
+      // on errors the ENGINE throws as much as on ones JavaScript builds — so there is no hook
+      // that sees every error. What is reachable is every error JavaScript constructs, which is
+      // what a library throws on purpose, and that is what this covers. A TypeError the engine
+      // raises still reads as bare frames through `.stack`; console and util.inspect rebuild the
+      // header for those, as they already did.
+      globalThis.__mouseV8Frames = function(raw) {
+        const out = [];
+        for (const line of String(raw || '').split('\n')) {
+          if (!line) continue;
+          if (/^\s+at\s/.test(line)) { out.push(line); continue; }   // already V8-shaped
+          const at = line.lastIndexOf('@');
+          if (at < 0) { out.push('    at ' + line); continue; }
+          const name = line.slice(0, at);
+          const where = line.slice(at + 1) || '<anonymous>';
+          out.push(name ? '    at ' + name + ' (' + where + ')' : '    at ' + where);
+        }
+        return out.join('\n');
+      };
+      (function() {
+        const kinds = [Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError];
+        if (typeof AggregateError === 'function') kinds.push(AggregateError);
+        const replacements = new Map();
+        for (const Native of kinds) {
+          // Named, and the name is load-bearing: the frames JSC captures include this function
+          // and whatever native frames sit under it, none of which are part of the error's
+          // history — V8 does not show the Error constructor either. Counting frames off the top
+          // guessed wrong (it left `at Wrapped (<anonymous>)` as the innermost frame), so the
+          // cut is made at the marker instead.
+          const Wrapped = function __mouseErrorConstructor() {
+            const error = Reflect.construct(Native, arguments, new.target || Wrapped);
+            const lines = String(error.stack || '').split('\n');
+            const mine = lines.findIndex(function(l) { return l.indexOf('__mouseErrorConstructor@') === 0; });
+            const raw = (mine >= 0 ? lines.slice(mine + 1) : lines).join('\n');
+            let text = null;
+            // An ACCESSOR, not a value: building the string costs a split and a join over every
+            // frame, and the overwhelming majority of errors are constructed, caught and never
+            // asked for a stack. It also matches V8, where `stack` is lazy — and vite's
+            // rebindErrorStacktrace, which reads the descriptor before overwriting, takes the
+            // configurable branch either way.
+            Object.defineProperty(error, 'stack', {
+              configurable: true,
+              enumerable: false,
+              get: function() {
+                if (text === null) {
+                  const header = (error.name || 'Error')
+                    + (error.message ? ': ' + error.message : '');
+                  const frames = globalThis.__mouseV8Frames(raw);
+                  text = frames ? header + '\n' + frames : header;
+                }
+                return text;
+              },
+              set: function(value) { text = value; },
+            });
+            return error;
+          };
+          // The prototype is the native one, untouched, so `instanceof` keeps answering for
+          // errors the engine threw as well as these, and `e.constructor === Error` stays true.
+          Wrapped.prototype = Native.prototype;
+          Object.defineProperty(Native.prototype, 'constructor',
+                                { value: Wrapped, writable: true, configurable: true });
+          Object.defineProperty(Wrapped, 'name', { value: Native.name, configurable: true });
+          for (const key of Object.getOwnPropertyNames(Native)) {
+            if (key === 'prototype' || key === 'name' || key === 'length') continue;
+            const descriptor = Object.getOwnPropertyDescriptor(Native, key);
+            if (descriptor) Object.defineProperty(Wrapped, key, descriptor);
+          }
+          replacements.set(Native, Wrapped);
+        }
+        // `TypeError.__proto__ === Error` in the language, and code reads it; keep the shape.
+        for (const [Native, Wrapped] of replacements) {
+          const parent = replacements.get(Object.getPrototypeOf(Native));
+          if (parent) Object.setPrototypeOf(Wrapped, parent);
+          globalThis[Native.name] = Wrapped;
+        }
+      })();
       // V8's stack-trace protocol: when Error.prepareStackTrace is set, captureStackTrace
       // hands it structured CallSite objects (depd — under express — walks them). JSC's
       // native captureStackTrace ignores the protocol, so emulate it from JSC stack lines
@@ -4668,7 +5076,7 @@ final class NodeEngine: @unchecked Sendable {
           target.stack = Error.prepareStackTrace(target, callSites);
         } else {
           target.stack = (target.name || 'Error') + (target.message ? ': ' + target.message : '') + '\n'
-            + raw.map(function(l){ return '    at ' + l; }).join('\n');
+            + globalThis.__mouseV8Frames(raw.join('\n'));
         }
       };
       globalThis.atob = function(base64) { return Buffer.from(String(base64), 'base64').toString('binary'); };
@@ -4937,9 +5345,19 @@ final class NodeEngine: @unchecked Sendable {
             this.password = credentials && credentials.indexOf(':') >= 0 ? credentials.slice(credentials.indexOf(':') + 1) : '';
             this.hostname = match[3] || '';
             this.port = match[4] || '';
+            // `file:` is a SPECIAL scheme in the URL standard: its serialization always carries
+            // the authority marker even though it never has a real host, and `localhost` IS the
+            // empty host. Ours kept whatever the text happened to say, so `new URL('file:' + p)`
+            // — which is the `import.meta.url` polyfill esbuild emits, and how lightningcss-wasm
+            // locates its own .wasm — stayed `file:/project/…` with a single slash. `fs` then
+            // went looking for a file whose name started with `file:`. Only `file:` is handled
+            // here; `http:/host/x`, which the standard also re-reads as an authority, is left as
+            // it was.
+            const isFile = this.protocol === 'file:';
+            if (isFile && this.hostname.toLowerCase() === 'localhost') this.hostname = '';
             this.host = this.hostname + (this.port ? ':' + this.port : '');
             // A hierarchical URL always has a path; node reports '/' where the text has none.
-            const hierarchical = text.indexOf('//') === this.protocol.length;
+            const hierarchical = isFile || text.indexOf('//') === this.protocol.length;
             this._hierarchical = hierarchical;
             // A path is percent-encoded text, not raw text. Existing '%' escapes are left alone
             // (re-encoding them would corrupt any URL that arrived already encoded); everything
@@ -5512,6 +5930,11 @@ final class NodeEngine: @unchecked Sendable {
           return Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
         }
         if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
+        // An ARRAY of numbers is bytes, which is what `Buffer.from([…])` means in node. Falling
+        // through to String() turned one into its own decimal listing: a SvelteKit error page
+        // arrived over the wire as "60,33,100,111,99,116,..." — the source text of
+        // `<!doctype html>` rendered as comma-separated character codes.
+        if (Array.isArray(value)) return Buffer.from(value);
         return Buffer.from(String(value), encoding && encoding !== 'buffer' ? encoding : 'utf8');
       };
       // TypeScript, compiled by the project's OWN typescript package — the ts-node model, and
@@ -6468,6 +6891,31 @@ final class NodeEngine: @unchecked Sendable {
           const stack = reason.stack;
           text = stack && String(stack).indexOf(reason.message) >= 0
             ? String(stack) : String(reason) + (stack ? '\n' + stack : '');
+          // The `[cause]:` chain, as node prints it since 16.9 — each level indented two more
+          // spaces, frames under the message. A library that wraps its real failure
+          // (`new Error(summary, { cause })`) otherwise prints ONLY the summary: rolldown's
+          // loader says "Cannot find native binding" with npm advice, while the true refusal —
+          // the engine declining a thread-built wasm module — sat unprinted in the cause. No
+          // object braces and no stack elision, unlike node's inspect: the plain chain elides
+          // nothing, which on a phone column is the point.
+          let cause = reason.cause;
+          let depth = 1;
+          while (cause !== undefined && cause !== null && depth <= 8) {
+            const indent = '  '.repeat(depth);
+            let body = String(cause && cause.message !== undefined ? cause : cause);
+            if (cause instanceof Error) {
+              body = String(cause);
+              if (cause.stack && String(cause.stack).length) {
+                body += '\n' + String(cause.stack).replace(/\n$/, '');
+              }
+            }
+            const lines = body.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              text += '\n' + indent + (i === 0 ? '[cause]: ' : '  ') + lines[i];
+            }
+            cause = (cause instanceof Error || typeof cause === 'object') && cause ? cause.cause : undefined;
+            depth += 1;
+          }
         } else {
           // node wraps a non-Error rejection rather than printing it bare.
           text = 'UnhandledPromiseRejection: This error originated either by throwing inside of ' +
@@ -11271,7 +11719,10 @@ final class NodeEngine: @unchecked Sendable {
           // contract, appending an mtime to `searchParams` to cache-bust an ESM config import,
           // which needs an actual URL object rather than a bare { href }.
           fileURLToPath: function(url) {
-            const href = typeof url === 'string' ? url : String((url && url.href) || url);
+            let href = typeof url === 'string' ? url : String((url && url.href) || url);
+            // A file URL written with one slash is the same URL; node parses the string before
+            // reading it, so `fileURLToPath('file:/a')` is '/a' rather than a scheme complaint.
+            if (/^file:(?!\/\/)/i.test(href)) { try { href = new URL(href).href; } catch (error) {} }
             if (!/^file:\/\//i.test(href)) {
               const error = new TypeError('The URL must be of scheme file');
               error.code = 'ERR_INVALID_URL_SCHEME';
@@ -12007,8 +12458,12 @@ final class NodeEngine: @unchecked Sendable {
           if (hasBody && (this.method === 'GET' || this.method === 'HEAD')) {
             throw new TypeError('Request with GET/HEAD method cannot have body.');
           }
-          defineBody(this, !hasBody ? Buffer.alloc(0)
-                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))), hasBody);
+          // __toBytes, not String(): a Uint8Array is BYTES, and stringifying one yields its
+          // decimal listing. That is literally what went over the wire — a rendered page
+          // arrived as "60,33,100,111,99,..." instead of "<!doctype html>" — because
+          // `new Response(new TextEncoder().encode(html))` is how a framework returns a page,
+          // and a Uint8Array is not a Buffer.
+          defineBody(this, !hasBody ? Buffer.alloc(0) : __toBytes(body), hasBody);
         }
         clone() {
           if (this.bodyUsed) throw new TypeError('Body is unusable: Body has already been read');
@@ -12038,8 +12493,12 @@ final class NodeEngine: @unchecked Sendable {
           // A ReadableStream body stays a stream — that is what makes a streaming response
           // readable as it arrives instead of after it finishes.
           if (body && typeof body.getReader === 'function') { defineStreamBody(this, body); return; }
-          defineBody(this, !hasBody ? Buffer.alloc(0)
-                     : (Buffer.isBuffer(body) ? body : Buffer.from(String(body))), hasBody);
+          // __toBytes, not String(): a Uint8Array is BYTES, and stringifying one yields its
+          // decimal listing. That is literally what went over the wire — a rendered page
+          // arrived as "60,33,100,111,99,..." instead of "<!doctype html>" — because
+          // `new Response(new TextEncoder().encode(html))` is how a framework returns a page,
+          // and a Uint8Array is not a Buffer.
+          defineBody(this, !hasBody ? Buffer.alloc(0) : __toBytes(body), hasBody);
         }
         get ok() { return this.status >= 200 && this.status < 300; }
         clone() {
@@ -17038,7 +17497,44 @@ final class NodeEngine: @unchecked Sendable {
         Server.prototype.listen = function() {
           const args = Array.prototype.slice.call(arguments);
           const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
-          let port = 0, host = '0.0.0.0', backlog = 511;
+          // Listening twice without an intervening close is a PROGRAMMING ERROR in node, and it
+          // throws ERR_SERVER_ALREADY_LISTEN. This used to allocate a second host socket and
+          // orphan the first — invisible on a machine whose process exits and frees the fd, fatal
+          // here where the engine outlives every program. vite's dev server calls listen again on
+          // EADDRINUSE and, through SvelteKit's warmup/restart, on a server already bound; each
+          // silent re-listen leaked a LISTENING socket, and a real device ran up thousands (3607
+          // measured) before the port walk buried the terminal in "Port N is in use". Throwing is
+          // both correct and the fix: node's own EADDRINUSE retry closes first, and callers that
+          // relied on the silent second bind were leaking on node too.
+          // Listening again while a socket is already claimed used to allocate a SECOND host
+          // socket and orphan the first. On a machine whose process exits that is invisible; here
+          // the engine outlives every program, so each one leaked a LISTENING fd — a real device
+          // reached 3607 of them, and vite's port walk then reported thousands of ports "in use"
+          // (they were: by us) until the terminal was unusable.
+          //
+          // node throws ERR_SERVER_ALREADY_LISTEN here, and that was tried first. It is the wrong
+          // answer for this engine, because vite REACHES this path legitimately: its
+          // `createServerCloseFn` only closes a server it has seen emit 'listening'
+          // (`if (hasListened) server.close(…); else resolve()`), so a restart following a failed
+          // first bind re-listens a server it never closed. Throwing there killed a dev server
+          // that had already printed its URL.
+          //
+          // So the previous socket is RELEASED and the new listen proceeds. That fixes the leak —
+          // the only fd in flight is the one the caller asked for — without inventing a fatal
+          // error on a path real packages take. The divergence from node is deliberate and is the
+          // conservative direction: node's throw protects a caller from losing track of a socket,
+          // and here nothing is lost, because the socket is closed rather than orphaned.
+          if (this._sid) {
+            bridge.netDestroy(this._sid);
+            this._sid = 0;
+            this.listening = false;
+            this._address = null;
+          }
+          this._closing = false;
+          // EMPTY, not '0.0.0.0': the host being absent is information the socket layer needs,
+          // because node's no-host wildcard is dual-stack `::` and not IPv4's `0.0.0.0`. Naming
+          // the IPv4 wildcard here threw that away before it could be acted on.
+          let port = 0, host = '', backlog = 511;
           // A path listens on a socket FILE.
           const unixPath = (args[0] && typeof args[0] === 'object' && args[0].path) ? String(args[0].path)
             : (typeof args[0] === 'string' && !/^\d+$/.test(args[0]) ? args[0] : null);
@@ -17053,7 +17549,7 @@ final class NodeEngine: @unchecked Sendable {
           }
           if (args[0] && typeof args[0] === 'object') {
             port = args[0].port || 0;
-            host = args[0].host || '0.0.0.0';
+            host = args[0].host || '';
             backlog = args[0].backlog || backlog;
           } else {
             port = Number(args[0]) || 0;
@@ -17132,6 +17628,12 @@ final class NodeEngine: @unchecked Sendable {
             }
             case 'error':
               this.listening = false;
+              // The bind failed, so there is no host socket behind `_sid` — clear it, both to
+              // free the guard above (node's EADDRINUSE retry re-listens the same server) and
+              // because `_sid` is now the marker for "a socket is claimed", mirroring node's
+              // `_handle`. Leaving it set turned the legitimate retry into a false
+              // ERR_SERVER_ALREADY_LISTEN.
+              this._sid = null;
               this.emit('error', Object.assign(new Error(payload.message), { code: payload.code }));
               break;
             case 'close':

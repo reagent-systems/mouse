@@ -1,9 +1,16 @@
 # STATUS.md — the verified state of Mouse
 
-Last reconciled: 2026-07-31, at commit 953dd98 (end of the phase-G run,
-27ed75b..953dd98, 184 commits). This file is the one place that says where
-every phase stands, with the evidence named. When a phase's state changes,
-this file moves with it — same rule as every other doc here.
+Last reconciled: 2026-08-12, at commit 755a1c1 (the `npm run dev` run,
+d27ffdd..755a1c1), by running the whole suite rather than trusting the last
+green one: **143 assertions passed, 0 failed, 0 build-broken**, plus the five
+harnesses `verify.sh` declares investigations and does not count — `breadth`,
+`glob`, `reachable`, `shapes`, `vitestrun`. Re-run at HEAD rather than left at
+the earlier green, because `TerminalSession` changed after it. Before that,
+2026-07-31 at 953dd98 (end of the phase-G run, 27ed75b..953dd98, 184 commits).
+
+This file is the one place that says where every phase stands, with the evidence
+named. When a phase's state changes, this file moves with it — same rule as
+every other doc here.
 
 The letter phases are subsystems, not a sequence. Build order was
 dependency-driven: T → A → F → G, with D falling out of G. compile.md
@@ -16,8 +23,8 @@ numbers some of the same ground differently; the mapping is noted per row.
 | **T** — terminal screen | VT100/xterm grid, ANSI parser, TUI hosting, keyboard encoding | **Done** | `swift/Mouse/TerminalScreen.swift`, `TerminalWidth.swift`, `TerminalPrograms.swift`. Gated: screen corpus, pyte cross-check, wide-char/alt-screen/DECCKM/bracketed-paste harnesses (`verify/tty`, `altscreen`, `widetui`, `inkwide`) |
 | **A** — shell language | msh's POSIX-subset grammar: control flow, `$()`, functions, redirects | **Done** | `swift/Mouse/ShellLanguage.swift`. Gated against real `/bin/sh` on the 25-script corpus (`verify/shell`) |
 | **F** — package manager | Real npm registry, semver, integrity, lockfiles; `npm run`/`create`/`npx`; native-binary → wasm-build substitution | **Done** | `swift/Mouse/PackageManager.swift`. Gated: semver corpus vs pnpm, `verify/pkg`, `firstrun` (scaffold→install→dev end to end) |
-| **G** — the Node layer | Node 22-surface runtime on JavaScriptCore: modules, streams, fs, net/http/1.1+2, crypto, workers, child processes, vm, WASI | **Done** (this run) | `swift/Mouse/NodeEngine.swift` + `NodeSockets`/`NodeWatch`/`NodeKeys`/`NodeScrypt`/`NodeBrotli`/`NodeDNS`. ~88-gate suite green at 953dd98 (`verify/`), fixtures byte-identical to real node v22 |
-| **D** — web toolchain | tsc, bundlers, dev servers | **Largely done**, as a byproduct of G | tsc + `tsc --watch`, webpack, esbuild-wasm, vite dev (HMR) and vite build (rollup-wasm) all gated (`verify/esbuild`, `devserver`, `hmr`, `firstrun`). Remaining piece is the Preview surface (phase C) |
+| **G** — the Node layer | Node 22-surface runtime on JavaScriptCore: modules, streams, fs, net/http/1.1+2, crypto, workers, child processes, vm, WASI | **Done** (this run) | `swift/Mouse/NodeEngine.swift` + `NodeSockets`/`NodeWatch`/`NodeKeys`/`NodeScrypt`/`NodeBrotli`/`NodeDNS`. 148-harness suite (`verify/`), fixtures byte-identical to real node v22. Added since: `lightningcss` (the native CSS transformer, substituted with its authors' wasm build), `watchroot` (a watcher rooted at the project root, which is where the restart storm lived), `stackshape` (error.stack carrying its message, the way V8 writes it), `tailwind` (version 3 compiles here; version 4 cannot, and the wall is Apple's) |
+| **D** — web toolchain | tsc, bundlers, dev servers | **Largely done**, as a byproduct of G | tsc + `tsc --watch`, webpack, esbuild-wasm, vite dev (HMR) and vite build (rollup-wasm) all gated (`verify/esbuild`, `devserver`, `hmr`, `firstrun`). A real SvelteKit project runs `npm run dev` on the device: starts once, pre-bundles its 20 dependencies, and answers a curl from the Mac with HTTP 200 and the rendered 33 kB page. Remaining piece is the Preview surface (phase C) |
 | **B** — WebView JIT | Move JS/wasm execution into WKWebView for JIT speed | **Not started — optional** | Measured: everything runs interpreted; the JIT buys speed, not capability (system.md:2094). No longer a prerequisite for anything |
 | **C** — Preview container | In-app viewing surface for what dev servers serve; LAN hosting | **Not started** | The server half works (vite serves clients outside the app — gated in `verify/devserver`); no in-app viewer exists |
 | **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads the official CPython wasm32-wasi build, hash-checks it, unpacks it (zip reader written here — iOS has no `unzip`) and `python hello.py` runs CPython 3.14.6. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |

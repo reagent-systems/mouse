@@ -119,15 +119,26 @@ let vitePrompt = await MainActor.run { () -> Task<[MouseShell.Output], Never> in
     }
 }
 _ = await vitePrompt.value
-try? await Task.sleep(nanoseconds: 6_000_000_000)
 
+// Wait for the SERVER, not for a duration. Six seconds was enough on an idle machine and not
+// enough beside a parallel build, so this harness failed about one run in three under load and
+// passed on its own — the worst way for a gate to behave, because a flake and a regression read
+// identically and the next person believes whichever they saw first. It cost an afternoon here:
+// a red run during a busy sweep was taken for a real break and bisected across five commits
+// before two clean re-runs showed the binary passing.
 var served = "no answer"
-do {
-    let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:5395/src/main.ts")!)
-    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-    let body = String(decoding: data, as: UTF8.self)
-    served = "\(code) \(body.contains("hello from a phone") ? "transformed the module" : "unexpected body")"
-} catch { served = "request failed: \(error.localizedDescription)" }
+for attempt in 1...60 {
+    do {
+        let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:5395/src/main.ts")!)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let body = String(decoding: data, as: UTF8.self)
+        served = "\(code) \(body.contains("hello from a phone") ? "transformed the module" : "unexpected body")"
+        break
+    } catch {
+        served = "request failed after \(attempt)s: \(error.localizedDescription)"
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+    }
+}
 print("`npm run dev` from the prompt: \(served)")
 let viteLines = await viteTranscript.snapshot()
 print("vite said (\(viteLines.count) lines): \(viteLines.map { $0.debugDescription }.joined(separator: " "))")

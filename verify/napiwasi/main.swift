@@ -1,67 +1,101 @@
 import Foundation
 setvbuf(stdout, nil, _IONBF, 0)
-
-// Where a Rust-native npm package stops, now that `node:wasi` exists. Every napi-rs package
-// publishes a `wasm32-wasi` build for platforms it ships no binary for, and its loader reaches
-// that build only when told to — on iOS the native branch can never load, so the engine sets
-// napi-rs's own `NAPI_RS_FORCE_WASI` by default. This measures how far that gets, on two
-// packages that share nothing but their build system.
+// The napi-rs wasi substitution, against the REAL registry — because its old assumption expired
+// in the field. `wasiBinding` used to find `…-wasm32-wasi` listed in a package's
+// `optionalDependencies`; rolldown 1.x stopped listing it, and on a phone that turned
+// `npm run dev` of a vite 8 project into "Cannot find native binding": the loader's wasi branch
+// probes `@rolldown/binding-wasm32-wasi` by name and nothing had installed it. The binding name
+// is now DERIVED from the natives' own naming shape when the listing is absent — and a derived
+// name is a guess, so a package with no wasi build in the registry must install exactly as it
+// always did.
 //
-// The answer is one wall, and it is not ours: these builds are compiled with THREADS, and a
-// wasm module declaring shared memory does not parse in JavaScriptCore (see the sharedmem
-// gate — the Memory constructor accepts `shared: true` and lies about it). WASI itself is
-// complete and gated separately. A single-threaded wasi build — which is what §4's CPython
-// plan needs — is on the other side of this line, not behind it.
-
-let base = FileManager.default.temporaryDirectory.appendingPathComponent("napi-\(getpid())")
-try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-
-struct Case { let name: String; let scope: String; let probe: String }
-let cases = [
-    Case(name: "oxc-parser", scope: "@oxc-parser",
-         probe: "require('oxc-parser').parseSync('a.ts', 'const x: number = 1;')"),
-    Case(name: "rolldown", scope: "@rolldown",
-         probe: "require('rolldown')"),
-]
-
+// Three checks, one per way this can go:
+//   1. rolldown (derivation case): the wasi binding lands even though it is unlisted.
+//   2. a synthetic listed case: the old path still wins over derivation.
+//   3. @parcel/watcher (no wasi build exists): the guessed name 404s and the install SUCCEEDS.
 var failures = 0
-for item in cases {
-    let dir = base.appendingPathComponent(item.name)
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    do { _ = try await PackageManager.install(requirements: [item.name: "latest"], into: dir) }
-    catch { print("\(item.name): install failed: \(error)"); failures += 1; continue }
-
-    let installed = (try? FileManager.default.contentsOfDirectory(
-        atPath: dir.appendingPathComponent("node_modules/\(item.scope)").path)) ?? []
-    let hasWasi = installed.contains { $0.hasSuffix("wasm32-wasi") }
-
-    let script = """
-    try { \(item.probe); console.log('loaded'); }
-    catch (error) {
-      const chain = []; let cause = error;
-      while (cause) { chain.push(String(cause.message || cause).split('\\n')[0]); cause = cause.cause; }
-      console.log('chain:', chain.join(' <- '));
-    }
-    """
-    let engine = NodeEngine(root: dir, env: ["PATH": "/", "HOME": "/"])
-    let result = await engine.run(source: script, path: "/p.cjs", argv: ["node", "/p.cjs"], cwd: "/", stdin: "")
-    let text = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
-
-    // Three claims per package: the portable build was installed, the loader REACHED it (which
-    // is what the flag buys), and what stopped it is shared memory.
-    let reached = text.contains("shared memory is not enabled")
-    print("\(item.name): wasi build installed=\(hasWasi), loader reached it=\(reached)")
-    if !hasWasi || !reached {
+func check(_ condition: Bool, _ label: String) {
+    if !condition {
         failures += 1
-        print("  \(text.prefix(300))")
+        print("  FAIL: \(label)")
     }
+}
+
+let scratch = FileManager.default.temporaryDirectory
+    .appendingPathComponent("napiwasi-\(ProcessInfo.processInfo.processIdentifier)")
+defer { try? FileManager.default.removeItem(at: scratch) }
+
+// 1. rolldown: natives listed, wasi unlisted — the derivation must fetch it anyway, versioned
+//    in lockstep with rolldown itself.
+do {
+    let root = scratch.appendingPathComponent("rolldown")
+    _ = try await PackageManager.install(requirements: ["rolldown": "^1.0.0"], into: root)
+    let binding = root.appendingPathComponent("node_modules/@rolldown/binding-wasm32-wasi")
+    check(FileManager.default.fileExists(atPath: binding.appendingPathComponent("package.json").path),
+          "rolldown's unlisted wasi binding is installed by derivation")
+    let wasm = binding.appendingPathComponent("rolldown-binding.wasm32-wasi.wasm")
+    check(FileManager.default.fileExists(atPath: wasm.path),
+          "and it is the real artifact, wasm included")
+    let rolldownVersion = try packageVersion(root, "node_modules/rolldown")
+    let bindingVersion = try packageVersion(root, "node_modules/@rolldown/binding-wasm32-wasi")
+    check(rolldownVersion == bindingVersion,
+          "binding version \(bindingVersion) is rolldown's own \(rolldownVersion) — lockstep held")
+} catch {
+    failures += 1
+    print("  FAIL: rolldown install threw: \(error)")
+}
+
+// 2. The listed shape still takes precedence — derivation is the fallback, not a replacement.
+do {
+    let listed = fake(optional: [
+        "@fake/binding-darwin-arm64": "9.9.9",
+        "@fake/binding-wasm32-wasi": "9.9.8",
+    ])
+    let answer = PackageManager.wasiBinding(of: listed)
+    check(answer?.name == "@fake/binding-wasm32-wasi" && answer?.derived == false
+          && answer?.requirement == "9.9.8",
+          "a LISTED wasi binding wins, at its listed requirement")
+    let unlisted = fake(optional: ["@fake/binding-linux-x64-gnu": "9.9.9"])
+    let derived = PackageManager.wasiBinding(of: unlisted)
+    check(derived?.name == "@fake/binding-wasm32-wasi" && derived?.derived == true
+          && derived?.requirement == "9.9.9",
+          "an unlisted one derives the name and pins the package's own version")
+    let plain = fake(optional: ["fsevents": "^2.0.0"])
+    check(PackageManager.wasiBinding(of: plain) == nil,
+          "optional deps that are not napi bindings derive nothing")
+}
+
+// 3. @parcel/watcher publishes natives and a wasm build, but nothing named `…-wasm32-wasi` —
+//    the derived guess 404s in the registry, and the install must succeed regardless.
+do {
+    let root = scratch.appendingPathComponent("watcher")
+    _ = try await PackageManager.install(requirements: ["@parcel/watcher": "^2.0.0"], into: root)
+    check(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("node_modules/@parcel/watcher/package.json").path),
+          "a package whose derived wasi name does not exist installs as it always did")
+    check(!FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("node_modules/@parcel/watcher-wasm32-wasi").path),
+          "and the failed guess left nothing behind")
+} catch {
+    failures += 1
+    print("  FAIL: @parcel/watcher install threw: \(error)")
+}
+
+func fake(optional: [String: String]) -> PackageManager.ResolvedPackage {
+    PackageManager.ResolvedPackage(
+        name: "fake", version: "9.9.9", tarball: "", integrity: nil, shasum: nil,
+        dependencies: [:], optionalDependencies: optional, bin: [:])
+}
+
+func packageVersion(_ root: URL, _ path: String) throws -> String {
+    let data = try Data(contentsOf: root.appendingPathComponent(path).appendingPathComponent("package.json"))
+    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    return json?["version"] as? String ?? "?"
 }
 
 if failures == 0 {
-    print("NAPI WASI MATCH — both packages' WebAssembly builds install and their loaders reach "
-          + "them; what stops both is wasm threads, which JavaScriptCore does not enable")
+    print("NAPI WASI: 8 checks — unlisted binding derived and installed in lockstep, listed shape still wins, a 404 guess tolerated — MATCH")
 } else {
-    print("MISMATCH: \(failures) of \(cases.count) — the napi-rs wall moved, re-read where it is now")
+    print("NAPI WASI: \(failures) of 8 checks failed — MISMATCH")
     exit(1)
 }
-try? FileManager.default.removeItem(at: base)

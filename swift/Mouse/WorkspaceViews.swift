@@ -167,10 +167,18 @@ private struct FileTreeView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                Text(workspace.repoFullName)
-                    .font(.custom(AppFont.asciiName, size: 12))
-                    .opacity(0.55)
-                    .padding(.bottom, 10)
+                // The project's name IS the way back to the picker — the same move as tapping a
+                // breadcrumb's root. It keeps the label's appearance because it is still the
+                // label; nothing here announces that it can be tapped.
+                Button { deck.leaveWorkspace() } label: {
+                    Text(workspace.repoFullName)
+                        .font(.custom(AppFont.asciiName, size: 12))
+                        .opacity(0.55)
+                        .padding(.bottom, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
                 ForEach(visibleNodes()) { node in
                     row(node)
                 }
