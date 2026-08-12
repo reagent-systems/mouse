@@ -6,6 +6,12 @@
     curl http://localhost:5173/         HTTP 200, 33105 bytes, the rendered app
     node_modules/.vite/deps             20 dependencies pre-bundled
 
+Not a SvelteKit special case, which the brief asks for explicitly. Green on the
+same engine sources: `reactdev` (vite serves .tsx with types erased and JSX
+compiled), `hmr` (the watcher's edit pushed down a real WebSocket), `firstrun`
+(`npm create vite` scaffolds, installs and serves, end to end), `vite`, `npmrun`
+and `tscwatch`.
+
 The scan no longer fails. The one remaining sighting of "Failed to run
 dependency scan" came from a harness that called `server.close()` while the
 scan was still in flight — vite's own `ERR_CLOSED_SERVER`, correctly reported.
