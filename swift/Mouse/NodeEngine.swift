@@ -3365,7 +3365,6 @@ final class NodeEngine: @unchecked Sendable {
         // into this module finds them, and every export reads through a getter rather than
         // being frozen at end-of-module.
         var prologue: [String] = []
-        var epilogue: [String] = []
         var counter = 0
         var maskCache: String?
 
@@ -3382,7 +3381,7 @@ final class NodeEngine: @unchecked Sendable {
         // bytes with strings, comments and regexes blanked — and then applied to the text at
         // those offsets. A bundle emits JavaScript as data: vite's worker shim is the literal
         // line `export default function WorkerWrapper(options) {` inside a template string, and
-        // rewriting it both corrupted the code vite serves and left the epilogue assigning a
+        // rewriting it both corrupted the code vite serves and left an export assigning a
         // binding that does not exist. The mask is recomputed per pass because each pass
         // changes the text; scanning is linear and this is cached by content anyway.
         func replace(_ pattern: String, _ transform: (NSTextCheckingResult, NSString) -> String) {
@@ -3726,7 +3725,7 @@ final class NodeEngine: @unchecked Sendable {
         //   `locator`            everything else   -> `__esm1.locator`
         // `.locator` is skipped by the preceding-character test, which is what already kept
         // `runner.import` intact.
-        var body = prologue.joined(separator: " ") + " " + text + "\n;" + epilogue.joined(separator: " ")
+        var body = prologue.joined(separator: " ") + " " + text + "\n;"
         if !live.isEmpty {
             let mask = rewriteImportForms(body, meta: false, mask: true).text
             let ns = body as NSString
@@ -3772,7 +3771,7 @@ final class NodeEngine: @unchecked Sendable {
                         // A DECLARATION of the name is never a read — including the
                         // `const x = __esmBinding(…)` emitted just above, which would otherwise
                         // become `const __esm1.x = …`.
-                        var keywordEnd = before + 1
+                        let keywordEnd = before + 1
                         var keywordStart = before
                         while keywordStart >= 0, maskNS.character(at: keywordStart) != 0x20,
                               maskNS.character(at: keywordStart) != 0x09,

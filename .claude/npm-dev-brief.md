@@ -29,9 +29,11 @@ code, and shorthand properties written one per line.
   creation cannot be hooked; the honest fix is wrapping the error constructors,
   which covers everything thrown by JS and leaves engine-thrown TypeErrors to
   `util.inspect`, which already rebuilds the header.
-- Nothing gates a watcher rooted at the program root asserting no `unlink` when
-  nothing changed. `verify/chokidar` watches a subdirectory, which is why the
-  restart storm was invisible to the suite.
+- ~~Nothing gates a watcher rooted at the program root.~~ `verify/watchroot`
+  now does, driving the real shell so it pins the launch cwd itself. Run against
+  the previous launch path it fails, so it catches the regression. It does not
+  reproduce the storm: standalone chokidar over a root this size stays quiet even
+  from `/`, and the tearing needed the dev server's own watcher and churn.
 - **Tailwind 4 cannot run here, and the reason is not ours to fix.** Restoring
   `tailwindcss()` to `local__test-2/vite.config.ts` gets past lightningcss now
   (substituted, gated by `verify/lightningcss`) and then stops at
