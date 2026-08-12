@@ -126,15 +126,14 @@ let cases: [Case] = [
             import { slow } from './slow.mjs';
             console.log(data.label, slow);
             """]),
-    // A binding, not a copy: the importer must see a later mutation. This is the one place a
-    // CommonJS rewrite can silently diverge, because assigning exports at end-of-module makes a
-    // SNAPSHOT of whatever the value was then.
-    // The exporting side is live: `ns.count` reads through a getter defined before the body,
-    // so a later mutation shows. The IMPORTING side is not, and cannot be without a parser: a
-    // transpile to CommonJS binds `count` as a local, and making it live would mean rewriting
-    // every reference to it, which needs real scope analysis to avoid capturing a shadowing
-    // parameter of the same name. Pinned rather than hidden — `import * as ns` is the form that
-    // behaves, and this says exactly how far the divergence goes.
+    // A binding, not a copy: the importer must see a later mutation. Both sides are live now.
+    // The exporting side always was — `ns.count` reads through a getter defined before the body.
+    // The IMPORTING side was a snapshot for a long time, pinned here as an accepted divergence
+    // on the grounds that fixing it needed a parser. It did not need a parser; it needed the
+    // reference rewrite in `transpileESM`, which promotes a named import to a read through the
+    // namespace wherever the module does not itself bind that name. What forced the issue was
+    // svelte: its compiler does `export let locator;` and fills it in during init, so a snapshot
+    // stayed undefined and every SSR render died calling it.
     Case(name: "live-bindings", files: [
         "counter.mjs": """
             export let count = 0;
@@ -149,7 +148,7 @@ let cases: [Case] = [
             bump(); bump(); hit();
             console.log('after', count, ns.count, box.hits);
             """],
-        pinned: (ours: "before 0 0 0\nafter 0 2 1\n", real: "before 0 0 0\nafter 2 2 1\n")),
+        ),
     Case(name: "string-names-and-tdz", files: [
         "dep.mjs": """
             const value = 'quoted name';
@@ -280,7 +279,7 @@ for item in cases {
 if failures == 0 {
     let pinnedCount = cases.filter { $0.pinned != nil }.count
     print("ESM GRAMMAR MATCH — \(cases.count - pinnedCount) module shapes behave as real node's, "
-          + "\(pinnedCount) pinned divergence (named imports are a snapshot; the namespace form is live)")
+          + "\(pinnedCount) pinned divergences")
 } else {
     print("FAIL: \(failures) of \(cases.count) module shapes differ")
     exit(1)

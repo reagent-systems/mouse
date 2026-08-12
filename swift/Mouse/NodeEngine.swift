@@ -2911,6 +2911,7 @@ final class NodeEngine: @unchecked Sendable {
             }
             registerSourceMap(id: id, source: source)
             let esm = isESModule(id: id, source: source)
+            let rawSource = source
             if esm {
                 source = transpileCached(source)
             } else if source.contains("import") {
@@ -2920,7 +2921,22 @@ final class NodeEngine: @unchecked Sendable {
             }
             // ESM evaluates under an ASYNC wrapper (its imports may await a top-level-await
             // dependency); CJS stays a plain sync function.
-            guard let function = wrapModule(source, async: esm, sourceURL: id) else {
+            var function = wrapModule(source, async: esm, sourceURL: id)
+            if function == nil, esm {
+                // Live bindings are a REFERENCE REWRITE, and a rewrite over third-party code is
+                // never provably safe: minified bundles put an imported name in places a scanner
+                // cannot always classify (a class field, a template substitution, an object
+                // shorthand). Any miss shows up as a SyntaxError, which is exactly the signal
+                // needed — so the module is transpiled again with bindings left as copies, which
+                // is what this engine did for its whole life before. Correct where it can be,
+                // never worse than before where it cannot.
+                let snapshot = transpileCached(rawSource, liveBindings: false)
+                if let retried = wrapModule(snapshot, async: true, sourceURL: id) {
+                    source = snapshot
+                    function = retried
+                }
+            }
+            guard let function else {
                 return throwInJS("Cannot parse '\(id)'" + (lastParseProblem.map { ": " + $0 } ?? ""))
             }
             let module = context.evaluateScript("({exports: {}})")!
@@ -3086,16 +3102,17 @@ final class NodeEngine: @unchecked Sendable {
         return directory
     }()
 
-    private func transpileCached(_ source: String) -> String {
+    private func transpileCached(_ source: String, liveBindings: Bool = true) -> String {
         guard source.utf8.count >= Self.transpileCacheThreshold,
               let directory = Self.transpileCacheDirectory else {
-            return Self.transpileESM(source)
+            return Self.transpileESM(source, liveBindings: liveBindings)
         }
         let digest = SHA256.hash(data: Data(source.utf8))
-        let name = digest.map { String(format: "%02x", $0) }.joined() + "-v\(Self.transpilerVersion).cjs"
+        let name = digest.map { String(format: "%02x", $0) }.joined()
+            + (liveBindings ? "" : "-snap") + "-v\(Self.transpilerVersion).cjs"
         let file = directory.appendingPathComponent(name)
         if let cached = try? String(contentsOf: file, encoding: .utf8) { return cached }
-        let transpiled = Self.transpileESM(source)
+        let transpiled = Self.transpileESM(source, liveBindings: liveBindings)
         try? transpiled.write(to: file, atomically: true, encoding: .utf8)
         return transpiled
     }
@@ -3316,7 +3333,7 @@ final class NodeEngine: @unchecked Sendable {
         return rewriteImportForms(source, meta: false).text
     }
 
-    static func transpileESM(_ source: String) -> String {
+    static func transpileESM(_ source: String, liveBindings: Bool = true) -> String {
         var text = source
         // Emitted BEFORE the body: function declarations are hoisted, so a cycle reaching back
         // into this module finds them, and every export reads through a getter rather than
@@ -3419,6 +3436,35 @@ final class NodeEngine: @unchecked Sendable {
                 .joined(separator: ", ")
         }
 
+        // Named imports promoted to live bindings: alias -> `<temp>.<source>`, applied to every
+        // reference in a final pass. See the note at the emission site.
+        var live: [(alias: String, temp: String, source: String)] = []
+        // The whole source as code-only text, computed once: declarations cannot be introduced by
+        // our own rewrites, so the shadowing question is answered against the ORIGINAL.
+        let shadowMask = rewriteImportForms(source, meta: false, mask: true).text
+        /// Does this module bind `name` itself anywhere — a declaration, a parameter, a catch, a
+        /// destructure? Then the name is not unambiguously the import, and it is left as a copy.
+        /// Deliberately over-eager: a false "yes" costs live-ness, a false "no" corrupts code.
+        func shadows(_ name: String) -> Bool {
+            let n = NSRegularExpression.escapedPattern(for: name)
+            let patterns = [
+                "\\b(?:let|const|var|function|class)\\s+\\Q\(name)\\E\\b",
+                "\\bcatch\\s*\\(\\s*\\Q\(name)\\E\\b",
+                "\\bfunction\\b[^(){]*\\([^)]*\\b" + n + "\\b[^)]*\\)",
+                "\\([^()]*\\b" + n + "\\b[^()]*\\)\\s*=>",
+                "\\b" + n + "\\s*=>",
+                "[\\{,]\\s*\\b" + n + "\\b\\s*[,\\}][^=;\\n]*=[^=]",
+            ]
+            for pattern in patterns {
+                if let regex = try? NSRegularExpression(pattern: pattern),
+                   regex.firstMatch(in: shadowMask,
+                                    range: NSRange(location: 0, length: (shadowMask as NSString).length)) != nil {
+                    return true
+                }
+            }
+            return false
+        }
+
         // Every import site awaits ONLY a genuinely-pending (top-level-await) dependency:
         // `if (x instanceof Promise) x = await x`. A fully-sync dependency evaluates without
         // suspension, so sync modules stay sync under the async wrapper; a TLA dependency
@@ -3442,7 +3488,21 @@ final class NodeEngine: @unchecked Sendable {
                 // closed. Destructuring reads it at import time and turns a legal cycle into a
                 // ReferenceError, which is what execa's send.js ↔ strict.js pair hit.
                 for binding in bindings(named) {
-                    lines.append("const \(binding.alias) = __esmBinding(\(temp), '\(binding.source)');")
+                    // A named import is a LIVE BINDING in real ESM: the importer sees a value the
+                    // exporter assigns later. A `const` copies it once, and svelte's compiler is
+                    // the case that made this matter — `export let locator;` is undefined at
+                    // import time and filled in during init, so a copy stays undefined forever
+                    // and the parser dies calling it.
+                    //
+                    // Live means reading through the namespace where the name is USED, which is a
+                    // reference rewrite. It is only safe where the name cannot be something else,
+                    // so `shadows` refuses whenever the module also DECLARES that name; those
+                    // fall back to the copy, which is exactly today's behaviour and no worse.
+                    if !liveBindings || shadows(binding.alias) {
+                        lines.append("const \(binding.alias) = __esmBinding(\(temp), '\(binding.source)');")
+                    } else {
+                        live.append((alias: binding.alias, temp: temp, source: binding.source))
+                    }
                 }
             }
             if let namespace = group(match, 3, ns) {
@@ -3610,12 +3670,121 @@ final class NodeEngine: @unchecked Sendable {
         // assignment put a phantom key into `Object.keys(ns)`, into a spread of it, and into
         // anything that walks a module's exports. Defined this way the interop check still
         // sees it and nothing that ENUMERATES does.
+        // Live bindings, applied last: every remaining reference to a promoted alias becomes a
+        // read through the namespace, so a value the exporter assigns later is seen. Only names
+        // `shadows` cleared get here, so a bare occurrence is the import and nothing else.
+        //
+        // Three shapes have to be told apart, and the mask makes that safe by blanking strings,
+        // comments and regexes first:
+        //   `{ locator }`        object shorthand  -> `{ locator: __esm1.locator }` (a bare
+        //                        `__esm1.locator` there is a syntax error)
+        //   `{ locator: … }`     a KEY, not a read -> left alone
+        //   `locator`            everything else   -> `__esm1.locator`
+        // `.locator` is skipped by the preceding-character test, which is what already kept
+        // `runner.import` intact.
+        var body = prologue.joined(separator: " ") + " " + text + "\n;" + epilogue.joined(separator: " ")
+        if !live.isEmpty {
+            let mask = rewriteImportForms(body, meta: false, mask: true).text
+            let ns = body as NSString
+            let maskNS = mask as NSString
+            if maskNS.length == ns.length {
+                var edits: [(range: NSRange, replacement: String)] = []
+                for binding in live {
+                    let pattern = "\\b" + NSRegularExpression.escapedPattern(for: binding.alias) + "\\b"
+                    guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                    for match in regex.matches(in: mask, range: NSRange(location: 0, length: maskNS.length)) {
+                        let at = match.range.location
+                        // Only code. The mask blanks comments, templates and regexes, but it
+                        // keeps QUOTED strings verbatim on purpose — the import patterns read
+                        // specifiers out of them — so a quoted `send` passes the mask test and
+                        // has to be excluded here. Without this, `from './send.mjs'` became
+                        // `from './__esm1.send.mjs'` and the module vanished.
+                        guard maskNS.substring(with: match.range) == ns.substring(with: match.range) else { continue }
+                        var quote: unichar = 0
+                        var lineStart = at
+                        while lineStart > 0, maskNS.character(at: lineStart - 1) != 0x0a { lineStart -= 1 }
+                        var probe = lineStart
+                        while probe < at {
+                            let c = maskNS.character(at: probe)
+                            if c == 0x5c { probe += 2; continue }                    // escape
+                            if quote == 0, c == 0x27 || c == 0x22 { quote = c }
+                            else if quote != 0, c == quote { quote = 0 }
+                            probe += 1
+                        }
+                        if quote != 0 { continue }                                   // inside a string
+                        var before = at - 1
+                        while before >= 0, maskNS.character(at: before) == 0x20 || maskNS.character(at: before) == 0x09 {
+                            before -= 1
+                        }
+                        if before >= 0 {
+                            let previous = maskNS.character(at: before)
+                            if previous == 0x2e || previous == 0x23 { continue }   // .name  #name
+                        }
+                        var after = at + match.range.length
+                        while after < maskNS.length,
+                              maskNS.character(at: after) == 0x20 || maskNS.character(at: after) == 0x09 { after += 1 }
+                        let next: unichar = after < maskNS.length ? maskNS.character(at: after) : 0
+                        if next == 0x3a { continue }                                // `name:` is a key
+                        let read = "\(binding.temp).\(binding.source)"
+                        // Object shorthand needs the ENCLOSING bracket, not the preceding
+                        // character: `f(a, named)` and `{ a, named }` both sit after a comma,
+                        // and rewriting the first to `named: …` is a syntax error inside a call
+                        // — which is exactly what broke import-forms. Walk back over balanced
+                        // pairs to whatever bracket actually contains this name.
+                        var enclosing: unichar = 0
+                        var scan = before
+                        var depth = 0
+                        while scan >= 0 {
+                            let c = maskNS.character(at: scan)
+                            if c == 0x29 || c == 0x5d || c == 0x7d { depth += 1 }
+                            else if c == 0x28 || c == 0x5b || c == 0x7b {
+                                if depth == 0 { enclosing = c; break }
+                                depth -= 1
+                            } else if depth == 0 && (c == 0x3b) { break }
+                            scan -= 1
+                        }
+                        // `${ name }` is a template SUBSTITUTION, not an object: its brace is
+                        // preceded by `$`, and treating it as shorthand emitted `name: …` inside
+                        // a template expression — which is how vite's own cli.js stopped parsing.
+                        var braceIsObject = enclosing == 0x7b
+                        if braceIsObject, scan > 0, maskNS.character(at: scan - 1) == 0x24 {
+                            braceIsObject = false
+                        }
+                        // Shorthand needs BOTH: the enclosing bracket is an object brace, and
+                        // the name sits at the start of a property — directly after `{` or `,`.
+                        // Without the second test, `{ key: imported }` matched (the scan walks
+                        // back past the colon to the brace) and produced
+                        // `{ key: imported: ns.imported }`, which is how fdir stopped parsing.
+                        let previousChar: unichar = before >= 0 ? maskNS.character(at: before) : 0
+                        let atPropertyStart = previousChar == 0x7b || previousChar == 0x2c
+                        let shorthand = braceIsObject && atPropertyStart && (next == 0x2c || next == 0x7d)
+                        edits.append((match.range, shorthand ? "\(binding.alias): \(read)" : read))
+                    }
+                }
+                if !edits.isEmpty {
+                    var result = ""
+                    var cursor = 0
+                    for edit in edits.sorted(by: { $0.range.location < $1.range.location }) {
+                        guard edit.range.location >= cursor else { continue }
+                        result += ns.substring(with: NSRange(location: cursor,
+                                                             length: edit.range.location - cursor))
+                        result += edit.replacement
+                        cursor = edit.range.location + edit.range.length
+                    }
+                    if cursor < ns.length {
+                        result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+                    }
+                    body = result
+                }
+            }
+        }
+
         // Everything before the body goes on ONE line and everything after it on the last, for
         // the same reason the wrapper does: a module's line 5 has to still be line 5. The
         // prologue was four lines of live-export getters, so an ESM stack pointed four lines
         // past the throw.
         return "Object.defineProperty(module.exports, '__esModule', { value: true }); try { "
-            + prologue.joined(separator: " ") + " " + text + "\n;" + epilogue.joined(separator: " ")
+            + body
             + " ;module.__esmDone = true; } catch (__esmThrown) { module.__esmError = __esmThrown; throw __esmThrown; }"
     }
 
