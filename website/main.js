@@ -44,4 +44,21 @@
     }, { threshold: 0.05 });
     freeze.observe(hero);
   }
+
+  // Live GitHub star count in the nav pill; falls back to the plain label.
+  const stars = document.getElementById('gh-stars');
+  const starsFallback = document.getElementById('gh-fallback');
+  if (stars) {
+    fetch('https://api.github.com/repos/reagent-systems/mouse', {
+      headers: { Accept: 'application/vnd.github+json' }
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const n = d && d.stargazers_count;
+        if (typeof n !== 'number') return;
+        stars.textContent = n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(n);
+        if (starsFallback) starsFallback.style.display = 'none';
+      })
+      .catch(() => { /* offline or rate-limited: keep the label */ });
+  }
 })();
