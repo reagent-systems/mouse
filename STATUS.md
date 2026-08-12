@@ -1,9 +1,15 @@
 # STATUS.md — the verified state of Mouse
 
-Last reconciled: 2026-07-31, at commit 953dd98 (end of the phase-G run,
-27ed75b..953dd98, 184 commits). This file is the one place that says where
-every phase stands, with the evidence named. When a phase's state changes,
-this file moves with it — same rule as every other doc here.
+Last reconciled: 2026-08-12, at commit dbd5d2d (the `npm run dev` run,
+d27ffdd..dbd5d2d), by running the whole suite rather than trusting the last
+green one: **141 assertions passed, 0 failed, 0 build-broken**, plus the five
+harnesses `verify.sh` declares investigations and does not count — `breadth`,
+`glob`, `reachable`, `shapes`, `vitestrun`. Before that, 2026-07-31 at 953dd98
+(end of the phase-G run, 27ed75b..953dd98, 184 commits).
+
+This file is the one place that says where every phase stands, with the evidence
+named. When a phase's state changes, this file moves with it — same rule as
+every other doc here.
 
 The letter phases are subsystems, not a sequence. Build order was
 dependency-driven: T → A → F → G, with D falling out of G. compile.md

@@ -26,7 +26,9 @@ typed arrays instead of `String(body)`, and the two misreadings of source text
 that left svelte's `dev` a snapshot after all — prose inside a string read as
 code, and shorthand properties written one per line.
 
-A full suite run (146 harnesses) found the one thing the loop had left behind:
+The whole suite is green against the final code: **141 assertions passed, 0
+failed**, plus the five harnesses `verify.sh` declares investigations and does
+not count. The run before it found the one thing the loop had left behind:
 the `/project` alias SHADOWED a real top-level directory of that name, and two
 harnesses keep their packages in exactly such a directory. The alias now steps
 aside to `/project-2` when the workspace already holds that name. Read
