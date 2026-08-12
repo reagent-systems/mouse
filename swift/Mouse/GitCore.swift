@@ -68,11 +68,45 @@ enum GitCore {
         return sha
     }
 
-    /// Read a loose object; returns its type and content.
+    private static let importedPacksLock = NSLock()
+    /// Packfiles already exploded into the loose store, by path. A walk asks for the same absent
+    /// object once per branch, and importing a pack repeatedly would be pure waste.
+    nonisolated(unsafe) private static var importedPacks: Set<String> = []
+
+    /// Explode any packfile not yet imported into the loose store, so the reader below can find
+    /// what is in it. This store is loose-only by design — `readPackfile` is how a fetched pack
+    /// has always entered it — but a repository CLONED by real git keeps its objects packed, and
+    /// nothing ever imported those. In this checkout that was 125 objects, one of them the merge
+    /// commit every branch passes through, so every history stopped dead at the same place.
+    /// Returns true when something new was imported and a retry is worth it.
+    private static func importPacks(in root: URL) -> Bool {
+        let packDir = gitDirectory(root).appendingPathComponent("objects/pack")
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: packDir.path)) ?? [])
+            .filter { $0.hasSuffix(".pack") }.sorted()
+        var imported = false
+        for name in names {
+            let file = packDir.appendingPathComponent(name)
+            importedPacksLock.lock()
+            let already = importedPacks.contains(file.path)
+            if !already { importedPacks.insert(file.path) }
+            importedPacksLock.unlock()
+            if already { continue }
+            guard let data = try? Data(contentsOf: file) else { continue }
+            // A pack we cannot read is not a reason to fail the read that asked for it: the
+            // object may be loose, or in the next pack.
+            if (try? readPackfile(data, into: root)) != nil { imported = true }
+        }
+        return imported
+    }
+
+    /// Read an object by sha. Loose first; a miss imports any packfile that has not been
+    /// exploded yet and looks again.
     static func readObject(_ sha: String, in root: URL) throws -> (type: ObjectType, content: Data) {
         let file = gitDirectory(root)
             .appendingPathComponent("objects/\(sha.prefix(2))/\(sha.dropFirst(2))")
-        guard let compressed = try? Data(contentsOf: file) else {
+        var loose = try? Data(contentsOf: file)
+        if loose == nil, importPacks(in: root) { loose = try? Data(contentsOf: file) }
+        guard let compressed = loose else {
             throw GitError("object not found: \(sha)")
         }
         let payload = try zlibDecompress(compressed)
@@ -233,6 +267,15 @@ enum GitCore {
     }
 
     /// History from a commit, newest first, first-parent plus merged parents (breadth-first).
+    /// History from a tip, newest first. `limit` bounds the walk; the default suits a listing
+    /// like `git log`, and a caller that wants the whole history says so.
+    ///
+    /// An unreadable ANCESTOR ends the walk instead of throwing. A history can legitimately stop
+    /// short — a shallow clone has a boundary, and this reader only knows loose objects, so a
+    /// packed ancestor is simply absent. Throwing lost the whole branch over one missing commit:
+    /// the graph's `try?` turned 316 readable commits into none, and RAISING the limit made it
+    /// worse, because a shorter walk stopped before reaching the gap. The starting commit still
+    /// throws — asking for the history of something unreadable is a real error.
     static func log(from sha: String, in root: URL, limit: Int = 200) throws -> [Commit] {
         var seen: Set<String> = []
         var queue = [sha]
@@ -241,7 +284,10 @@ enum GitCore {
             queue.removeFirst()
             guard !seen.contains(next) else { continue }
             seen.insert(next)
-            let commit = try readCommit(next, in: root)
+            guard let commit = try? readCommit(next, in: root) else {
+                if commits.isEmpty { throw GitError("object not found: \(next)") }
+                continue
+            }
             commits.append(commit)
             queue.append(contentsOf: commit.parents)
         }
@@ -260,12 +306,35 @@ enum GitCore {
 
     /// All branches with their tip shas.
     static func branches(in root: URL) -> [String: String] {
-        let dir = gitDirectory(root).appendingPathComponent("refs/heads")
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        let git = gitDirectory(root)
+        let dir = git.appendingPathComponent("refs/heads")
         var result: [String: String] = [:]
-        for name in names {
-            if let sha = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) {
+        // A branch name with a slash is a DIRECTORY under refs/heads, so a flat listing sees
+        // `fix` and not `fix/graph-mount`. Ten of this repository's twenty-one branches are
+        // namespaced that way, including the one checked out, and the graph knew about none of
+        // them. Walk the tree.
+        if let walker = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) {
+            for case let file as URL in walker {
+                guard (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == false,
+                      let sha = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                let name = file.path.hasPrefix(dir.path + "/")
+                    ? String(file.path.dropFirst(dir.path.count + 1)) : file.lastPathComponent
                 result[name] = sha.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        // Refs a real git packs away. `git pack-refs` empties the directories above and moves
+        // every ref into this one file, so a cloned repository can have no loose refs at all —
+        // the same shape of gap as objects living only in a packfile.
+        if let text = try? String(contentsOf: git.appendingPathComponent("packed-refs"), encoding: .utf8) {
+            for line in text.split(separator: "\n") {
+                guard !line.hasPrefix("#"), !line.hasPrefix("^") else { continue }
+                let parts = line.split(separator: " ", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                let ref = parts[1].trimmingCharacters(in: .whitespaces)
+                guard ref.hasPrefix("refs/heads/") else { continue }
+                let name = String(ref.dropFirst("refs/heads/".count))
+                // A loose ref WINS: it is the newer value when both exist.
+                if result[name] == nil { result[name] = String(parts[0]) }
             }
         }
         return result

@@ -27,6 +27,10 @@ final class Workspace {
     private(set) var graphRows: [GraphRow]?
     private(set) var graphTips: [String: String] = [:]
     private(set) var graphError: String?
+    /// False when the graph is showing less than the whole history — GitHub's pagination ran to
+    /// the page limit, or the local walk reached a commit this reader cannot open. A truncated
+    /// graph that does not say so reads as a complete one.
+    private(set) var graphComplete = true
     private var historyStamp: String?
     private var historyInFlight = false
     /// The remote head sha the local tree was last synced to (download, pull, or our own push).
@@ -176,37 +180,54 @@ final class Workspace {
         // one via `git init`) graphs its LOCAL history — full topology, no network.
         if GitCore.hasRepo(root) {
             let root = self.root
-            let local: (rows: [GraphRow], tips: [String: String])? = await Task.detached {
+            let local: (rows: [GraphRow], tips: [String: String], complete: Bool)? = await Task.detached {
                 let branches = GitCore.branches(in: root)
-                guard !branches.isEmpty else { return ([], [:]) }
-                var seen: Set<String> = []
+                guard !branches.isEmpty else { return ([], [:], true) }
+                // ONE walk seeded with every tip, not one walk per tip. Branches share nearly
+                // all of their history, so per-tip walks re-read the same commits once per
+                // branch — 21 branches over 423 commits was about 5000 object reads and 1.1s,
+                // against 423 reads and 0.3s for the same answer.
+                var visited: Set<String> = []
+                var have: Set<String> = []
                 var nodes: [CommitNode] = []
-                for tip in branches.values {
-                    guard let commits = try? GitCore.log(from: tip, in: root) else { continue }
-                    for commit in commits where !seen.contains(commit.sha) {
-                        seen.insert(commit.sha)
-                        nodes.append(CommitNode(
-                            sha: commit.sha,
-                            message: commit.message.components(separatedBy: "\n")[0],
-                            author: commit.author.components(separatedBy: " <")[0],
-                            parents: commit.parents
-                        ))
-                    }
+                // Dates kept from the walk. The sort used to read each commit again from disk
+                // inside the comparator — two object reads per comparison, O(n log n) inflates of
+                // data the walk had already decoded and thrown away.
+                var dates: [String: Date] = [:]
+                var queue = Array(branches.values)
+                var cursor = 0
+                while cursor < queue.count {
+                    let sha = queue[cursor]
+                    cursor += 1
+                    guard visited.insert(sha).inserted else { continue }
+                    // Unreadable is not fatal and not a lie: the commit is left out of `have`,
+                    // which is what marks the graph incomplete below.
+                    guard let commit = try? GitCore.readCommit(sha, in: root) else { continue }
+                    have.insert(sha)
+                    dates[sha] = commit.date
+                    nodes.append(CommitNode(
+                        sha: sha,
+                        message: commit.message.components(separatedBy: "\n")[0],
+                        author: commit.author.components(separatedBy: " <")[0],
+                        parents: commit.parents
+                    ))
+                    queue.append(contentsOf: commit.parents)
                 }
-                nodes.sort { a, b in
-                    // Parents must come after children for the lane layout; date order works
-                    // for our linear-ish histories.
-                    guard let ca = try? GitCore.readCommit(a.sha, in: root),
-                          let cb = try? GitCore.readCommit(b.sha, in: root) else { return false }
-                    return ca.date > cb.date
-                }
+                // Parents must come after children for the lane layout; date order works
+                // for our linear-ish histories.
+                nodes.sort { (dates[$0.sha] ?? .distantPast) > (dates[$1.sha] ?? .distantPast) }
                 var tips: [String: String] = [:]
                 for (name, sha) in branches { tips[sha] = name }
-                return (GitGraph.layout(nodes), tips)
+                // A parent nobody visited is history this reader could not open — the walk
+                // stopped there. Every commit it DID reach is on screen; the graph just is not
+                // the whole story, and says so.
+                let complete = !nodes.contains { $0.parents.contains { !have.contains($0) } }
+                return (GitGraph.layout(nodes), tips, complete)
             }.value
             if let local {
                 graphRows = local.rows
                 graphTips = local.tips
+                graphComplete = local.complete
                 graphError = nil
                 historyStamp = stamp
             }
@@ -218,6 +239,7 @@ final class Workspace {
             let history = try await GitGraph.fetchHistory(repo: repoFullName, token: token)
             graphRows = GitGraph.layout(history.commits)
             graphTips = history.branchTips
+            graphComplete = history.complete
             graphError = nil
             historyStamp = stamp
         } catch {
