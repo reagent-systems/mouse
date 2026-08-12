@@ -1,11 +1,12 @@
 # STATUS.md — the verified state of Mouse
 
-Last reconciled: 2026-08-12, at commit dbd5d2d (the `npm run dev` run,
-d27ffdd..dbd5d2d), by running the whole suite rather than trusting the last
-green one: **141 assertions passed, 0 failed, 0 build-broken**, plus the five
+Last reconciled: 2026-08-12, at commit 755a1c1 (the `npm run dev` run,
+d27ffdd..755a1c1), by running the whole suite rather than trusting the last
+green one: **143 assertions passed, 0 failed, 0 build-broken**, plus the five
 harnesses `verify.sh` declares investigations and does not count — `breadth`,
-`glob`, `reachable`, `shapes`, `vitestrun`. Before that, 2026-07-31 at 953dd98
-(end of the phase-G run, 27ed75b..953dd98, 184 commits).
+`glob`, `reachable`, `shapes`, `vitestrun`. Re-run at HEAD rather than left at
+the earlier green, because `TerminalSession` changed after it. Before that,
+2026-07-31 at 953dd98 (end of the phase-G run, 27ed75b..953dd98, 184 commits).
 
 This file is the one place that says where every phase stands, with the evidence
 named. When a phase's state changes, this file moves with it — same rule as
