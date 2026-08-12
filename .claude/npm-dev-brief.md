@@ -66,7 +66,12 @@ aside to `/project-2` when the workspace already holds that name. Read
   during a busy sweep looked exactly like a regression, and was bisected across
   five commits before two clean re-runs showed the same binary passing. When a
   gate fails once under load, re-run it before believing it.
-- **Tailwind 4 cannot run here, and the reason is not ours to fix.** Restoring
+- **Tailwind 4 cannot run here; tailwind 3 can, and does.** Version 3 has no
+  native half — scanner and compiler are both JavaScript — and
+  `verify/tailwind` pins it: content scanning, plain utilities, a `hover:`
+  variant, a `md:` breakpoint reaching `@media`, an arbitrary `w-[37px]`, and an
+  unused class correctly absent. A user who wants tailwind on a phone today
+  wants 3. The rest of this entry is about 4, and is not ours to fix. Restoring
   `tailwindcss()` to `local__test-2/vite.config.ts` gets past lightningcss now
   (substituted, gated by `verify/lightningcss`) and then stops at
   `@tailwindcss/oxide`. Its wasi build declares SHARED memory, and JSC answers
