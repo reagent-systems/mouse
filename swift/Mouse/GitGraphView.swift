@@ -85,11 +85,18 @@ enum GitGraph {
         let commits: [CommitNode]
         /// Branch tip labels, keyed by sha.
         let branchTips: [String: String]
+        /// False when the walk stopped at `pageLimit` rather than at the end of the history.
+        let complete: Bool
     }
 
+    /// GitHub's maximum page size, and how many pages a graph will pull. 100 × 40 is deep enough
+    /// for the repositories this app is for, and bounds a first paint on a phone at forty
+    /// requests rather than one per hundred commits forever.
+    private static let pageSize = 100
+    private static let pageLimit = 40
+
     static func fetchHistory(repo: String, token: String) async throws -> History {
-        async let commitsData = get("https://api.github.com/repos/\(repo)/commits?per_page=80", token: token)
-        async let branchesData = get("https://api.github.com/repos/\(repo)/branches?per_page=50", token: token)
+        async let branchesData = get("https://api.github.com/repos/\(repo)/branches?per_page=100", token: token)
 
         struct APICommit: Decodable {
             struct Inner: Decodable {
@@ -109,19 +116,32 @@ enum GitGraph {
         }
 
         let decoder = JSONDecoder()
-        let commits = try decoder.decode([APICommit].self, from: await commitsData).map {
-            CommitNode(
-                sha: $0.sha,
-                message: $0.commit.message.components(separatedBy: "\n")[0],
-                author: $0.commit.author?.name ?? "",
-                parents: $0.parents.map(\.sha)
-            )
+        // One page was 80 commits and there was no second request, so every repository with a
+        // longer history than that showed a graph that simply ended — no marker, no error, the
+        // oldest commit on screen looking like the first commit ever made. Pages until GitHub
+        // returns a short one, which is how its pagination says "that is all".
+        var commits: [CommitNode] = []
+        var complete = false
+        for page in 1...pageLimit {
+            let data = try await get(
+                "https://api.github.com/repos/\(repo)/commits?per_page=\(pageSize)&page=\(page)",
+                token: token)
+            let batch = try decoder.decode([APICommit].self, from: data)
+            commits.append(contentsOf: batch.map {
+                CommitNode(
+                    sha: $0.sha,
+                    message: $0.commit.message.components(separatedBy: "\n")[0],
+                    author: $0.commit.author?.name ?? "",
+                    parents: $0.parents.map(\.sha)
+                )
+            })
+            if batch.count < pageSize { complete = true; break }
         }
         var tips: [String: String] = [:]
         if let branches = try? decoder.decode([APIBranch].self, from: await branchesData) {
             for branch in branches { tips[branch.commit.sha] = branch.name }
         }
-        return History(commits: commits, branchTips: tips)
+        return History(commits: commits, branchTips: tips, complete: complete)
     }
 
     private static func get(_ urlString: String, token: String) async throws -> Data {
@@ -162,6 +182,12 @@ struct GitGraphContainerView: View {
                     Color.clear.frame(height: 8)
                     if let rows = workspace.graphRows, !rows.isEmpty {
                         graph(rows, tips: workspace.graphTips)
+                        if !workspace.graphComplete {
+                            Text("history continues past \(rows.count) commits")
+                                .font(.custom(AppFont.asciiName, size: 10))
+                                .opacity(0.4)
+                                .padding(.top, 4)
+                        }
                     } else if workspace.hasLocalRepo || workspace.isLocal {
                         Text("no commits yet")
                             .font(.custom(AppFont.asciiName, size: 13))
