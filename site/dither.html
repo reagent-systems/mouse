@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>dither boids</title>
+<style>
+  :root { --bg:#07070a; --ink:#f2f0ea; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); overflow:hidden; }
+  canvas#c { display:block; position:fixed; inset:0; }
+  #panel {
+    position:fixed; right:22px; bottom:84px; z-index:5;
+    display:flex; flex-direction:column; align-items:center; gap:14px;
+    padding:14px; border-radius:14px;
+    background:rgba(13,13,17,.92); border:1px solid rgba(242,240,234,.13);
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    opacity:0; transform:translateY(10px) scale(.96); transform-origin:100% 100%;
+    pointer-events:none; transition:opacity .2s ease, transform .2s ease;
+  }
+  #panel.open { opacity:1; transform:none; pointer-events:auto; }
+  #menu { position:fixed; right:22px; bottom:22px; z-index:6; flex-direction:column; gap:4px; }
+  #menu i {
+    display:block; width:16px; height:1.5px; background:var(--ink); opacity:.7;
+    transition:transform .22s ease, opacity .22s ease;
+  }
+  #menu.open i:nth-child(1) { transform:translateY(5.5px) rotate(45deg); }
+  #menu.open i:nth-child(2) { opacity:0; }
+  #menu.open i:nth-child(3) { transform:translateY(-5.5px) rotate(-45deg); }
+  #knobs { display:flex; flex-direction:column; gap:11px; }
+  #slots { display:flex; flex-wrap:wrap; gap:10px; max-width:326px; justify-content:center; }
+  #tools { display:flex; gap:10px; }
+  input[type=range] {
+    -webkit-appearance:none; appearance:none; width:326px; height:14px;
+    background:transparent; cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height:2px; border-radius:2px; background:rgba(242,240,234,.24);
+  }
+  input[type=range]::-moz-range-track {
+    height:2px; border-radius:2px; background:rgba(242,240,234,.24);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance:none; appearance:none; width:11px; height:11px; margin-top:-4.5px;
+    border-radius:50%; background:var(--ink); border:none;
+  }
+  input[type=range]::-moz-range-thumb {
+    width:11px; height:11px; border-radius:50%; background:var(--ink); border:none;
+  }
+  input[type=range]:focus-visible { outline:2px solid var(--ink); outline-offset:4px; }
+  .btn {
+    width:46px; height:46px; padding:0; border-radius:8px; cursor:pointer;
+    background:#0d0d11 center/cover no-repeat;
+    border:1px solid rgba(242,240,234,.22);
+    display:flex; align-items:center; justify-content:center;
+    font:16px ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--ink);
+    transition:border-color .18s ease, transform .18s ease, box-shadow .18s ease, opacity .2s ease;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .btn:hover { border-color:rgba(242,240,234,.5); }
+  .btn:focus-visible { outline:2px solid var(--ink); outline-offset:3px; }
+  .slot.filled { filter:grayscale(1) contrast(1.5) brightness(.85); }
+  .slot.on { border-color:var(--ink); box-shadow:0 0 0 3px rgba(242,240,234,.1); transform:translateY(-2px); }
+  .slot::after {
+    content:""; display:block; width:11px; height:11px;
+    background:
+      linear-gradient(var(--ink),var(--ink)) center/11px 1px no-repeat,
+      linear-gradient(var(--ink),var(--ink)) center/1px 11px no-repeat;
+    opacity:.45;
+  }
+  .slot.filled::after { display:none; }
+  #mode { opacity:.62; }
+  #mode:hover { opacity:1; }
+  #ocr, #orbit, #color { opacity:.62; }
+  #ocr:hover, #orbit:hover, #color:hover { opacity:1; }
+  #color.on { opacity:1; border-color:var(--ink); }
+  #orbit.on { opacity:1; border-color:var(--ink); }
+  #ocr.busy { animation:pulse 1s ease-in-out infinite; }
+  #ocr.on { opacity:1; border-color:var(--ink); }
+  @keyframes pulse { 0%,100% { opacity:.25 } 50% { opacity:1 } }
+  .ghost { position:fixed; left:0; bottom:0; width:2px; height:2px; opacity:.01; pointer-events:none; z-index:-1; }
+  
+  html.embed #panel, html.embed #menu { display:none !important; }
+  html.embed, html.embed body { background:transparent; }
+  @media (prefers-reduced-motion: reduce) { .btn { transition:none; } #ocr.busy { animation:none } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel" class="open">
+  <div id="knobs">
+    <input type="range" id="dens" min="25" max="200" value="100" aria-label="Dither density">
+    <input type="range" id="csize" min="6" max="120" value="36" aria-label="Maximum text size to read">
+    <input type="range" id="black" min="0" max="90" value="0" aria-label="Black point">
+  </div>
+  <div id="slots"></div>
+  <div id="tools">
+    <button class="btn" id="mode" aria-label="Toggle render mode">@</button>
+    <button class="btn" id="ocr" aria-label="Read text in image">Aa</button>
+    <button class="btn on" id="orbit" aria-label="Toggle orbit">◈</button>
+    <button class="btn" id="color" aria-label="Toggle colour">◐</button>
+  </div>
+</div>
+<button class="btn open" id="menu" aria-label="Settings" aria-expanded="true"><i></i><i></i><i></i></button>
+<input type="file" id="fi" accept="image/*" multiple hidden>
+
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const off = document.createElement('canvas');
+  const octx = off.getContext('2d', { willReadFrequently: true });
+  const atlas = document.createElement('canvas');
+  const actx = atlas.getContext('2d');
+  const fi = document.getElementById('fi');
+  const modeBtn = document.getElementById('mode');
+  const ocrBtn = document.getElementById('ocr');
+  const slotsEl = document.getElementById('slots');
+  const blackEl = document.getElementById('black');
+
+  const RAMP = '.:-=+*#%@';
+  // ramp first (indices 0..8 are the tonal glyphs), then every printable char
+  let CHARS = RAMP;
+  for (let c = 33; c <= 126; c++) CHARS += String.fromCharCode(c);
+  const CIDX = {};
+  for (let i = RAMP.length; i < CHARS.length; i++) CIDX[CHARS[i]] = i;
+
+  const COVERAGE = 0.42;
+  const PAD = 0.86;
+  const DENSITY = { dot: 0.0078, ascii: 0.0040, hybrid: 0.0078 };
+  const ASPECT  = { dot: 1.0,    ascii: 1.70,  hybrid: 1.0   };
+  const ORD = 256, BUCKETS = ORD * ORD;
+  let CENTER_X = 0.4;   // optical centre, not geometric
+
+  // 6 levels per channel for particles (216 batched fills), 3 levels for tinted
+  // glyph atlases (27 max, so the cache can never thrash)
+  const PAL = [], TINT = [], TINTPAL = [];
+  for (let r = 0; r < 6; r++) for (let g = 0; g < 6; g++) for (let b = 0; b < 6; b++) {
+    const R = Math.round(r * 51), G = Math.round(g * 51), B = Math.round(b * 51);
+    PAL.push(`rgb(${R},${G},${B})`);
+    const q = v => Math.round(v / 255 * 2);
+    TINT.push(q(R) * 9 + q(G) * 3 + q(B));
+  }
+  for (let r = 0; r < 3; r++) for (let g = 0; g < 3; g++) for (let b = 0; b < 3; b++)
+    TINTPAL.push(`rgb(${r * 127},${g * 127},${b * 127})`);
+  const qc = v => (v * 5 / 255 + 0.5) | 0;
+  let colorOn = false;
+
+  const MODES = ['dot', 'ascii', 'hybrid'];
+  const GLYPH = { dot: '\u00b7', ascii: '@', hybrid: '\u259a' };
+  let mode = 'hybrid';
+  let densityScale = 1, maxCharPx = 36;
+  let W = 0, H = 0, DPR = 1, N = 0, frame = 0;
+
+  let px, py, vx, vy, tx, ty, bx, by, pf, bo, wv, tg, tcol, cOrder, jit, cellOf, items;
+  let seeded = false;
+
+  const slots = [];
+  let active = -1, pending = 0;
+
+  let R = 16, R2 = R * R;
+  const MAXSPD = 9, ARRIVE = 70;
+  const W_SEP = 1.6, W_ALI = 0.9, W_COH = 0.5, FLOCK_FADE = 90;
+  let SEEK = 0.15, WFLOOR = 0;
+  const SWIRL = 1.7, BLOOM = 0.55, SWIRL_DECAY = 0.984;
+  let swirl = 0, spinDir = 1;
+  const MOUSE_R = 145, MOUSE_F = 12;
+  let mx = 0, my = 0, mOn = false, mDown = false;
+
+  /* ---------- scratch ---------- */
+  const S = {
+    L: null, buf: null, tone: null, rx: null, ry: null, rg: null, key: null,
+    ord: null, isT: null, tIdx: null, nIdx: null, pick: null,
+    hist: new Int32Array(256), bucket: new Int32Array(BUCKETS + 1)
+  };
+  function ensure(n) {
+    if (S.L && S.L.length >= n) return;
+    S.L = new Float32Array(n); S.buf = new Float32Array(n); S.tone = new Float32Array(n);
+    S.rx = new Float32Array(n); S.ry = new Float32Array(n); S.rg = new Uint8Array(n);
+    S.rc = new Uint8Array(n);
+    S.key = new Int32Array(n); S.ord = new Int32Array(n); S.isT = new Uint8Array(n);
+    S.tIdx = new Int32Array(n); S.nIdx = new Int32Array(n); S.pick = new Int32Array(n);
+  }
+
+  /* ---------- particle pool ---------- */
+  const targetCount = () => Math.max(600, Math.min(24000, Math.round(W * H * DENSITY[mode] * densityScale)));
+
+  function setCount(n) {
+    const oN = N, oPx = px, oPy = py, oVx = vx, oVy = vy;
+    N = n;
+    px = new Float32Array(n); py = new Float32Array(n);
+    vx = new Float32Array(n); vy = new Float32Array(n);
+    tx = new Float32Array(n); ty = new Float32Array(n);
+    bx = new Float32Array(n); by = new Float32Array(n);
+    pf = new Float32Array(n).fill(1); bo = new Float32Array(n);
+    wv = new Float32Array(n); tg = new Uint8Array(n);
+    tcol = new Uint8Array(n); cOrder = new Int32Array(n);
+    jit = new Float32Array(n); cellOf = new Int32Array(n); items = new Int32Array(n);
+    for (let i = 0; i < n; i++) jit[i] = Math.random();
+    if (oN && seeded) {
+      const keep = Math.min(oN, n);
+      px.set(oPx.subarray(0, keep)); py.set(oPy.subarray(0, keep));
+      vx.set(oVx.subarray(0, keep)); vy.set(oVy.subarray(0, keep));
+      for (let i = keep; i < n; i++) {
+        const r = (Math.random() * keep) | 0;
+        px[i] = oPx[r] + (Math.random() - 0.5) * 24;
+        py[i] = oPy[r] + (Math.random() - 0.5) * 24;
+        vx[i] = oVx[r]; vy[i] = oVy[r];
+      }
+    }
+  }
+
+  function seed() {
+    if (seeded) return;
+    seeded = true;
+    for (let i = 0; i < N; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.max(W, H) * (0.45 + Math.random() * 0.35);
+      px[i] = W * CENTER_X + Math.cos(a) * r; py[i] = H / 2 + Math.sin(a) * r;
+      vx[i] = Math.cos(a + 1.6) * 2; vy[i] = Math.sin(a + 1.6) * 2;
+    }
+  }
+
+  /* ---------- viewport ---------- */
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    if (!N) setCount(targetCount());
+    for (let i = 0; i < slots.length; i++) rebuild(i);
+    if (active >= 0) applyTargets(active);
+  }
+  window.addEventListener('resize', resize);
+
+  /* ---------- geometry ---------- */
+  // coarse pre-pass: what fraction of the frame survives the black point. The
+  // grid is then made finer by that factor so the surviving subject still gets
+  // the full particle budget instead of leaving most of them stacked up.
+  function liveFraction(sl) {
+    if (sl.bp <= 0) return 1;
+    const img = sl.img;
+    const gw = 100, gh = Math.max(8, Math.round(100 * img.naturalHeight / img.naturalWidth));
+    off.width = gw; off.height = gh;
+    octx.clearRect(0, 0, gw, gh);
+    octx.drawImage(img, 0, 0, gw, gh);
+    const d = octx.getImageData(0, 0, gw, gh).data;
+    const n = gw * gh;
+    let live = 0;
+    for (let i = 0; i < n; i++) {
+      const j = i * 4, a = d[j + 3] / 255;
+      if (((0.2126 * d[j] + 0.7152 * d[j + 1] + 0.0722 * d[j + 2]) / 255) * a > sl.bp) live++;
+    }
+    return Math.max(0.04, live / n);
+  }
+
+  function fitBox(img) {
+    // width budget is symmetric about the centre line, so the image can't run off
+    const availW = 2 * Math.min(CENTER_X, 1 - CENTER_X) * W * PAD;
+    const sc = Math.min(availW / img.naturalWidth, H * PAD / img.naturalHeight);
+    return { dw: img.naturalWidth * sc, dh: img.naturalHeight * sc };
+  }
+
+  function geometry(sl) {
+    const ar = ASPECT[mode];
+    const { dw, dh } = fitBox(sl.img);
+    if (sl.forceCw && mode === 'ascii') {
+      sl.cw = sl.forceCw; sl.ch = sl.cw * ar;          // grid locked to the source's character advance
+    } else {
+      const area = dw * dh * COVERAGE * (sl.live || 1) / N;
+      sl.cw = Math.sqrt(area / ar); sl.ch = sl.cw * ar;
+    }
+    sl.gw = Math.max(2, Math.round(dw / sl.cw));
+    sl.gh = Math.max(2, Math.round(dh / sl.ch));
+    sl.ox = W * CENTER_X - dw / 2; sl.oy = (H - dh) / 2;
+    sl.sx = dw / sl.gw; sl.sy = dh / sl.gh;
+  }
+
+  /* ---------- text layer ----------
+     Characters are positioned in display pixels straight from the OCR boxes, so
+     they no longer inherit the tonal grid. A mask punches the words out of the
+     halftone so glyphs sit in clean holes rather than on top of dots. */
+  function buildTextPoints(sl) {
+    sl.textPts = null; sl.mask = null; sl.adv = 0;
+    if (!sl.words || !sl.words.length || mode === 'dot') return;
+    const { dw, dh } = fitBox(sl.img);
+    const ox = sl.ox, oy = sl.oy;
+
+    // anything bigger than the ceiling is left to the halftone - a logo wordmark
+    // reads as shape, small UI type reads as text
+    const keep = [], advs = [];
+    for (const w of sl.words) {
+      const size = Math.max((w.y1 - w.y0) * dh, w.a * dw * 1.7);
+      if (size > maxCharPx) continue;
+      keep.push(w);
+      if (w.t.length >= 3) advs.push(w.a);
+    }
+    if (!keep.length) return;
+    advs.sort((a, b) => a - b);
+    // glyph size follows the words that survived, not the ones that were cut
+    const advN = advs.length ? advs[advs.length >> 1] : sl.advN;
+    const adv = Math.max(3, advN * dw);
+    const pts = [], rects = [];
+    const gw = sl.gw, gh = sl.gh, sx = sl.sx, sy = sl.sy;
+
+    off.width = gw; off.height = gh;
+    octx.clearRect(0, 0, gw, gh);
+    octx.drawImage(sl.img, 0, 0, gw, gh);
+    const d = octx.getImageData(0, 0, gw, gh).data;
+    const cl = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+
+    // A glyph's own cell is mostly background - thin strokes average to near
+    // black. Take the word's ink instead: contrast-weighted mean over its box,
+    // biased to the light side so it stays visible against the canvas.
+    function inkColor(x0, y0, x1, y1) {
+      const c0 = cl(Math.floor((x0 - ox) / sx), 0, gw - 1);
+      const c1 = cl(Math.ceil((x1 - ox) / sx), 0, gw - 1);
+      const r0 = cl(Math.floor((y0 - oy) / sy), 0, gh - 1);
+      const r1 = cl(Math.ceil((y1 - oy) / sy), 0, gh - 1);
+      let base = 0, cells = 0;
+      for (let y = r0; y <= r1; y++) for (let x = c0; x <= c1; x++) {
+        const j = (y * gw + x) * 4;
+        base += 0.2126 * d[j] + 0.7152 * d[j + 1] + 0.0722 * d[j + 2];
+        cells++;
+      }
+      base /= Math.max(1, cells);
+      let R = 0, G = 0, B = 0, tw = 0, best = -1, bj = 0;
+      for (let y = r0; y <= r1; y++) for (let x = c0; x <= c1; x++) {
+        const j = (y * gw + x) * 4;
+        const l = 0.2126 * d[j] + 0.7152 * d[j + 1] + 0.0722 * d[j + 2];
+        if (l > best) { best = l; bj = j; }
+        const wgt = l - base;
+        if (wgt > 0) { R += d[j] * wgt; G += d[j + 1] * wgt; B += d[j + 2] * wgt; tw += wgt; }
+      }
+      const rr = tw > 0 ? R / tw : d[bj];      // flat box: fall back to brightest cell
+      const gg = tw > 0 ? G / tw : d[bj + 1];
+      const bb = tw > 0 ? B / tw : d[bj + 2];
+      return qc(rr) * 36 + qc(gg) * 6 + qc(bb);
+    }
+
+    for (const w of keep) {
+      const x0 = ox + w.x0 * dw, x1 = ox + w.x1 * dw;
+      const y0 = oy + w.y0 * dh, y1 = oy + w.y1 * dh;
+      const cy = (y0 + y1) / 2, L = w.t.length;
+      const step = Math.max(x1 - x0, adv * L) / L;
+      const col = inkColor(x0, y0, x1, y1);
+      for (let k = 0; k < L; k++) {
+        const ci = CIDX[w.t[k]];
+        if (ci === undefined) continue;
+        pts.push(x0 + step * (k + 0.5), cy, ci, col);
+      }
+      rects.push(x0 - adv * 0.45, y0 - adv * 0.4, x0 + step * L + adv * 0.45, y1 + adv * 0.4);
+    }
+    if (!pts.length) return;
+
+    const mask = new Uint8Array(gw * gh);
+    for (let r = 0; r < rects.length; r += 4) {
+      const c0 = Math.max(0, Math.floor((rects[r] - ox) / sx));
+      const c1 = Math.min(gw - 1, Math.ceil((rects[r + 2] - ox) / sx));
+      const r0 = Math.max(0, Math.floor((rects[r + 1] - oy) / sy));
+      const r1 = Math.min(gh - 1, Math.ceil((rects[r + 3] - oy) / sy));
+      for (let y = r0; y <= r1; y++) for (let x = c0; x <= c1; x++) mask[y * gw + x] = 1;
+    }
+    sl.textPts = pts; sl.mask = mask; sl.adv = adv;
+  }
+
+  /* ---------- sample -> dither -> ordered targets ---------- */
+  function extract(sl, out) {
+    const gw = sl.gw, gh = sl.gh, n = gw * gh;
+    const tp = sl.textPts, tpN = tp ? tp.length / 4 : 0;
+    ensure(n + tpN);
+    off.width = gw; off.height = gh;
+    octx.clearRect(0, 0, gw, gh);
+    octx.drawImage(sl.img, 0, 0, gw, gh);
+    const data = octx.getImageData(0, 0, gw, gh).data;
+
+    const L = S.L, hist = S.hist;
+    hist.fill(0);
+    const bp = sl.bp || 0, inv = bp < 1 ? 1 / (1 - bp) : 1;
+    let live = 0;
+    for (let i = 0; i < n; i++) {
+      const j = i * 4, a = data[j + 3] / 255;
+      let l = ((0.2126 * data[j] + 0.7152 * data[j + 1] + 0.0722 * data[j + 2]) / 255) * a;
+      l = l <= bp ? 0 : (l - bp) * inv;      // black point: anything under the floor is gone
+      if (l > 0) live++;
+      L[i] = l;
+      const b = (l * 255) | 0; hist[b > 255 ? 255 : b]++;
+    }
+
+    // with a floor set, aim coverage at the surviving area only, so clipping the
+    // background doesn't make the gamma solve brighten everything to compensate
+    const target = bp > 0 ? COVERAGE * (live / n) : COVERAGE;
+    let lo = 0.06, hi = 9, g = 1;
+    for (let it = 0; it < 20; it++) {
+      g = (lo + hi) / 2;
+      let m = 0;
+      for (let b = 0; b < 256; b++) if (hist[b]) m += hist[b] * Math.pow(b / 255, g);
+      m /= n;
+      if (m > target) lo = g; else hi = g;
+    }
+
+    const tone = S.tone, buf = S.buf;
+    for (let i = 0; i < n; i++) { tone[i] = Math.pow(L[i], g); buf[i] = tone[i]; }
+
+    const rx = S.rx, ry = S.ry, rg = S.rg, rc = S.rc, key = S.key, isT = S.isT;
+    const mask = sl.mask;
+    const ox = sl.ox, oy = sl.oy, sx = sl.sx, sy = sl.sy;
+    const dwid = gw * sx, dhei = gh * sy, nR = RAMP.length;
+    const hkey = (X, Y) => {
+      let hx = ((X - ox) / dwid * ORD) | 0, hy = ((Y - oy) / dhei * ORD) | 0;
+      hx = hx < 0 ? 0 : hx > ORD - 1 ? ORD - 1 : hx;
+      hy = hy < 0 ? 0 : hy > ORD - 1 ? ORD - 1 : hy;
+      return hilbertD(ORD, hx, hy);
+    };
+    let cnt = 0;
+
+    for (let y = 0; y < gh; y++) {
+      const rev = (y & 1) === 1;
+      for (let k = 0; k < gw; k++) {
+        const x = rev ? gw - 1 - k : k;
+        const i = y * gw + x;
+        const old = buf[i];
+        const nv = old < 0.5 ? 0 : 1;
+        const err = old - nv;
+        if (nv === 1 && !(mask && mask[i])) {
+          let gi = (tone[i] * nR) | 0; if (gi >= nR) gi = nR - 1;
+          const X = ox + (x + 0.5) * sx, Y = oy + (y + 0.5) * sy;
+          rx[cnt] = X; ry[cnt] = Y; rg[cnt] = gi; isT[cnt] = 0;
+          const j = i * 4;
+          rc[cnt] = qc(data[j]) * 36 + qc(data[j + 1]) * 6 + qc(data[j + 2]);
+          key[cnt] = hkey(X, Y);
+          cnt++;
+        }
+        // error still diffuses on tone alone, so forced cells don't bias the halftone
+        const d = rev ? -1 : 1;
+        const xa = x + d, xb = x - d;
+        if (xa >= 0 && xa < gw) buf[i + d] += err * 0.4375;
+        if (y + 1 < gh) {
+          const b = i + gw;
+          if (xb >= 0 && xb < gw) buf[b - d] += err * 0.1875;
+          buf[b] += err * 0.3125;
+          if (xa >= 0 && xa < gw) buf[b + d] += err * 0.0625;
+        }
+      }
+    }
+
+    for (let k = 0; k < tpN; k++) {
+      const X = tp[k * 4], Y = tp[k * 4 + 1];
+      rx[cnt] = X; ry[cnt] = Y; rg[cnt] = tp[k * 4 + 2]; isT[cnt] = 1;
+      rc[cnt] = tp[k * 4 + 3];
+      key[cnt] = hkey(X, Y);
+      cnt++;
+    }
+
+    const write = (i, s) => {
+      if (out) { out[i * 4] = rx[s]; out[i * 4 + 1] = ry[s]; out[i * 4 + 2] = rg[s]; out[i * 4 + 3] = rc[s]; }
+      else { bx[i] = rx[s]; by[i] = ry[s]; tg[i] = rg[s]; tcol[i] = rc[s]; }
+    };
+
+    if (cnt === 0) {
+      for (let i = 0; i < N; i++) {
+        if (out) { out[i * 4] = W * CENTER_X; out[i * 4 + 1] = H / 2; out[i * 4 + 2] = 0; out[i * 4 + 3] = 215; }
+        else { bx[i] = W * CENTER_X; by[i] = H / 2; tg[i] = 0; tcol[i] = 215; }
+      }
+      return;
+    }
+
+    // counting sort on the hilbert key - O(n), stable frame to frame
+    const bucket = S.bucket, ord = S.ord;
+    bucket.fill(0, 0, BUCKETS + 1);
+    for (let i = 0; i < cnt; i++) bucket[key[i]]++;
+    let acc = 0;
+    for (let b = 0; b < BUCKETS; b++) { const c = bucket[b]; bucket[b] = acc; acc += c; }
+    for (let i = 0; i < cnt; i++) ord[bucket[key[i]]++] = i;
+
+    // split the curve into text points and tonal points, both still ordered
+    const tIdx = S.tIdx, nIdx = S.nIdx, pick = S.pick;
+    let nt = 0, nn = 0;
+    for (let k = 0; k < cnt; k++) {
+      const idx = ord[k];
+      if (isT[idx]) tIdx[nt++] = idx; else nIdx[nn++] = idx;
+    }
+
+    // every letter gets a particle; tone fills whatever budget is left
+    const useT = Math.min(nt, N);
+    let useN = N - useT;
+    if (useN > 0 && nn === 0) {
+      for (let i = 0; i < N; i++) write(i, tIdx[i % Math.max(1, useT)]);
+      return;
+    }
+    let a = 0, b = 0, w = 0;
+    const strideN = useN > 0 ? nn / useN : 0;
+    while (w < N) {
+      const ta = a < useT ? tIdx[a] : -1;
+      let sb = -1;
+      if (b < useN) { let s = (b * strideN) | 0; if (s >= nn) s = nn - 1; sb = nIdx[s]; }
+      if (ta >= 0 && (sb < 0 || key[ta] <= key[sb])) { write(w++, ta); a++; }
+      else if (sb >= 0) { write(w++, sb); b++; }
+      else break;
+    }
+    while (w < N) { let s = (w * cnt / N) | 0; if (s >= cnt) s = cnt - 1; write(w, ord[s]); w++; }
+  }
+
+  function hilbertD(order, x, y) {
+    let d = 0;
+    for (let s = order >> 1; s > 0; s >>= 1) {
+      const rx = (x & s) > 0 ? 1 : 0;
+      const ry = (y & s) > 0 ? 1 : 0;
+      d += s * s * ((3 * rx) ^ ry);
+      if (ry === 0) {
+        if (rx === 1) { x = s - 1 - x; y = s - 1 - y; }
+        const t = x; x = y; y = t;
+      }
+    }
+    return d;
+  }
+
+  /* ---------- glyph atlas ---------- */
+  let ATW = 0, ATH = 0;
+  function buildAtlas(cw, ch) {
+    ATW = Math.max(4, Math.ceil(cw * 1.6 * DPR));
+    ATH = Math.max(4, Math.ceil(ch * 1.3 * DPR));
+    atlas.width = ATW * CHARS.length; atlas.height = ATH;
+    tintCache.clear();
+    actx.clearRect(0, 0, atlas.width, atlas.height);
+    actx.font = `${Math.max(5, ch * DPR)}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+    actx.textAlign = 'center'; actx.textBaseline = 'middle';
+    actx.fillStyle = '#f2f0ea';
+    for (let i = 0; i < CHARS.length; i++) actx.fillText(CHARS[i], i * ATW + ATW / 2, ATH / 2);
+  }
+
+  /* ---------- slots ---------- */
+  function rebuild(i) {
+    const sl = slots[i];
+    sl.live = liveFraction(sl);
+    geometry(sl);
+    buildTextPoints(sl);
+    if (sl.animated) sl.pts = null;
+    else { sl.pts = new Float32Array(N * 4); extract(sl, sl.pts); }
+  }
+
+  function applyTargets(i, burst = true) {
+    const sl = slots[i];
+    if (burst) { swirl = 1; spinDir = -spinDir; }   // alternate the rotation each time
+    active = i;
+    if (sl.animated) { extract(sl, null); SEEK = 0.24; WFLOOR = 0.08; }
+    else {
+      const p = sl.pts;
+      for (let k = 0; k < N; k++) {
+        bx[k] = p[k * 4]; by[k] = p[k * 4 + 1]; tg[k] = p[k * 4 + 2]; tcol[k] = p[k * 4 + 3];
+      }
+      SEEK = 0.15; WFLOOR = 0;
+    }
+    groupColors();
+    R = Math.max(8, Math.min(22, sl.cw * 2.4)); R2 = R * R;
+    const gwid = sl.adv || sl.cw;
+    buildAtlas(gwid, sl.adv ? gwid * 1.70 : sl.ch);
+    syncSlotUI();
+    const bpv = String(Math.round((sl.bp || 0) * 100));
+    if (blackEl.value !== bpv) blackEl.value = bpv;   // don't fight an in-progress drag
+    ocrBtn.classList.toggle('on', !!sl.words);
+  }
+
+  function syncSlotUI() {
+    for (let j = 0; j < slots.length; j++) slotsEl.children[j].classList.toggle('on', j === active);
+  }
+
+  function renderSlots() {
+    slotsEl.innerHTML = '';
+    slots.forEach((sl, i) => {
+      const b = document.createElement('button');
+      b.className = 'btn slot filled' + (i === active ? ' on' : '');
+      b.style.backgroundImage = `url(${sl.url})`;
+      b.setAttribute('aria-label', `Image ${i + 1}`);
+      b.addEventListener('click', () => {
+        if (active === i) { pending = i; fi.value = ''; fi.click(); }   // re-tap to replace
+        else applyTargets(i);
+      });
+      b.addEventListener('contextmenu', e => { e.preventDefault(); removeSlot(i); });
+      let hold = null;
+      b.addEventListener('pointerdown', () => { hold = setTimeout(() => removeSlot(i), 550); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+        b.addEventListener(ev, () => clearTimeout(hold)));
+      slotsEl.appendChild(b);
+    });
+    const add = document.createElement('button');
+    add.className = 'btn slot';
+    add.setAttribute('aria-label', 'Add image');
+    add.addEventListener('click', () => { pending = -1; fi.value = ''; fi.click(); });
+    slotsEl.appendChild(add);
+  }
+
+  function removeSlot(i) {
+    const sl = slots[i];
+    if (!sl) return;
+    if (sl.node) sl.node.remove();
+    if (sl.url) URL.revokeObjectURL(sl.url);
+    slots.splice(i, 1);
+    if (!slots.length) { active = -1; renderSlots(); return; }
+    if (active === i) active = Math.min(i, slots.length - 1);
+    else if (active > i) active--;
+    renderSlots();
+    applyTargets(active);
+  }
+
+  // serialised so two images dropped at once can't race for the same index
+  let loadQueue = Promise.resolve();
+  function loadFile(file, i) {
+    if (!file || !file.type.startsWith('image/')) return;
+    loadQueue = loadQueue.then(() => new Promise(done => {
+      const animated = /gif|webp|apng/.test(file.type);
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onerror = () => { URL.revokeObjectURL(url); done(); };
+      img.onload = () => {
+        const idx = (i == null || i < 0 || i > slots.length) ? slots.length : i;
+        const old = slots[idx];
+        if (old) { if (old.node) old.node.remove(); if (old.url) URL.revokeObjectURL(old.url); }
+        slots[idx] = { img, animated, url, node: null, pts: null, words: null, textPts: null,
+                       mask: null, advN: 0, adv: 0, forceCw: 0, live: 1, bp: 0, cw: 6, ch: 6 };
+        if (animated) { img.className = 'ghost'; document.body.appendChild(img); slots[idx].node = img; }
+        rebuild(idx);
+        active = idx;
+        renderSlots();
+        seed();
+        applyTargets(idx);
+        if (!animated) runOCR();
+        done();
+      };
+      img.src = url;
+    }));
+  }
+
+  /* ---------- in-browser OCR ---------- */
+  const TESS = [
+    { js: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+      worker: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+      core: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1' },
+    { js: 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js',
+      worker: 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js',
+      core: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1' },
+    { js: 'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js',
+      worker: 'https://unpkg.com/tesseract.js@5.1.1/dist/worker.min.js',
+      core: 'https://unpkg.com/tesseract.js-core@5.1.1' }
+  ];
+  const LANGPATH = 'https://tessdata.projectnaptha.com/4.0.0';
+  let tessCfg = null;
+
+  function loadScript(src) {
+    return new Promise((ok, no) => {
+      const el = document.createElement('script');
+      el.src = src; el.onload = ok; el.onerror = () => no(new Error(src));
+      document.head.appendChild(el);
+    });
+  }
+
+  async function loadTesseract() {
+    if (window.Tesseract && tessCfg) return tessCfg;
+    for (const cfg of TESS) {
+      try { await loadScript(cfg.js); if (window.Tesseract) { tessCfg = cfg; return cfg; } }
+      catch (e) { /* try the next mirror */ }
+    }
+    throw new Error('tesseract unavailable');
+  }
+
+  // upscale, flatten to grey, invert if the source is light-on-dark
+  function prep(img) {
+    let sc = Math.max(1, Math.min(3, 1700 / img.naturalWidth));
+    const big = Math.max(img.naturalWidth, img.naturalHeight) * sc;
+    if (big > 2800) sc *= 2800 / big;
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * sc); c.height = Math.round(img.naturalHeight * sc);
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(img, 0, 0, c.width, c.height);
+    const im = g.getImageData(0, 0, c.width, c.height), a = im.data;
+    let mean = 0;
+    for (let i = 0; i < a.length; i += 4) mean += a[i] * 0.2126 + a[i + 1] * 0.7152 + a[i + 2] * 0.0722;
+    mean /= a.length / 4;
+    const inv = mean < 128;
+    for (let i = 0; i < a.length; i += 4) {
+      let v = a[i] * 0.2126 + a[i + 1] * 0.7152 + a[i + 2] * 0.0722;
+      if (inv) v = 255 - v;
+      v = (v - 128) * 1.3 + 128;
+      a[i] = a[i + 1] = a[i + 2] = v < 0 ? 0 : v > 255 ? 255 : v;
+      a[i + 3] = 255;
+    }
+    g.putImageData(im, 0, 0);
+    return c;
+  }
+
+  function flattenWords(d) {
+    if (d.words && d.words.length) return d.words;
+    const out = [];
+    for (const b of d.blocks || [])
+      for (const p of b.paragraphs || [])
+        for (const l of p.lines || [])
+          for (const w of l.words || []) out.push(w);
+    return out;
+  }
+
+  async function runOCR() {
+    if (active < 0 || ocrBtn.classList.contains('busy')) return;
+    const sl = slots[active];
+    if (sl.words) {                                   // second press clears it
+      sl.forceCw = 0; sl.words = null; sl.advN = 0;
+      rebuild(active); applyTargets(active);
+      return;
+    }
+    ocrBtn.classList.add('busy');
+    try {
+      const cfg = await loadTesseract();
+      const canvas = prep(sl.img);
+      const { data } = await window.Tesseract.recognize(canvas, 'eng', {
+        workerPath: cfg.worker, corePath: cfg.core, langPath: LANGPATH
+      }, { blocks: true });
+
+      const cw0 = canvas.width, ch0 = canvas.height;
+      const words = [];
+      const advs = [];
+      for (const w of flattenWords(data)) {
+        const t = (w.text || '').trim();
+        const bb = w.bbox;
+        const conf = w.confidence == null ? 100 : w.confidence;
+        if (!t || !bb || conf < 55 || (t.length === 1 && conf < 70)) continue;
+        const bw = bb.x1 - bb.x0;
+        if (bw <= 0 || bb.y1 <= bb.y0) continue;
+        words.push({ t, x0: bb.x0 / cw0, x1: bb.x1 / cw0, y0: bb.y0 / ch0, y1: bb.y1 / ch0,
+                     a: bw / t.length / cw0 });
+        if (t.length >= 3) advs.push(bw / t.length / cw0);   // per-character advance
+      }
+      if (!words.length || !advs.length) throw new Error('no text');
+
+      advs.sort((a, b) => a - b);
+      const adv = advs[advs.length >> 1];
+      const { dw, dh } = fitBox(sl.img);
+      const cwPx = Math.max(3, Math.min(30, adv * dw));      // one cell per source character
+
+      sl.words = words;
+      sl.advN = adv;
+      sl.forceCw = cwPx;
+      if (mode === 'dot') { mode = 'hybrid'; modeBtn.textContent = GLYPH.hybrid; }
+      let n = targetCount();
+      if (mode === 'ascii') {                       // only ascii rides the character grid
+        const gw = Math.max(2, Math.round(dw / cwPx));
+        const gh = Math.max(2, Math.round(dh / (cwPx * ASPECT.ascii)));
+        n = Math.max(600, Math.min(24000, Math.round(gw * gh * COVERAGE)));
+      }
+      setCount(n);
+      for (let i = 0; i < slots.length; i++) rebuild(i);
+      applyTargets(active);
+    } catch (e) {
+      ocrBtn.animate([{ opacity: 1 }, { opacity: .12 }, { opacity: 1 }, { opacity: .12 }, { opacity: .62 }],
+                     { duration: 900 });
+    } finally {
+      ocrBtn.classList.remove('busy');
+    }
+  }
+
+  /* ---------- knobs ---------- */
+  let queued = false;
+  function refresh(recount) {
+    if (recount) setCount(targetCount());
+    for (let i = 0; i < slots.length; i++) rebuild(i);
+    if (active >= 0) applyTargets(active, false);
+  }
+  function schedule(recount) {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; refresh(recount); });
+  }
+
+  document.getElementById('dens').addEventListener('input', e => {
+    densityScale = +e.target.value / 100;
+    schedule(true);
+  });
+  blackEl.addEventListener('input', e => {
+    if (active < 0) return;
+    slots[active].bp = +e.target.value / 100;
+    schedule(false);
+  });
+  document.getElementById('csize').addEventListener('input', e => {
+    maxCharPx = +e.target.value;
+    schedule(false);
+  });
+
+  /* ---------- events ---------- */
+  fi.addEventListener('change', () => {
+    [...fi.files].forEach((f, k) => loadFile(f, k === 0 ? pending : -1));
+  });
+  ocrBtn.addEventListener('click', runOCR);
+  const orbitBtn = document.getElementById('orbit');
+  orbitBtn.addEventListener('click', () => {
+    orbiting = !orbiting;
+    orbitBtn.classList.toggle('on', orbiting);
+  });
+  const colorBtn = document.getElementById('color');
+  colorBtn.addEventListener('click', () => {
+    colorOn = !colorOn;
+    colorBtn.classList.toggle('on', colorOn);
+  });
+
+  modeBtn.addEventListener('click', () => {
+    mode = MODES[(MODES.indexOf(mode) + 1) % MODES.length];
+    modeBtn.textContent = GLYPH[mode];
+    let n = targetCount();
+    const sl = active >= 0 ? slots[active] : null;
+    if (sl && sl.forceCw && mode === 'ascii') {
+      const { dw, dh } = fitBox(sl.img);
+      const gw = Math.round(dw / sl.forceCw), gh = Math.round(dh / (sl.forceCw * ASPECT.ascii));
+      n = Math.max(600, Math.min(24000, Math.round(gw * gh * COVERAGE)));
+    }
+    setCount(n);
+    for (let i = 0; i < slots.length; i++) rebuild(i);
+    if (active >= 0) applyTargets(active);
+  });
+
+  const menuBtn = document.getElementById('menu');
+  const panel = document.getElementById('panel');
+  function setMenu(open) {
+    panel.classList.toggle('open', open);
+    menuBtn.classList.toggle('open', open);
+    menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  menuBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    setMenu(!panel.classList.contains('open'));
+  });
+  panel.addEventListener('click', e => e.stopPropagation());
+  window.addEventListener('click', () => { if (panel.classList.contains('open')) setMenu(false); });
+
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { setMenu(false); return; }
+    if (e.target && e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space' && slots.length > 1) { e.preventDefault(); applyTargets((active + 1) % slots.length); }
+  });
+  const onUI = e => e.target && e.target.closest && e.target.closest('#panel,#menu');
+  window.addEventListener('pointermove', e => {
+    if (onUI(e)) { mOn = false; return; }
+    mx = e.clientX; my = e.clientY; mOn = true;
+  });
+  window.addEventListener('pointerdown', e => {
+    if (onUI(e)) { mOn = false; return; }
+    mx = e.clientX; my = e.clientY; mOn = true; mDown = true;
+  });
+  window.addEventListener('pointerup', () => { mDown = false; });
+  window.addEventListener('pointerleave', () => { mOn = false; mDown = false; });
+  window.addEventListener('pointercancel', () => { mOn = false; mDown = false; });
+
+  window.addEventListener('dragover', e => e.preventDefault());
+  window.addEventListener('drop', e => {
+    e.preventDefault();
+    [...e.dataTransfer.files].forEach(f => loadFile(f, -1));
+  });
+
+  /* ---------- spatial hash ---------- */
+  let cols = 0, rows = 0;
+  let counts = new Int32Array(1), starts = new Int32Array(1), fillv = new Int32Array(1);
+  function hash() {
+    cols = Math.max(1, Math.ceil(W / R));
+    rows = Math.max(1, Math.ceil(H / R));
+    const nc = cols * rows;
+    if (counts.length < nc + 1) {
+      counts = new Int32Array(nc + 1); starts = new Int32Array(nc + 1); fillv = new Int32Array(nc + 1);
+    }
+    counts.fill(0, 0, nc + 1); fillv.fill(0, 0, nc + 1);
+    for (let i = 0; i < N; i++) {
+      let cx = (px[i] / R) | 0, cy = (py[i] / R) | 0;
+      if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+      const c = cy * cols + cx; cellOf[i] = c; counts[c]++;
+    }
+    let acc = 0;
+    for (let c = 0; c < nc; c++) { starts[c] = acc; acc += counts[c]; }
+    starts[nc] = acc;
+    for (let i = 0; i < N; i++) { const c = cellOf[i]; items[starts[c] + fillv[c]++] = i; }
+  }
+
+  const cStart = new Int32Array(217), cCount = new Int32Array(217), cFill = new Int32Array(217);
+  function groupColors() {
+    cCount.fill(0); cFill.fill(0);
+    for (let i = 0; i < N; i++) cCount[tcol[i]]++;
+    let acc = 0;
+    for (let b = 0; b < 216; b++) { cStart[b] = acc; acc += cCount[b]; }
+    cStart[216] = acc;
+    for (let i = 0; i < N; i++) { const b = tcol[i]; cOrder[cStart[b] + cFill[b]++] = i; }
+  }
+
+  const tintCache = new Map();
+  function tintedAtlas(t) {
+    let c = tintCache.get(t);
+    if (c) return c;
+    c = document.createElement('canvas');
+    c.width = atlas.width; c.height = atlas.height;
+    const g = c.getContext('2d');
+    g.drawImage(atlas, 0, 0);
+    g.globalCompositeOperation = 'source-in';   // atlas becomes an alpha mask
+    g.fillStyle = TINTPAL[t];
+    g.fillRect(0, 0, c.width, c.height);
+    tintCache.set(t, c);
+    return c;
+  }
+
+  /* ---------- orbit ----------
+     The dithered image is treated as a flat plane in 3D. Roll spins it in its
+     own plane, yaw and pitch tilt it away from the viewer, then a perspective
+     divide projects it back to the canvas. Three periods that don't divide
+     evenly, so the motion never visibly repeats. */
+  let orbiting = true;
+  const FOV = 950;
+  // screen-space basis of the rotated plane, so glyphs can be laid into it
+  let jA = 1, jB = 0, jC = 0, jD = 1;
+  function project() {
+    if (active < 0) return;
+    const CX = W * CENTER_X, CY = H / 2;
+    if (!orbiting) {
+      jA = 1; jB = 0; jC = 0; jD = 1;
+      for (let i = 0; i < N; i++) { tx[i] = bx[i]; ty[i] = by[i]; pf[i] = 1; }
+      return;
+    }
+    const roll = 0.10 * Math.sin(frame * 0.0027);
+    const yaw = 0.50 * Math.sin(frame * 0.0060);
+    const pit = 0.26 * Math.sin(frame * 0.0041 + 1.1);
+    const cr = Math.cos(roll), sr = Math.sin(roll);
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const cp = Math.cos(pit), sp = Math.sin(pit);
+    jA = cr * cy;                    // d(screen x)/d(plane x)
+    jC = -sr * cy;                   // d(screen x)/d(plane y)
+    jB = sr * cp + cr * sy * sp;     // d(screen y)/d(plane x)
+    jD = cr * cp - sr * sy * sp;     // d(screen y)/d(plane y)
+    for (let i = 0; i < N; i++) {
+      const X = bx[i] - CX, Y = by[i] - CY;
+      const x0 = X * cr - Y * sr, y0 = X * sr + Y * cr;
+      const x1 = x0 * cy, z1 = -x0 * sy;          // plane sits at z = 0
+      const y2 = y0 * cp - z1 * sp;
+      const z2 = y0 * sp + z1 * cp;
+      const f = FOV / (FOV + z2);
+      tx[i] = CX + x1 * f; ty[i] = CY + y2 * f; pf[i] = f;
+    }
+  }
+
+  /* ---------- simulation ---------- */
+  function step() {
+    if (active < 0) return;
+    hash();
+    const mrad = MOUSE_R * (mDown ? 1.6 : 1), mr2 = mrad * mrad;
+    const mforce = MOUSE_F * (mDown ? 1.8 : 1);
+    for (let i = 0; i < N; i++) {
+      const x = px[i], y = py[i];
+      const dx = tx[i] - x, dy = ty[i] - y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+      let w = d < FLOCK_FADE ? d / FLOCK_FADE : 1;
+      if (w < WFLOOR) w = WFLOOR;
+      wv[i] = w;
+
+      let mt = 0, mux = 0, muy = 0;
+      if (mOn) {
+        const mdx = x - mx, mdy = y - my;
+        const md2 = mdx * mdx + mdy * mdy;
+        if (md2 < mr2) {
+          const md = Math.sqrt(md2) || 1e-6;
+          mt = 1 - md / mrad;
+          mux = mdx / md; muy = mdy / md;
+        }
+      }
+      const b = bo[i] = Math.max(bo[i] * 0.955, mt);
+
+      const want = MAXSPD * (d < ARRIVE ? d / ARRIVE : 1);
+      const sg = SEEK * (1 - 0.88 * mt);        // stop reeling them back in mid-blast
+      let ax = ((dx / d) * want - vx[i]) * sg;
+      let ay = ((dy / d) * want - vy[i]) * sg;
+
+      if (w > 0.01) {
+        let sx = 0, sy = 0, alx = 0, aly = 0, ccx = 0, ccy = 0, n = 0;
+        const c = cellOf[i], gx = c % cols, gy = (c / cols) | 0;
+        for (let oy = -1; oy <= 1; oy++) {
+          const ny = gy + oy; if (ny < 0 || ny >= rows) continue;
+          for (let ox = -1; ox <= 1; ox++) {
+            const nx = gx + ox; if (nx < 0 || nx >= cols) continue;
+            const cc = ny * cols + nx;
+            for (let k = starts[cc], e = starts[cc + 1]; k < e; k++) {
+              const j = items[k]; if (j === i) continue;
+              const ddx = x - px[j], ddy = y - py[j];
+              const d2 = ddx * ddx + ddy * ddy;
+              if (d2 > R2 || d2 === 0) continue;
+              sx += ddx / d2; sy += ddy / d2;
+              alx += vx[j]; aly += vy[j];
+              ccx += px[j]; ccy += py[j];
+              n++;
+            }
+          }
+        }
+        if (n) {
+          const sm = Math.sqrt(sx * sx + sy * sy);
+          if (sm > 0) { ax += (sx / sm * MAXSPD - vx[i]) * 0.06 * W_SEP * w; ay += (sy / sm * MAXSPD - vy[i]) * 0.06 * W_SEP * w; }
+          alx /= n; aly /= n;
+          const am = Math.sqrt(alx * alx + aly * aly);
+          if (am > 0) { ax += (alx / am * MAXSPD - vx[i]) * 0.05 * W_ALI * w; ay += (aly / am * MAXSPD - vy[i]) * 0.05 * W_ALI * w; }
+          ccx = ccx / n - x; ccy = ccy / n - y;
+          const cm = Math.sqrt(ccx * ccx + ccy * ccy);
+          if (cm > 0) { ax += (ccx / cm * MAXSPD - vx[i]) * 0.04 * W_COH * w; ay += (ccy / cm * MAXSPD - vy[i]) * 0.04 * W_COH * w; }
+        }
+        // vortex about the canvas centre, plus a brief outward bloom so the
+        // cloud opens up before it re-forms instead of sliding across flat
+        const rx0 = x - W * CENTER_X, ry0 = y - H / 2;
+        const rr = Math.sqrt(rx0 * rx0 + ry0 * ry0) || 1e-6;
+        const spin = SWIRL * swirl * w * spinDir;
+        ax += (-ry0 / rr) * spin;
+        ay += (rx0 / rr) * spin;
+        const bloom = BLOOM * swirl * w * (1 - Math.min(1, rr / (Math.max(W, H) * 0.45)));
+        ax += (rx0 / rr) * bloom;
+        ay += (ry0 / rr) * bloom;
+
+        ax += (-dy / d) * 0.22 * w;
+        ay += (dx / d) * 0.22 * w;
+      }
+
+      if (mt > 0) {
+        const push = mforce * mt * mt;        // squared falloff: firm core, soft edge
+        ax += (mux - muy * 0.45) * push;      // radial blast plus a tangential curl
+        ay += (muy + mux * 0.45) * push;
+      }
+
+      let nvx = vx[i] + ax, nvy = vy[i] + ay;
+      const sp = Math.sqrt(nvx * nvx + nvy * nvy), lim = MAXSPD * (1.35 + 3.4 * b);
+      if (sp > lim) { nvx = nvx / sp * lim; nvy = nvy / sp * lim; }
+      vx[i] = nvx; vy[i] = nvy;
+      px[i] = x + nvx; py[i] = y + nvy;
+    }
+  }
+
+  /* ---------- render ---------- */
+  const flying = i => wv[i] > 0.22 + jit[i] * 0.5;
+  const scramble = i => (i * 7 + (frame >> 2) + ((jit[i] * 97) | 0)) % RAMP.length;
+
+  function blockPass(size, skipSettledText) {
+    const nR = RAMP.length;
+    const emit = i => {
+      if (skipSettledText && tg[i] >= nR && !flying(i)) return;
+      const z = size * pf[i];
+      ctx.rect(px[i] - z / 2, py[i] - z / 2, z, z);
+    };
+    if (!colorOn) {
+      ctx.fillStyle = '#f2f0ea';
+      ctx.beginPath();
+      for (let i = 0; i < N; i++) emit(i);
+      ctx.fill();
+      return;
+    }
+    // one path and one fill per occupied colour bucket, not per particle
+    for (let b = 0; b < 216; b++) {
+      const s0 = cStart[b], s1 = cStart[b + 1];
+      if (s1 <= s0) continue;
+      ctx.fillStyle = PAL[b];
+      ctx.beginPath();
+      for (let k = s0; k < s1; k++) emit(cOrder[k]);
+      ctx.fill();
+    }
+  }
+
+  function glyphPass(textOnly) {
+    const nR = RAMP.length, aw = ATW / DPR, ah = ATH / DPR;
+    // lay each glyph into the plane's basis rather than blitting it axis-aligned,
+    // so characters tilt and foreshorten with everything else
+    const emit = (i, sheet) => {
+      const g = tg[i], fly = flying(i);
+      if (textOnly && (g < nR || fly)) return;
+      const gi = fly ? scramble(i) : g;
+      const f = pf[i] * DPR;
+      ctx.setTransform(jA * f, jB * f, jC * f, jD * f, px[i] * DPR, py[i] * DPR);
+      ctx.drawImage(sheet, gi * ATW, 0, ATW, ATH, -aw / 2, -ah / 2, aw, ah);
+    };
+    if (!colorOn) {
+      for (let i = 0; i < N; i++) emit(i, atlas);
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      return;
+    }
+    for (let b = 0; b < 216; b++) {
+      const s0 = cStart[b], s1 = cStart[b + 1];
+      if (s1 <= s0) continue;
+      const sheet = tintedAtlas(TINT[b]);
+      for (let k = s0; k < s1; k++) emit(cOrder[k], sheet);
+    }
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  function draw() {
+    // Blending toward an opaque background never fully converges in 8-bit, so a
+    // saturated colour leaves a permanent residue. Erasing alpha does converge.
+    // Long trails only during a transition; near-clean at rest.
+    const fade = 0.30 + 0.55 * (1 - swirl);
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = `rgba(0,0,0,${fade})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'source-over';
+    if (active < 0) return;
+    const size = Math.max(1, Math.min(14, slots[active].cw * 0.56));
+    if (mode === 'dot') blockPass(size, false);
+    else if (mode === 'ascii') glyphPass(false);
+    else { blockPass(size, true); glyphPass(true); }
+  }
+
+  let paused = false;
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || d.type !== 'mouse-dither') return;
+    paused = !d.visible;
+  });
+
+  function loop() {
+    if (!paused && !document.hidden) {
+      frame++;
+      swirl *= SWIRL_DECAY;
+      if (active >= 0 && slots[active].animated && (frame & 1) === 0) { extract(slots[active], null); groupColors(); }
+      project();
+      step(); draw();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  modeBtn.textContent = GLYPH[mode];
+  renderSlots();
+  resize();
+  loop();
+
+  // --- marketing embed hooks ---
+  const params = new URLSearchParams(location.search);
+  const embed = params.get('embed') === '1';
+  if (embed) {
+    document.documentElement.classList.add('embed');
+    setMenu(false);
+    CENTER_X = 0.62;
+  }
+
+  async function loadUrl(url, i) {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    const file = new File([blob], url.split('/').pop() || 'img.png', { type: blob.type || 'image/png' });
+    loadFile(file, i == null ? -1 : i);
+  }
+
+  window.DitherBoids = {
+    loadUrl,
+    loadUrls: async (urls) => {
+      for (let i = 0; i < urls.length; i++) await loadUrl(urls[i], i === 0 ? 0 : -1);
+    },
+    next: () => { if (slots.length > 1) applyTargets((active + 1) % slots.length); },
+    setOrbit: (on) => { orbiting = !!on; orbitBtn.classList.toggle('on', orbiting); },
+    setColor: (on) => { colorOn = !!on; colorBtn.classList.toggle('on', colorOn); },
+  };
+
+  // Auto-boot images when listed via ?imgs=a,b,c (comma-separated relative paths)
+  const imgs = (params.get('imgs') || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (imgs.length) {
+    window.DitherBoids.loadUrls(imgs).then(() => {
+      // mild black point so white backdrops drop out of the flock
+      if (active >= 0) {
+        slots[active].bp = 0.08;
+        blackEl.value = '8';
+        schedule(false);
+      }
+    });
+  }
+
+  // Cycle slots slowly in embed mode
+  if (embed) {
+    setInterval(() => {
+      if (document.hidden || slots.length < 2) return;
+      applyTargets((active + 1) % slots.length);
+    }, 9000);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mouse — the coding IDE built for a phone</title>
+  <meta name="description" content="Mouse is a native mobile IDE. Swipe between editors, pinch workspaces open, run real node and git — built for a phone, not shrunk from a desktop.">
+  <meta property="og:title" content="Mouse — the coding IDE built for a phone">
+  <meta property="og:description" content="A gesture-driven development environment for iOS and Android. Real node. Real git. No desktop compromise.">
+  <meta property="og:image" content="assets/logo.png">
+  <meta name="theme-color" content="#07070a">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="sr-only" href="#main">Skip to content</a>
+
+  <header class="nav" id="nav" data-variant="hero">
+    <div class="nav-inner">
+      <a class="nav-brand" href="#">
+        <img src="assets/logo.png" alt="" width="28" height="28">
+        <span>mouse</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a class="nav-link" href="#gestures">Gestures</a>
+        <a class="nav-link" href="#screens">Screens</a>
+        <a class="nav-link" href="#stack">Stack</a>
+        <a class="nav-link" href="#faq">FAQ</a>
+      </nav>
+      <a class="nav-cta" href="https://github.com/reagent-systems/mouse" rel="noopener">
+        GitHub
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.5 7.5 0 0 1 8 4.77c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.19 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-label="Hero">
+      <iframe
+        class="hero-viz"
+        title="Dither boids forming Mouse screens"
+        src="dither.html?embed=1&imgs=assets/logo.png,assets/interface-ring.png,assets/interface-editor.png,assets/interface-git-flow.png,assets/screen-lanes.png"
+        loading="eager"
+      ></iframe>
+      <div class="hero-fade" aria-hidden="true"></div>
+      <div class="hero-content">
+        <p class="hero-kicker">Native · iOS &amp; Android</p>
+        <h1 class="hero-brand">MOUSE</h1>
+        <p class="hero-title">The coding IDE built for a phone — not shrunk from a desktop.</p>
+        <p class="hero-lede">
+          A gesture shell where the whole development environment lives:
+          swipe editors, pinch workspaces, run real <code>node</code> and git
+          against your GitHub repos.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/reagent-systems/mouse" rel="noopener">View on GitHub</a>
+          <a class="btn btn-ghost" href="#gestures">See the gestures</a>
+        </div>
+        <div class="hero-meta">
+          <span>msh shell</span>
+          <span>Node on device</span>
+          <span>Native git</span>
+          <span>Zero deps</span>
+        </div>
+        <p class="hero-hint">Drag the flock · images cycle on their own</p>
+      </div>
+    </section>
+
+    <section class="section" id="gestures">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <h2>One law. Every surface.</h2>
+          <p>The shell owns navigation. Content owns reading and typing. Conflict is settled once, everywhere.</p>
+        </div>
+        <div class="gesture-grid">
+          <article class="gesture-card reveal">
+            <span class="key">Lane</span>
+            <h3>Horizontal drag</h3>
+            <p>Swipe a lane to the next container on the ring — files, editor, graph, terminal.</p>
+          </article>
+          <article class="gesture-card reveal reveal-delay-1">
+            <span class="key">Ring</span>
+            <h3>Edge swipe</h3>
+            <p>Drag from the screen edge to travel between rings, or mint a fresh one.</p>
+          </article>
+          <article class="gesture-card reveal reveal-delay-2">
+            <span class="key">Layout</span>
+            <h3>Spread / pinch</h3>
+            <p>Two fingers open a lane or close one. Pinch the last lane and the ring folds.</p>
+          </article>
+          <article class="gesture-card reveal">
+            <span class="key">Split</span>
+            <h3>Divider drag</h3>
+            <p>Pull the capsule between lanes to resize. Springs settle with mass.</p>
+          </article>
+          <article class="gesture-card reveal reveal-delay-1">
+            <span class="key">Content</span>
+            <h3>Tap · scroll · type</h3>
+            <p>Trees scroll, editors edit, terminals take keystrokes. Vertical stays with content.</p>
+          </article>
+          <article class="gesture-card reveal reveal-delay-2">
+            <span class="key">Focus</span>
+            <h3>Editor stand-down</h3>
+            <p>While the editor is focused, every drag on it belongs to the text — selection and caret first.</p>
+          </article>
+        </div>
+        <blockquote class="law reveal">
+          <strong>The gesture law.</strong>
+          One-finger horizontal drags and all two-finger gestures belong to the shell, everywhere.
+          Content gets taps, vertical scrolling, and the keyboard.
+        </blockquote>
+      </div>
+    </section>
+
+    <section class="section section-dark" id="screens">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <h2>Rings of containers</h2>
+          <p>The screen is a window onto a ring. Lanes show what is open; the rest wait in reserve.</p>
+        </div>
+        <div class="showcase">
+          <figure class="phone-frame reveal">
+            <img src="assets/screen-lanes.png" alt="Mouse lanes: editor, terminal, and graph stacked on a phone" width="980" height="752" loading="lazy">
+            <figcaption class="phone-caption">
+              <span class="label">Workspace</span>
+              <strong>Editor · terminal · graph, stacked by gesture</strong>
+            </figcaption>
+          </figure>
+          <div class="stack-cards">
+            <a class="stack-card reveal" href="#stack">
+              <img src="assets/interface-ring.png" alt="" width="88" height="88" loading="lazy">
+              <div>
+                <h3>Ring strip</h3>
+                <p>Dots mark rings. Edge-swipe travels; a fresh ring is born at the end.</p>
+              </div>
+            </a>
+            <a class="stack-card reveal reveal-delay-1" href="#stack">
+              <img src="assets/interface-editor.png" alt="" width="88" height="88" loading="lazy">
+              <div>
+                <h3>In-place editor</h3>
+                <p>Edit the file itself in the lane. Floating keyboard. Autosave.</p>
+              </div>
+            </a>
+            <a class="stack-card reveal reveal-delay-2" href="#stack">
+              <img src="assets/interface-git-flow.png" alt="" width="88" height="88" loading="lazy">
+              <div>
+                <h3>Commit → graph</h3>
+                <p>Swipe from the editor into the commit surface, then the history rails.</p>
+              </div>
+            </a>
+            <a class="stack-card reveal reveal-delay-3" href="#stack">
+              <img src="assets/screen-spread.png" alt="" width="88" height="88" loading="lazy">
+              <div>
+                <h3>Spread for space</h3>
+                <p>Two-finger spread opens a blank lane. Pinch closes it again.</p>
+              </div>
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="gallery">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <h2>Built as a phone product</h2>
+          <p>Black containers on a white canvas. IBM Plex Mono. Motion is the arrow — no coach marks.</p>
+        </div>
+        <div class="gallery">
+          <article class="gallery-item reveal">
+            <div class="gallery-frame">
+              <img src="assets/interface-git-flow.png" alt="Swipe flow from editor to commit to graph" loading="lazy">
+            </div>
+            <h3>Git flow by swipe</h3>
+            <p>Editor, commit, graph — consecutive containers on one ring.</p>
+          </article>
+          <article class="gallery-item reveal reveal-delay-1">
+            <div class="gallery-frame">
+              <img src="assets/screen-graph.png" alt="Commit graph with branch rails" loading="lazy">
+            </div>
+            <h3>Commit graph</h3>
+            <p>Branch rails, merges, tips — drawn like a desktop client, scrolled with a thumb.</p>
+          </article>
+          <article class="gallery-item reveal">
+            <div class="gallery-frame">
+              <img src="assets/screen-shell.png" alt="Shell wireframe with stacked lanes" loading="lazy">
+            </div>
+            <h3>Shell geometry</h3>
+            <p>Continuous 32pt radii. The container is the chrome.</p>
+          </article>
+          <article class="gallery-item reveal reveal-delay-1">
+            <div class="gallery-frame">
+              <img src="assets/screen-spread.png" alt="Two-finger spread creating module space" loading="lazy">
+            </div>
+            <h3>Lane management</h3>
+            <p>Spread opens space. Pinch collapses it. The last pinch closes the ring.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="stack">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <h2>A full stack on the device</h2>
+          <p>No server in the middle. GitHub talks to the phone. The engines are native.</p>
+        </div>
+        <div class="caps">
+          <article class="cap reveal">
+            <span class="num">01 · Shell</span>
+            <h3>msh</h3>
+            <p>A from-scratch POSIX-flavored shell: pipes, redirects, functions, <code>$(…)</code>, globs, scripts — verified against real <code>/bin/sh</code>.</p>
+          </article>
+          <article class="cap reveal reveal-delay-1">
+            <span class="num">02 · Runtime</span>
+            <h3>node</h3>
+            <p>JavaScriptCore Node layer: npm install, CommonJS + ESM, TypeScript, sockets, HTTP, workers, and full-screen TUIs.</p>
+          </article>
+          <article class="cap reveal reveal-delay-2">
+            <span class="num">03 · VCS</span>
+            <h3>git</h3>
+            <p>Native object store, packfiles, smart-HTTP fetch/push, and three-way merge — interoperable with the real CLI.</p>
+          </article>
+        </div>
+
+        <div class="section-head reveal" style="margin-top: 4rem;">
+          <h2>From clone to push</h2>
+          <p>Sign in once. The workspace is the project.</p>
+        </div>
+        <div class="steps">
+          <div class="step reveal">
+            <div>
+              <h3>Sign in with GitHub</h3>
+              <p>OAuth Device Flow. Tokens in the Keychain. The GitHub container is the same session everywhere.</p>
+            </div>
+          </div>
+          <div class="step reveal">
+            <div>
+              <h3>Open a workspace</h3>
+              <p>Clone via tarball or start a local project. One workspace per repo, shared across rings.</p>
+            </div>
+          </div>
+          <div class="step reveal">
+            <div>
+              <h3>Edit in place</h3>
+              <p>Tap the file. Type. Autosave. Shared buffers mean two rings on one file stay live.</p>
+            </div>
+          </div>
+          <div class="step reveal">
+            <div>
+              <h3>Commit · sync · merge</h3>
+              <p>The graph toolbar drives the native engine. Sync pushes; pull is an explicit terminal command.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="faq">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <h2>FAQ</h2>
+          <p>What Mouse is, and what it is not.</p>
+        </div>
+        <div class="faq">
+          <details class="reveal">
+            <summary>What is Mouse?</summary>
+            <p>A native mobile IDE for iOS and Android. The development environment lives in a gesture-driven shell: rings of containers for files, editor, commit graph, and terminal.</p>
+          </details>
+          <details class="reveal">
+            <summary>Is this a web app or Electron wrapper?</summary>
+            <p>No. Two native apps — SwiftUI on iOS/iPadOS, Jetpack Compose on Android. No Capacitor, React Native, or Flutter bridge.</p>
+          </details>
+          <details class="reveal">
+            <summary>Does node really run on the phone?</summary>
+            <p>Yes. A Node-compatible runtime on JavaScriptCore, with npm from the real registry, sockets, HTTP, and packages like vite, webpack, jest, and express verified against real node.</p>
+          </details>
+          <details class="reveal">
+            <summary>How does git work without a git binary?</summary>
+            <p>Mouse ships a from-scratch engine: loose objects, packfiles, refs, merge, and GitHub smart-HTTP. Repositories it writes pass <code>git fsck</code>.</p>
+          </details>
+          <details class="reveal">
+            <summary>Where do I get it?</summary>
+            <p>The source is on GitHub today. Build the iOS app with Xcode + xcodegen, or the Android app with Gradle. Release packaging is tracked in the repo.</p>
+          </details>
+          <details class="reveal">
+            <summary>What about AI / agents?</summary>
+            <p>Product branches on the roadmap cover AI pair editing and background agents as containers. The shell’s multi-view model is the substrate; those slices land when feel-tested.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-band" id="start">
+      <div class="cta-inner reveal">
+        <h2>Build on a phone that can build.</h2>
+        <p>Clone the repo. Generate the Xcode project. Run.</p>
+        <div class="cta-actions">
+          <a class="btn btn-primary" href="https://github.com/reagent-systems/mouse" rel="noopener">GitHub</a>
+          <a class="btn btn-ghost" href="https://github.com/reagent-systems/mouse#building--running" rel="noopener">Build instructions</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <a class="footer-brand" href="#">
+        <img src="assets/logo.png" alt="" width="20" height="20">
+        mouse
+      </a>
+      <div class="footer-links">
+        <a href="https://github.com/reagent-systems/mouse" rel="noopener">Source</a>
+        <a href="https://github.com/reagent-systems/mouse/blob/main/DESIGN.md" rel="noopener">Design</a>
+        <a href="https://github.com/reagent-systems/mouse/blob/main/LICENSE" rel="noopener">MIT</a>
+      </div>
+      <span>reagent-systems</span>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
