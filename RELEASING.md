@@ -7,9 +7,7 @@ generated notes.
 
 ## Versioning
 
-SemVer (`MAJOR.MINOR.PATCH`), pre-1.0 — minor bumps may include breaking
-changes; `v0.x` maps to the roadmap milestones. Keep the two apps' versions
-in step:
+SemVer (`MAJOR.MINOR.PATCH`). Keep the two apps' versions in step:
 
 - **iOS**: `MARKETING_VERSION` in [swift/project.yml](swift/project.yml)
   (re-run `xcodegen generate` after changing it).

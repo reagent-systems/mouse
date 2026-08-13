@@ -2,10 +2,48 @@
 
 All notable changes to Mouse. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[SemVer](https://semver.org/) (`MAJOR.MINOR.PATCH`), pre-1.0 so minors may
-carry breaking changes.
+[SemVer](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
 ## [Unreleased]
+
+## [1.4] - 2026-08-12
+
+### Fixed
+- iOS: **`npm run dev` works.** A SvelteKit project on the phone starts its dev server once
+  and serves the rendered page. Five faults sat on top of each other:
+  - The project was rooted at `/`, and chokidar records a directory under its parent — for
+    `/`, POSIX gives dirname `/` and basename `""`, so it filed an empty-named child in the
+    root's own record, decided on the next read that it had been deleted, and tore the whole
+    tree down. Every file was reported `unlink`ed, `vite.config.ts` among them, so vite
+    restarted about every three seconds. A program now starts at a named root.
+  - ESM named imports were a snapshot rather than a live binding, so a module exporting
+    `let x` and assigning it later read `undefined` forever. Svelte's compiler then ran half
+    in dev mode and every page died inside svelte's own renderer.
+  - `Request`/`Response` bodies built from a `Uint8Array` went through `String(body)`, so a
+    rendered page arrived as comma-separated character codes.
+  - `listen()` with no host bound IPv4-only where node binds dual-stack, so a program could
+    not reach its own server by name.
+  - "Failed to run dependency scan" was downstream of the restart storm, not a second bug.
+- iOS: **the commit graph shows the whole history.** It stopped four times over: one
+  80-commit API page with no second request, a 200-commit cap per branch, an unreadable
+  ancestor discarding that branch's history entirely, and a reader that could not see
+  anything packed — neither objects in a packfile nor refs in `packed-refs`, and not
+  branch names containing a slash, which live in a directory. On this repository that was
+  310 commits and 11 branches where git counts 423 and 21. Reading it all is also now
+  faster than reading part of it was.
+- iOS: **the terminal's key strip no longer dismisses the keyboard.** `up`, `down`, `esc`
+  and the rest are registered hold regions, so a TUI keeps the keyboard while you drive it.
+
+### Added
+- iOS: **tapping a project's name in the Files container goes back to the picker.** Leaving
+  stops whatever the ring's terminal was running — outright, not with a `^C` a dev server
+  would read as a keystroke and ignore — so no server keeps a port after its project is gone.
+- **Tailwind 3 compiles on the phone**, via the wasm build of lightningcss. Tailwind 4
+  cannot: `@tailwindcss/oxide`'s wasi build declares shared memory, and JSC will not parse
+  such a module while `useSharedArrayBuffer` is restricted in Apple's build.
+- Five gates for behaviour that had none — `watchroot`, `stackshape`, `lightningcss`,
+  `tailwind`, `leaveproject` — and `githistory`, which holds the commit graph against real
+  git's own answer on a repository whose objects and refs are both packed.
 
 ## [0.1.3] - 2026-08-06
 
