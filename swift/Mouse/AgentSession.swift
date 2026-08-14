@@ -44,8 +44,10 @@ final class AgentSession {
 
     private static let agentKey = "agentContainerAgent"
     /// How long a single command may hold the terminal before the container gives up on it.
-    /// Installing an agent is a real download, so this is minutes rather than seconds.
-    private static let patience: TimeInterval = 180
+    /// Installing an agent is a real download, and one step of the embedded loop pays hermes's
+    /// import bill — measured near four minutes warm on the wasi CPython — so this is generous
+    /// on purpose. The startup cost itself is the named next problem in the brief.
+    private static let patience: TimeInterval = 600
 
     init() {
         let saved = UserDefaults.standard.string(forKey: Self.agentKey)
@@ -146,6 +148,9 @@ final class AgentSession {
         }
         let root = terminal.root
         let bridge = root.appendingPathComponent(".hermes-bridge", isDirectory: true)
+        // The step depends on the runtime shims (ssl, threads); pip lays them when IT runs,
+        // but a send must not require a pip run to have happened since the last shim change.
+        Pip.layShims(in: Pip.sitePackages)
         do {
             try FileManager.default.createDirectory(at: bridge, withIntermediateDirectories: true)
             try Self.stepDriver.write(to: bridge.appendingPathComponent("step.py"),
@@ -155,18 +160,16 @@ final class AgentSession {
             return
         }
 
-        var turn: [[String: String]] = messages.compactMap { message in
-            switch message.author {
-            case .you: return ["role": "user", "content": message.text]
-            case .agent: return ["role": "assistant", "content": message.text]
-            case .note: return nil
-            }
-        }
-        // The prompt this call is answering is already in `messages`; `turn` above carries it.
+        // Hermes is single-turn v1: the prompt goes in, recorded model replies accumulate
+        // as the loop replays. Conversation memory across sends is hermes's session state,
+        // which lives in the workspace (`HOME=/`) — not re-fed through chat().
+        var recorded: [String] = []
 
         for _ in 0..<6 {
             do {
-                let data = try JSONSerialization.data(withJSONObject: ["messages": turn])
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "prompt": prompt, "recorded": recorded, "model": "hermes-agent",
+                ])
                 try data.write(to: bridge.appendingPathComponent("turn.json"))
                 try? FileManager.default.removeItem(at: bridge.appendingPathComponent("out.json"))
             } catch {
@@ -183,56 +186,38 @@ final class AgentSession {
                 messages.append(Message(author: .agent, text: answer))
                 return
             }
-            guard let tool = out["tool"] as? String else {
+            if let failure = out["error"] as? String {
+                problem = failure + ((out["calls"] as? [[String: Any]]).map { " [calls: \($0)]" } ?? "")
+                messages.append(Message(author: .agent, text: failure))
+                return
+            }
+            guard out["tool"] as? String == "llm.complete" else {
                 problem = "the step asked for neither an answer nor a tool"
                 return
             }
             let args = out["args"] as? [String: Any] ?? [:]
-            messages.append(Message(author: .note, text: tool))
-            switch tool {
-            case "llm.complete":
-                let asked = (args["messages"] as? [[String: Any]] ?? []).compactMap { m -> (String, String)? in
-                    guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
-                    return (role, content)
-                }
-                do {
-                    let reply = try await api.complete(asked)
-                    turn.append(["role": "tool", "name": tool, "content": reply])
-                } catch {
-                    problem = "\(error)"
-                    messages.append(Message(author: .agent, text: "\(error)"))
-                    return
-                }
-            case "shell":
-                let command = args["command"] as? String ?? ""
-                let result = await run(command, on: terminal)
-                turn.append(["role": "tool", "name": tool, "content": result.text])
-            case "read_file":
-                let path = args["path"] as? String ?? ""
-                let text = (try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)) ?? ""
-                turn.append(["role": "tool", "name": tool, "content": text])
-            default:
-                turn.append(["role": "tool", "name": tool, "content": "unknown tool: \(tool)"])
+            messages.append(Message(author: .note, text: "llm.complete"))
+            let asked = (args["messages"] as? [[String: Any]] ?? []).compactMap { m -> (String, String)? in
+                guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
+                return (role, content)
+            }
+            do {
+                let reply = try await api.complete(asked.isEmpty ? [("user", prompt)] : asked)
+                recorded.append(reply)
+            } catch {
+                problem = "\(error)"
+                messages.append(Message(author: .agent, text: "\(error)"))
+                return
             }
         }
-        problem = "six steps without an answer"
+                problem = "six steps without an answer"
     }
 
-    /// The per-step driver. Stage 3 replaces this with Hermes's own loop, installed by pip;
-    /// the protocol it speaks to Mouse stays exactly this.
-    private static let stepDriver = """
-    import json
-    turn = json.load(open('/.hermes-bridge/turn.json'))
-    msgs = turn['messages']
-    out = None
-    if msgs and msgs[-1].get('role') == 'tool' and msgs[-1].get('name') == 'llm.complete':
-        out = {"answer": msgs[-1]['content']}
-    else:
-        system = {"role": "system", "content": "You are Hermes Agent, running embedded in Mouse on an iPhone. Mouse executes your tools. Answer concisely."}
-        asking = [system] + [m for m in msgs if m.get('role') in ('user', 'assistant')]
-        out = {"tool": "llm.complete", "args": {"messages": asking}}
-    json.dump(out, open('/.hermes-bridge/out.json', 'w'))
-    """
+    /// One step of Hermes's OWN loop — `AIAgent.chat` behind a replayed openai transport.
+    /// Recorded model replies replay in order; the first unrecorded call comes back as the
+    /// llm.complete tool, Mouse answers it on URLSession, and the step reruns. See the brief's
+    /// record-and-replay design; the driver is generated here so nothing ships half-configured.
+    private static let stepDriver = "# One step of Hermes's own loop, per invocation. Mouse wrote turn.json; this decides.\n#\n# Hermes's transport is the openai SDK, which cannot import here (pydantic-core is compiled)\n# and could not connect if it did (wasi has no sockets). So a stand-in `openai` goes into\n# sys.modules BEFORE hermes imports: recorded responses replay in order, and the first\n# unrecorded call raises Capture — written out as the llm.complete tool for Mouse's URLSession.\nimport json, sys, types, traceback\n\nBRIDGE = \"/.hermes-bridge\"\nturn = json.load(open(BRIDGE + \"/turn.json\"))\nprompt = turn[\"prompt\"]\nrecorded = turn.get(\"recorded\", [])\nmodel_name = turn.get(\"model\", \"hermes-agent\")\n\nclass Capture(BaseException):\n    # BaseException on purpose: hermes wraps its model calls in retries that catch\n    # Exception, and a captured request must walk straight through them to the driver.\n    def __init__(self, request):\n        self.request = request\n\n_replay = {\"next\": 0}\n_calls = []\n\nclass _Message:\n    def __init__(self, content):\n        self.role, self.content, self.tool_calls = \"assistant\", content, None\n    def model_dump(self):\n        return {\"role\": self.role, \"content\": self.content}\n\nclass _Choice:\n    def __init__(self, content):\n        self.message, self.finish_reason, self.index = _Message(content), \"stop\", 0\n\nclass _Response:\n    def __init__(self, content):\n        self.choices, self.usage, self.id, self.model = [_Choice(content)], None, \"replay\", model_name\n    def model_dump(self):\n        return {\"choices\": [{\"message\": self.choices[0].message.model_dump()}]}\n\ndef _create(**request):\n    _calls.append({\"keys\": sorted(request.keys()), \"stream\": bool(request.get(\"stream\")),\n                   \"model\": request.get(\"model\")})\n    i = _replay[\"next\"]\n    if i < len(recorded):\n        _replay[\"next\"] = i + 1\n        return _Response(recorded[i])\n    safe = {}\n    for key in (\"messages\", \"model\", \"tools\", \"temperature\", \"max_tokens\", \"max_completion_tokens\"):\n        if key in request:\n            try:\n                json.dumps(request[key])\n                safe[key] = request[key]\n            except (TypeError, ValueError):\n                pass\n    raise Capture(safe)\n\nclass _Delta:\n    def __init__(self, content): self.content, self.role, self.tool_calls = content, \"assistant\", None\n\nclass _StreamChunk:\n    def __init__(self, content, finish=None):\n        choice = types.SimpleNamespace(delta=_Delta(content), finish_reason=finish, index=0)\n        self.choices = [choice]\n        self.id, self.model, self.usage = \"replay\", model_name, None\n\ndef _result(request):\n    content_response = _create(**request)   # replay or Capture\n    if request.get(\"stream\"):\n        return iter([_StreamChunk(content_response.choices[0].message.content),\n                     _StreamChunk(None, finish=\"stop\")])\n    return content_response\n\nclass _Proxy:\n    def __init__(self, path):\n        self._path = path\n    def __getattr__(self, name):\n        if name.startswith(\"_\"):\n            # Dunders, and private probes like `_client`: absent. hermes reads `_client`\n            # to inspect the transport, and an ever-truthy proxy there reads as CLOSED.\n            raise AttributeError(name)\n        if name == \"is_closed\":\n            # Asked both as a property and as a method; a plain False satisfies neither\n            # branch wrongly — hermes calls it if callable, truth-tests it if not.\n            return lambda: False\n        if name in (\"close\", \"aclose\"):\n            return lambda *a, **k: None\n        return _Proxy(self._path + \".\" + name)\n    def __call__(self, *args, **kwargs):\n        _calls.append({\"path\": self._path, \"keys\": sorted(kwargs.keys()),\n                       \"stream\": bool(kwargs.get(\"stream\"))})\n        if \"messages\" in kwargs:\n            return _result(kwargs)\n        # Construction and configuration chatter (with_options, headers, …): answer with\n        # another proxy so the caller keeps walking to its real request.\n        return _Proxy(self._path + \"()\")\n\ndef _build_fake_openai():\n    fake = types.ModuleType(\"openai\")\n    class OpenAI(_Proxy):\n        def __init__(self, *a, **k):\n            _Proxy.__init__(self, \"OpenAI\")\n    class AsyncOpenAI(OpenAI): pass\n    class APIError(Exception): pass\n    class APIStatusError(APIError): pass\n    class APIConnectionError(APIError): pass\n    class APITimeoutError(APIConnectionError): pass\n    class RateLimitError(APIStatusError): pass\n    class AuthenticationError(APIStatusError): pass\n    class BadRequestError(APIStatusError): pass\n    class NotFoundError(APIStatusError): pass\n    class InternalServerError(APIStatusError): pass\n    for name, value in list(locals().items()):\n        if not name.startswith(\"_\") and name != \"fake\":\n            setattr(fake, name, value)\n    fake.__version__ = \"0.0.0-mouse-replay\"\n    return fake\n\nsys.modules[\"openai\"] = _build_fake_openai()\n\n# This build does not run `site`, so sitecustomize never loads — the runtime patches live\n# here, applied before hermes imports. wasi has no threads: a Timer never fires, a daemon\n# thread pretends to start (watchers, log listeners), a non-daemon thread runs INLINE.\n# This WASI has no clock sleep (poll_oneoff answers Not supported), and hermes's loop\n# sleeps 200ms between interrupt checks. There is nothing to yield to on one thread anyway.\nimport time as _time\n_time.sleep = lambda seconds=0: None\n\nimport threading as _threading\ndef _inline_start(self):\n    self._started.set()\n    if isinstance(self, _threading.Timer) or self.daemon:\n        return\n    self.run()\n_threading.Thread.start = _inline_start\n# join() on a pretend-started thread trips _wait_for_tstate_lock's assert; there is nothing\n# to wait for — inline threads already ran, daemons never will.\n_threading.Thread.join = lambda self, timeout=None: None\n_threading.Thread.is_alive = lambda self: False\n\nimport concurrent.futures as _cf\nclass _InlineExecutor(_cf.Executor):\n    def __init__(self, *a, **k): pass\n    def submit(self, fn, /, *args, **kwargs):\n        future = _cf.Future()\n        try:\n            future.set_result(fn(*args, **kwargs))\n        except BaseException as error:\n            future.set_exception(error)\n        return future\n    def shutdown(self, wait=True, *, cancel_futures=False): pass\n_thread_mod = types.ModuleType(\"concurrent.futures.thread\")\n_thread_mod.ThreadPoolExecutor = _InlineExecutor\nsys.modules[\"concurrent.futures.thread\"] = _thread_mod\n_cf.ThreadPoolExecutor = _InlineExecutor\n\n# QueueListener.start is the one that actually fired: logging's queue machinery wants its\n# own thread. Listening inline means handling records as they are enqueued instead.\nimport logging.handlers as _lh\ndef _listener_start(self):\n    class _Immediate:\n        def __init__(self, listener): self._l = listener\n        def put_nowait(self, record):\n            if record is not None:\n                self._l.handle(record)\n        put = put_nowait\n        def get(self, *a, **k): raise EOFError\n    self.queue = _Immediate(self)\n_lh.QueueListener.start = _listener_start\n_lh.QueueListener.stop = lambda self: None\n\n# Hermes's own diagnostics, captured in-process: the QueueListener patch above orphans\n# its file logs, and the \"invalid response\" reason is logged, not raised.\nimport io, logging\n_logbuf = io.StringIO()\n_handler = logging.StreamHandler(_logbuf)\n_handler.setFormatter(logging.Formatter(\"%(name)s %(levelname)s %(message)s\"))\n_handler.setLevel(logging.DEBUG)\nlogging.getLogger(\"agent\").addHandler(_handler)\nlogging.getLogger(\"agent\").setLevel(logging.DEBUG)\nlogging.getLogger(\"run_agent\").addHandler(_handler)\nlogging.getLogger(\"run_agent\").setLevel(logging.DEBUG)\n\nout = {}\ntry:\n    from run_agent import AIAgent\n    # THE SEAM. The loop asks these two methods for a completed, OpenAI-shaped response;\n    # everything below them is transport (worker threads, httpx streaming, retries) that\n    # cannot exist on this device. Mouse IS the transport: recorded replies replay, the\n    # first unrecorded call is captured for URLSession.\n    def _mouse_transport(self, api_kwargs, **extra):\n        _calls.append({\"transport\": sorted(api_kwargs.keys())})\n        return _create(**api_kwargs)\n    AIAgent._interruptible_streaming_api_call = _mouse_transport\n    AIAgent._interruptible_api_call = _mouse_transport\n    agent = AIAgent(base_url=\"http://mouse.bridge/v1\", api_key=\"mouse-bridge\", model=model_name)\n    answer = agent.chat(prompt)\n    out = {\"answer\": answer if isinstance(answer, str) else str(answer)}\nexcept Capture as capture:\n    out = {\"tool\": \"llm.complete\", \"args\": capture.request}\nexcept BaseException as error:\n    out = {\"error\": \"%s: %s\\n%s\" % (type(error).__name__, error, traceback.format_exc()[-1800:])}\n\nout[\"calls\"] = _calls\nout[\"log\"] = _logbuf.getvalue()[-2500:]\njson.dump(out, open(BRIDGE + \"/out.json\", \"w\"))\n"
 
     /// Run one command and wait for it to finish, answering with what it printed and whether it
     /// FAILED. `TerminalSession.run` is fire-and-forget, so completion is observed rather than
