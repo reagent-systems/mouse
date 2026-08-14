@@ -239,7 +239,30 @@ That was three separate faults, and all three are now found and fixed:
   `verify/scopedbin`. `claude` now resolves and starts — and then holds the
   terminal as a program with no output, which is the auth wall below.
 
-## CLAUDE CODE: FOUND — it awaits a stream to statsig.anthropic.com
+## CLAUDE CODE: CLOSED — 1.0.128 is broken everywhere, and our engine matched real node
+
+The full chain, measured to the end:
+
+    statsig.anthropic.com                          NXDOMAIN — the host is GONE
+    bare fetch to it through our engine            fails fast, cleanly, releases
+    claude 1.0.128 + key, our engine               silent forever (statsig retry loop)
+    claude 1.0.128 + key, REAL node v22, the Mac   killed at 40s, zero output
+
+The pinned version awaits statsig initialisation before its first print, the
+statsig host no longer exists anywhere, and its client retries without limit.
+NOT an engine bug — the engine reproduced real node exactly, including the
+hang. Two of my earlier eliminations were also watchdog lies (an uncondition-
+al echo after sleep reads as a kill); the interrupt ledger is the tool that
+cut through.
+
+THE FIX is a different claude-code version: the last JS-only release newer
+than 1.0.128 whose statsig init fails open or times out. Enumerate
+`npm view @anthropic-ai/claude-code versions`, find the last without
+`claude.exe`, and test `-p` with a key on the engine. If none work, the
+fallback is an engine hosts-override answering statsig locally — grubby, and
+only worth it if no version does.
+
+## Superseded — the statsig stream as an engine bug
 
 The interrupt ledger answered on its second use:
 
