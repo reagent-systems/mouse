@@ -42,7 +42,7 @@ struct AgentContainerView: View {
             // empty meant it could never be reached once a key was saved — and a keychain entry
             // survives deleting the app, so "reinstall to fix it" does not work either. Submit an
             // address, even the default one, and the row goes.
-            if session.agent.usesGateway, session.agent.blocked == nil,
+            if session.agent.embedded, session.agent.blocked == nil,
                settings.address(for: session.agent).isEmpty {
                 addressField
             }
@@ -154,7 +154,7 @@ struct AgentContainerView: View {
             Text("address")
                 .font(.custom(AppFont.asciiName, size: 10))
                 .opacity(0.4)
-            TextField("127.0.0.1:8642", text: $addressDraft)
+            TextField("model endpoint (host[:port])", text: $addressDraft)
                 .font(.custom(AppFont.asciiName, size: 12))
                 .textFieldStyle(.plain)
                 .autocorrectionDisabled()
@@ -193,7 +193,7 @@ struct AgentContainerView: View {
             .onSubmit {
                 // Commit the address too: someone who fills both fields and presses return once
                 // should not silently lose the one they did not submit.
-                if session.agent.usesGateway, !addressDraft.isEmpty {
+                if session.agent.embedded, !addressDraft.isEmpty {
                     settings.setAddress(addressDraft, for: session.agent)
                 }
                 settings.set(setupDraft, for: session.agent)

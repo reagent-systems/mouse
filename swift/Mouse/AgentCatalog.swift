@@ -23,8 +23,10 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     let launch: String
     /// The executable the install is expected to leave behind, used to answer "is it here yet".
     let executable: String
-    /// Whether this agent is reached over its own gateway rather than run as a local CLI.
-    let usesGateway: Bool
+    /// Whether this agent runs EMBEDDED: its loop as Python steps on the device's own wasi
+    /// CPython, with Mouse executing every tool the loop asks for. The alternative is a local
+    /// CLI on the Node layer (Claude Code).
+    let embedded: Bool
 
     /// The one thing this agent needs before it can answer, saved between launches.
     let setting: Setting?
@@ -72,7 +74,7 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         install: "npm i -g @anthropic-ai/claude-code@1.0.128",
         launch: "claude",
         executable: "claude",
-        usesGateway: false,
+        embedded: false,
         // Without a key the CLI waits for a login it cannot get on a phone, which is what a
         // three-minute silence and no output turned out to be.
         setting: Setting(name: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…",
@@ -96,15 +98,18 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // `{"id": …, "command": …}` in, events out. A protocol, not a screen.
         launch: "python -m tui_gateway.entry",
         executable: "hermes",
-        // Reached, not run: there is no pip on the device, so the local install can never
-        // happen and the gateway is the whole of how Hermes works here.
-        usesGateway: true,
+        // Embedded, per the user's architecture: the loop runs on the device's Python, and
+        // Mouse is the scoped tool surface it drives — model calls on URLSession's real TLS
+        // (this Python has no ssl), shell on msh, files on the workspace.
+        embedded: true,
         // Not a key: an address. Hermes runs on a machine and this is a client of its gateway,
         // which is the shape its Telegram front-end already has.
         // The key, not the address. Hermes requires bearer auth on every deployment including
         // the loopback bind, and `hermes gateway` serves 127.0.0.1:8642 by default — which the
         // simulator reaches — so the key is the one thing that cannot be defaulted.
-        setting: Setting(name: "API_SERVER_KEY", placeholder: "the key from your profile's .env",
+        // The embedded loop still needs a model. Any OpenAI-compatible endpoint works — the
+        // address field names it, this key authenticates it.
+        setting: Setting(name: "LLM_API_KEY", placeholder: "key for your model endpoint",
                          secret: true, exported: false),
         // MEASURED, not guessed: `pkg install python` lands CPython 3.14.6, and that wasi build
         // answers `python -m pip --version` with "No module named pip" and `ensurepip` with "No

@@ -82,14 +82,14 @@ final class AgentSession {
 
         messages.append(Message(author: .you, text: prompt))
 
-        // An agent reached over its gateway needs no terminal, no install and no project — it
-        // is running somewhere else and this is a chat client to it.
-        if agent.usesGateway {
-            await askGateway(prompt)
-            return
-        }
         guard let terminal else {
             problem = "open a project in the Files container"
+            return
+        }
+        // Embedded: the agent's loop runs as Python steps on THIS device, and Mouse executes
+        // what each step asks for. Nothing leaves the phone except the model call.
+        if agent.embedded {
+            await askEmbedded(prompt, terminal: terminal)
             return
         }
 
@@ -122,31 +122,117 @@ final class AgentSession {
         if !answer.ok { problem = answer.text }
     }
 
-    /// Ask the agent over its API server: the whole conversation up, one answer back.
-    private func askGateway(_ prompt: String) async {
+    /// One conversation turn of the embedded agent.
+    ///
+    /// The engine's WASI is synchronous and its stdin answers EOF, so there is no resident
+    /// process — each STEP is one Python invocation. Swift writes the turn state to a file,
+    /// Python decides (answer, or a tool request) and exits, Swift executes the tool natively
+    /// and reruns Python with the result. The model call is a tool like any other, on
+    /// URLSession's TLS, because this Python has no ssl and never will.
+    private func askEmbedded(_ prompt: String, terminal: TerminalSession) async {
         guard let api = AgentAPI(address: AgentSettings.shared.address(for: agent),
                                  key: AgentSettings.shared.value(for: agent)) else {
             problem = "that is not an address"
             return
         }
-        // The endpoint is stateless, so the exchange so far IS the context. Notes are ours, not
-        // the conversation's, and sending them back would have the agent answering its own
-        // status lines.
-        let history: [(role: String, content: String)] = messages.compactMap { message in
+        // The runtime is a download, not an assumption.
+        if RuntimeStore.installed("python") == nil {
+            messages.append(Message(author: .note, text: "pkg install python"))
+            let landed = await run("pkg install python", on: terminal)
+            guard landed.ok else {
+                problem = landed.text.isEmpty ? "python did not install" : landed.text
+                return
+            }
+        }
+        let root = terminal.root
+        let bridge = root.appendingPathComponent(".hermes-bridge", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: bridge, withIntermediateDirectories: true)
+            try Self.stepDriver.write(to: bridge.appendingPathComponent("step.py"),
+                                      atomically: true, encoding: .utf8)
+        } catch {
+            problem = "\(error.localizedDescription)"
+            return
+        }
+
+        var turn: [[String: String]] = messages.compactMap { message in
             switch message.author {
-            case .you: return ("user", message.text)
-            case .agent: return ("assistant", message.text)
+            case .you: return ["role": "user", "content": message.text]
+            case .agent: return ["role": "assistant", "content": message.text]
             case .note: return nil
             }
         }
-        do {
-            let reply = try await api.complete(history)
-            messages.append(Message(author: .agent, text: reply))
-        } catch {
-            problem = "\(error)"
-            messages.append(Message(author: .agent, text: "\(error)"))
+        // The prompt this call is answering is already in `messages`; `turn` above carries it.
+
+        for _ in 0..<6 {
+            do {
+                let data = try JSONSerialization.data(withJSONObject: ["messages": turn])
+                try data.write(to: bridge.appendingPathComponent("turn.json"))
+                try? FileManager.default.removeItem(at: bridge.appendingPathComponent("out.json"))
+            } catch {
+                problem = "\(error.localizedDescription)"
+                return
+            }
+            let step = await run("python /.hermes-bridge/step.py", on: terminal)
+            guard let data = try? Data(contentsOf: bridge.appendingPathComponent("out.json")),
+                  let out = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                problem = step.text.isEmpty ? "the step produced no output" : step.text
+                return
+            }
+            if let answer = out["answer"] as? String {
+                messages.append(Message(author: .agent, text: answer))
+                return
+            }
+            guard let tool = out["tool"] as? String else {
+                problem = "the step asked for neither an answer nor a tool"
+                return
+            }
+            let args = out["args"] as? [String: Any] ?? [:]
+            messages.append(Message(author: .note, text: tool))
+            switch tool {
+            case "llm.complete":
+                let asked = (args["messages"] as? [[String: Any]] ?? []).compactMap { m -> (String, String)? in
+                    guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
+                    return (role, content)
+                }
+                do {
+                    let reply = try await api.complete(asked)
+                    turn.append(["role": "tool", "name": tool, "content": reply])
+                } catch {
+                    problem = "\(error)"
+                    messages.append(Message(author: .agent, text: "\(error)"))
+                    return
+                }
+            case "shell":
+                let command = args["command"] as? String ?? ""
+                let result = await run(command, on: terminal)
+                turn.append(["role": "tool", "name": tool, "content": result.text])
+            case "read_file":
+                let path = args["path"] as? String ?? ""
+                let text = (try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)) ?? ""
+                turn.append(["role": "tool", "name": tool, "content": text])
+            default:
+                turn.append(["role": "tool", "name": tool, "content": "unknown tool: \(tool)"])
+            }
         }
+        problem = "six steps without an answer"
     }
+
+    /// The per-step driver. Stage 3 replaces this with Hermes's own loop, installed by pip;
+    /// the protocol it speaks to Mouse stays exactly this.
+    private static let stepDriver = """
+    import json
+    turn = json.load(open('/.hermes-bridge/turn.json'))
+    msgs = turn['messages']
+    out = None
+    if msgs and msgs[-1].get('role') == 'tool' and msgs[-1].get('name') == 'llm.complete':
+        out = {"answer": msgs[-1]['content']}
+    else:
+        system = {"role": "system", "content": "You are Hermes Agent, running embedded in Mouse on an iPhone. Mouse executes your tools. Answer concisely."}
+        asking = [system] + [m for m in msgs if m.get('role') in ('user', 'assistant')]
+        out = {"tool": "llm.complete", "args": {"messages": asking}}
+    json.dump(out, open('/.hermes-bridge/out.json', 'w'))
+    """
 
     /// Run one command and wait for it to finish, answering with what it printed and whether it
     /// FAILED. `TerminalSession.run` is fire-and-forget, so completion is observed rather than
