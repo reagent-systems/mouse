@@ -53,9 +53,7 @@ struct AgentContainerView: View {
                     }
                     if session.working {
                         ThinkingOrbLabel(state: .working, text: "working…")
-                    } else if dictation.listening {
-                        ThinkingOrbLabel(state: .listening, text: "agent listening…")
-                    } else if session.messages.isEmpty {
+                    } else if session.messages.isEmpty, !dictation.listening {
                         ThinkingOrbLabel(state: .idle, text: "ask \(session.agent.name.lowercased())")
                     }
                 }
@@ -99,15 +97,17 @@ struct AgentContainerView: View {
                 .focused($inputFocused)
                 .submitLabel(.send)
                 .onSubmit(send)
-            // The microphone fills the field rather than sending: dictation misreads identifiers,
-            // and a prompt you cannot correct before it runs is worse than typing it.
+            // The orb IS the microphone. It already had a listening state and it already sits
+            // where the reference puts it, so a separate glyph beside it was two things saying
+            // one thing. Tapping starts dictation and the orb picks up; tapping again stops it.
+            // It fills the field rather than sending: dictation misreads identifiers, and a
+            // prompt you cannot correct before it runs is worse than typing it.
             Button {
                 Task { await toggleDictation() }
             } label: {
-                Image(systemName: dictation.listening ? "mic.fill" : "mic")
-                    .font(.system(size: 15))
-                    .foregroundStyle(dictation.listening ? .red : .white.opacity(0.75))
+                ThinkingOrb(state: dictation.listening ? .listening : .idle, size: 20)
                     .frame(width: 32, height: 32)
+                    .opacity(dictation.available ? 1 : 0.3)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -167,7 +167,7 @@ struct AgentContainerView: View {
             Button {
                 pickerOpen.toggle()
             } label: {
-                Text("\(session.agent.name) \(pickerOpen ? "^" : "v")")
+                Text(session.agent.name)
                     .font(.custom(AppFont.asciiName, size: 10))
                     .opacity(0.55)
                     .contentShape(Rectangle())
