@@ -73,14 +73,14 @@ let gateway = HermesGateway(address: address)
 do {
     let objects = try await gateway.ask("hello there", timeout: 20)
     check(objects.count == 2, "the streamed event and the answer both arrive (\(objects.count))")
-    check(objects.first?["type"] as? String == "status", "the event comes first")
-    check(objects.last?["message"] as? String == "you said: hello there",
-          "the answer is reassembled from two writes: \(objects.last?["message"] as? String ?? "nil")")
-    check(objects.last?["id"] as? Int == 1, "the answer carries the id it was asked with")
+    check(objects.first?.id == nil, "the streamed event has no id and comes first")
+    check(objects.last?.text == "you said: hello there",
+          "the answer is reassembled from two writes: \(objects.last?.text ?? "nil")")
+    check(objects.last?.id == 1, "the answer carries the id it was asked with")
 
     let second = try await gateway.ask("again", timeout: 20)
-    check(second.last?["id"] as? Int == 2, "the id advances on the same connection")
-    check(second.last?["message"] as? String == "you said: again", "the second answer is its own")
+    check(second.last?.id == 2, "the id advances on the same connection")
+    check(second.last?.text == "you said: again", "the second answer is its own")
 } catch {
     failures += 1
     print("  FAIL: ask threw: \(error)")

@@ -38,6 +38,8 @@ final class AgentSession {
     private(set) var installed: Bool?
     /// Whether this session has already exported the agent's saved setting.
     private var exported = false
+    private var gateway: HermesGateway?
+    private var gatewayAddress: String?
     private(set) var working = false
     /// Shown above the input when the last attempt could not proceed.
     private(set) var problem: String?
@@ -68,10 +70,6 @@ final class AgentSession {
     func send(_ text: String) async {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !working else { return }
-        guard let terminal else {
-            problem = "open a project in the Files container"
-            return
-        }
         if let blocked = agent.blocked {
             problem = blocked
             return
@@ -85,6 +83,17 @@ final class AgentSession {
         defer { working = false }
 
         messages.append(Message(author: .you, text: prompt))
+
+        // An agent reached over its gateway needs no terminal, no install and no project — it
+        // is running somewhere else and this is a chat client to it.
+        if agent.usesGateway {
+            await askGateway(prompt)
+            return
+        }
+        guard let terminal else {
+            problem = "open a project in the Files container"
+            return
+        }
 
         // The saved setup, into the session's environment. Once per session: `export` persists
         // for the life of the shell, and repeating it would put the key in the transcript twice.
@@ -113,6 +122,32 @@ final class AgentSession {
         messages.append(Message(author: .agent, text: answer.text.isEmpty
             ? "\(agent.launch) printed nothing" : answer.text))
         if !answer.ok { problem = answer.text }
+    }
+
+    /// Ask the agent over its gateway: one line out, its events and answer back.
+    private func askGateway(_ prompt: String) async {
+        guard let address = HermesGateway.Address(AgentSettings.shared.value(for: agent)) else {
+            problem = "\(agent.setting?.name ?? "the gateway") first"
+            return
+        }
+        if gateway == nil || gatewayAddress != AgentSettings.shared.value(for: agent) {
+            await gateway?.close()
+            gateway = HermesGateway(address: address)
+            gatewayAddress = AgentSettings.shared.value(for: agent)
+        }
+        do {
+            let objects = try await gateway!.ask(prompt)
+            // The answer is the object carrying our id; everything before it is Hermes
+            // narrating, which belongs in the transcript as notes rather than as the reply.
+            for event in objects.dropLast() {
+                if let text = event.text { messages.append(Message(author: .note, text: text)) }
+            }
+            let reply = objects.last?.text ?? objects.last?.raw ?? "the gateway said nothing"
+            messages.append(Message(author: .agent, text: reply))
+        } catch {
+            problem = "\(error)"
+            messages.append(Message(author: .agent, text: "\(error)"))
+        }
     }
 
     /// Run one command and wait for it to finish, answering with what it printed and whether it

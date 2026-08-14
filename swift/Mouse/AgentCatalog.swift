@@ -23,6 +23,9 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     let launch: String
     /// The executable the install is expected to leave behind, used to answer "is it here yet".
     let executable: String
+    /// Whether this agent is reached over its own gateway rather than run as a local CLI.
+    let usesGateway: Bool
+
     /// The one thing this agent needs before it can answer, saved between launches.
     let setting: Setting?
 
@@ -69,6 +72,7 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         install: "npm i -g @anthropic-ai/claude-code@1.0.128",
         launch: "claude",
         executable: "claude",
+        usesGateway: false,
         // Without a key the CLI waits for a login it cannot get on a phone, which is what a
         // three-minute silence and no output turned out to be.
         setting: Setting(name: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…",
@@ -92,6 +96,9 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // `{"id": …, "command": …}` in, events out. A protocol, not a screen.
         launch: "python -m tui_gateway.entry",
         executable: "hermes",
+        // Reached, not run: there is no pip on the device, so the local install can never
+        // happen and the gateway is the whole of how Hermes works here.
+        usesGateway: true,
         // Not a key: an address. Hermes runs on a machine and this is a client of its gateway,
         // which is the shape its Telegram front-end already has.
         setting: Setting(name: "HERMES_GATEWAY", placeholder: "host:port",
@@ -105,6 +112,8 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // The way in is the one Telegram uses: Hermes runs on a machine, and the chat front-end
         // is a CLIENT of its gateway. That is a network client this container can be, and it is
         // the next thing to build here.
-        blocked: "no pip on the device — reachable by running hermes elsewhere and connecting to its gateway"
+        // Not blocked any more: with an address it works, and without one the setup field is
+        // what asks for it. The wall was never Hermes — it was having nowhere to send to.
+        blocked: nil
     )
 }

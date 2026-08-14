@@ -12,6 +12,24 @@ import Network
 /// The protocol is newline-delimited JSON, one object per line: `{"id": n, "command": "…"}` out,
 /// objects back carrying the same `id`. Anything without our id is an unsolicited event — Hermes
 /// streams those while it works — and is handed over as it arrives.
+/// One-shot latch for a callback that may fire repeatedly.
+private final class ResumeLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    /// True exactly once, for the first caller.
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if used { return false }
+        used = true
+        return true
+    }
+    /// Give the claim back — the state was one we do not act on.
+    func release() {
+        lock.lock(); defer { lock.unlock() }
+        used = false
+    }
+}
+
 actor HermesGateway {
     struct Address {
         let host: String
@@ -32,6 +50,17 @@ actor HermesGateway {
                 port = 8765
             }
         }
+    }
+
+    /// One line from the gateway, typed. A dictionary of `Any` cannot cross an actor boundary,
+    /// and the caller only ever wanted these three things out of it.
+    struct Event: Sendable {
+        /// Present on the reply to a command; absent on the events streamed while it works.
+        let id: Int?
+        /// Whatever the object carried as human text — `message`, `output` or `text`.
+        let text: String?
+        /// The line as it arrived, for anything this does not model.
+        let raw: String
     }
 
     enum Failure: Error, CustomStringConvertible {
@@ -67,14 +96,14 @@ actor HermesGateway {
 
     /// Send one command and collect everything the gateway says until it answers with our id.
     /// Returns the lines in order — the streamed events first, the reply last.
-    func ask(_ command: String, timeout: TimeInterval = 120) async throws -> [[String: Any]] {
+    func ask(_ command: String, timeout: TimeInterval = 120) async throws -> [Event] {
         let connection = try await connect()
         let id = nextID
         nextID += 1
         let request = try JSONSerialization.data(withJSONObject: ["id": id, "command": command])
         try await write(connection, request + Data("\n".utf8))
 
-        var collected: [[String: Any]] = []
+        var collected: [Event] = []
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let line = try await readLine(connection)
@@ -82,9 +111,14 @@ actor HermesGateway {
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw Failure.malformed(line)
             }
-            collected.append(object)
+            let event = Event(
+                id: object["id"] as? Int,
+                text: object["message"] as? String ?? object["output"] as? String
+                    ?? object["text"] as? String,
+                raw: line)
+            collected.append(event)
             // Ours is the one carrying our id. Everything before it is Hermes narrating.
-            if let answered = object["id"] as? Int, answered == id { return collected }
+            if event.id == id { return collected }
         }
         return collected
     }
@@ -100,29 +134,28 @@ actor HermesGateway {
         }
         let connection = NWConnection(host: endpoint, port: port, using: .tcp)
         self.connection = connection
+        // The state handler runs on the connection's queue and can fire more than once — a
+        // continuation resumed twice is a crash, so the latch is a locked object rather than a
+        // captured `var`, which strict concurrency rightly refuses.
+        let once = ResumeLatch()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var resumed = false
             connection.stateUpdateHandler = { state in
-                guard !resumed else { return }
+                guard once.claim() else { return }
                 switch state {
                 case .ready:
-                    resumed = true
                     continuation.resume()
                 case .failed(let error):
-                    resumed = true
                     continuation.resume(throwing: Failure.unreachable(error.localizedDescription))
                 // `.waiting` is Network.framework saying "refused, but I will keep trying" — it
                 // retries a closed port forever and never reaches `.failed`. For a gateway the
                 // user just typed an address for, the first refusal IS the answer; retrying in
                 // silence is the hang, not the resilience.
                 case .waiting(let error):
-                    resumed = true
                     continuation.resume(throwing: Failure.unreachable(error.localizedDescription))
                 case .cancelled:
-                    resumed = true
                     continuation.resume(throwing: Failure.closed)
                 default:
-                    break
+                    once.release()
                 }
             }
             connection.start(queue: .global(qos: .userInitiated))

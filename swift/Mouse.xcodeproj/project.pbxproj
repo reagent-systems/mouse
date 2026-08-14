@@ -43,6 +43,7 @@
 		A52CEF1173F42F8DC093484F /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CAF2A8E2ACEBCC2AD01EF2D /* AgentSession.swift */; };
 		A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D1234209A0254A06BB8E915 /* Terminal.swift */; };
 		AE73F32B4C2FD5EF9A76994C /* GitGraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B299975B30C229DCCCB015 /* GitGraphView.swift */; };
+		B03B1AC8133E5F55DD9ABA85 /* HermesGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B0D0E646F88FDB7F73C91B5 /* HermesGateway.swift */; };
 		B12D6FC121DECB1E6754DA64 /* NodeSockets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */; };
 		B49F9E6B29A297122BCFDF37 /* AgentCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */; };
 		B61F67FB754D9C300BB0C97D /* Runtimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A5E9B8DC023465151C2E32 /* Runtimes.swift */; };
@@ -76,6 +77,7 @@
 		5A7FDD7DE14447F992EB32D3 /* Shell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Shell.swift; sourceTree = "<group>"; };
 		5B23A8EB8050D0EFED1198A4 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
+		6B0D0E646F88FDB7F73C91B5 /* HermesGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesGateway.swift; sourceTree = "<group>"; };
 		7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundView.swift; sourceTree = "<group>"; };
 		8F7BC5BA08EEADE47C5B986F /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
@@ -124,6 +126,7 @@
 				B7281C456E2B06017F80854A /* GitHubAuth.swift */,
 				CAE14386F75AAF0B835E324C /* GitHubPush.swift */,
 				A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */,
+				6B0D0E646F88FDB7F73C91B5 /* HermesGateway.swift */,
 				FB01C138F6E8F2292E1D3EC4 /* Info.plist */,
 				38F529B8B560B4DB034F9698 /* MouseApp.swift */,
 				EA007916E1B80807354B7C21 /* NodeBrotli.swift */,
@@ -264,6 +267,7 @@
 				43DE04D20436A9255595520C /* GitHubAuth.swift in Sources */,
 				5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */,
 				13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */,
+				B03B1AC8133E5F55DD9ABA85 /* HermesGateway.swift in Sources */,
 				3C060871009B04B75DD57460 /* MouseApp.swift in Sources */,
 				2E7F41B7E5FCEFF2ECC7AA09 /* NodeBrotli.swift in Sources */,
 				26A30C412C7EDEC903FAB619 /* NodeDNS.swift in Sources */,
