@@ -1,5 +1,45 @@
 # Goal: Hermes Agent and Claude Code both hold a real conversation in the Agent container
 
+## THE ARCHITECTURE (user-set, 2026-08-14): Hermes runs INSIDE Mouse; Mouse is its tool surface
+
+The user's words: "We should think of the mouse app as a scoped tool/skill/mcp
+exposed for the hermes agent running inside of mouse." And, before that: "I
+never, ever, ever told you to run hermes on my mac. I told you, embed hermes
+into the application." Both are binding. No gateway on the Mac, no external
+service. The Mac is the build host, nothing else.
+
+Measured facts the design must live with (on-device CPython 3.14.6 wasi):
+
+    import ssl        FAILS      import sqlite3    FAILS
+    import asyncio    ok         import zipfile    ok
+    pip / ensurepip   ABSENT     compiled extensions: wasi CPython cannot
+                                 dlopen, so pydantic-core / cryptography /
+                                 psutil can never load, ever
+
+Why the MCP framing is not just preference but the ONLY shape that fits: the
+agent loop (prompt assembly, tool dispatch, response parsing) is pure Python and
+runs fine on wasi. Everything wasi CANNOT do — TLS, processes, the filesystem —
+Mouse already does natively: URLSession, msh, the workspace. Hermes is built for
+exactly this split: it already abstracts shell backends (local/Docker/SSH) and
+speaks MCP to external tools. Mouse becomes one more backend — the phone.
+
+Build order:
+1. **Wheel installer** (`pip install <pure-python-wheel>`): PyPI JSON API +
+   wheels are zips + `Runtimes.swift` already has the zip reader. Registers a
+   site-packages dir the wasm Python imports from. Gate it on installing a real
+   pure wheel (e.g. `python-dotenv`) and importing it on device.
+2. **The stdio bridge**: Mouse exposes tools to the Python process as an MCP
+   server over the WASI stdio we already own — msh exec, workspace read/write,
+   and an `llm.complete` (or HTTP-proxy) tool so model calls ride URLSession's
+   TLS instead of Python's missing ssl.
+3. **Hermes profile for Mouse**: strip to the loop — its own lazy_deps/extras
+   mechanism is the hook. Native-dep imports (pydantic-core via pydantic v2)
+   are the hard part; measure exactly which import fails first on device and
+   solve THAT, not the predicted list.
+
+Verify each stage on the simulator; a stage that only works with something
+running on the Mac fails the user's constraint by definition.
+
 ## Stop condition
 
 Both agents, in the container, in a chat interface, actually working:
