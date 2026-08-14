@@ -164,10 +164,27 @@ THIS WILL HIT A VALID KEY TOO. A real key also gets past validation into the
 same request. Do not tell the user Claude Code is one key away again until this
 is understood.
 
-Next: find what the CLI's request actually does. Run it with the engine's own
-diagnostics, or reproduce the same request shape through `fetch`/`https` in a
-small script and see whether it returns. `verify/fetchtypes`, `verify/reqsock`
-and `verify/neterrors` are the harnesses nearest this.
+RULED OUT: the network. Both clients reach the real API and come back fast,
+with the same request shape the CLI would send:
+
+    fetch          → 0.2s, 401, {"type":"authentication_error", …}
+    https.request  → 0.2s, 401, same body
+
+So HTTPS, TLS, DNS and the response path all work under the engine, and whatever
+1.0.128 does after passing its own key validation, it is not a plain request to
+api.anthropic.com that stalls.
+
+Next, in order of cheapness:
+  1. Capture what the CLI PRINTS while hanging — the run returns nothing, but a
+     `NodeProgram`'s transcript may hold stderr that the screenless path drops.
+  2. Look for a second host: onboarding, telemetry, statsig, or an OAuth refresh
+     the CLI does once a key is present. A request to a host that never answers
+     would look exactly like this.
+  3. Look for a wait on stdin. With a key it may be prompting — a trust or
+     onboarding confirmation — and the screenless path gives it a stdin that
+     never delivers.
+(A probe artefact to avoid repeating: a `setTimeout` left running keeps the
+engine's loop alive after the work resolves, which looks like a hang and is not.)
 
 ## Superseded — the launch path (fixed, and it was real)
 
