@@ -16,6 +16,25 @@ whatever configuration a first run needs (model, API key, backend) is saved and
 does not have to be redone every launch. Build that setup into the container
 rather than requiring the user to go to the Terminal container.
 
+## Next step, designed — the Hermes gateway client
+
+The container asks for `HERMES_GATEWAY host:port` and then refuses to use it,
+because Hermes is marked blocked for having no local install. That is
+incoherent: the address is exactly what makes it NOT blocked. `blocked` should
+be conditional — no gateway configured means unusable, a configured gateway
+means usable — and `send()` should take a different path entirely for it:
+
+- Claude Code: run the CLI locally, as now.
+- Hermes: open a socket to `HERMES_GATEWAY`, write `{"id": n, "command": …}` as
+  one line, read event lines back, map them onto messages. No install, no
+  launch, no terminal. `tui_gateway/server.py` (`dispatch`, `write_json`) is the
+  protocol and `hermes_cli/telegram_managed_bot.py` is a working front-end to
+  copy the shape from.
+
+Verify it against a STUB that speaks the protocol before asking the user to run
+the real thing — a fake gateway on the Mac proves the client without needing
+their Python environment or their keys.
+
 ## Where it actually stands (measured, not assumed)
 
 The container renders and the picker works. Neither agent runs. Sending "Hello"
@@ -25,19 +44,26 @@ with Hermes selected produced, on the user's own device:
     pip install hermes-agent          ← the install note
     (no output)                       ← the agent message
 
-So `AgentSession.send` ran the install line and got nothing back, then ran the
-launch line and got nothing back. Three candidates, none yet checked:
+That was three separate faults, and all three are now found and fixed:
 
-- **Is there a `pip` at all?** Python arrives as CPython wasm32-wasi through
-  `pkg install python`. Whether that build has a working `pip`, and whether
-  msh resolves it, is unverified. `verify/pkgpython` is the harness that knows.
-- **`transcriptTail` may be lying.** It slices after the LAST `.command` line;
-  if the run produced no lines, or the command echo is the last line, it
-  returns "" and the container prints `(no output)` over a real failure. It
-  should distinguish "the program said nothing" from "the program never ran".
-- **The launch command is a module path.** `python -m tui_gateway.entry` only
-  resolves if the package installed and `python` is on `$PATH` — phase E notes
-  `$PATH` is one of the missing pieces.
+- **There is no pip.** `pkg install python` lands CPython 3.14.6 and that build
+  answers `python -m pip --version` with "No module named pip" and `ensurepip`
+  the same. No Python package can be installed on this device. Hermes is
+  therefore a network client or nothing.
+- **The reporting was lying.** `run` waited only on `isRunning`, which a
+  full-screen program leaves false, and counted an error line as success. Both
+  fixed; it now shows the command's own words.
+- **Scoped bins were never registered.** `npm i -g @anthropic-ai/claude-code`
+  said "added 1 packages" and left no `claude`, because the top-level test read
+  "no slash after node_modules/" and `@scope/name` has one. Fixed, gated in
+  `verify/scopedbin`. `claude` now resolves and starts — and then holds the
+  terminal as a program with no output, which is the auth wall below.
+
+## The two things only the user can supply
+
+- **An `ANTHROPIC_API_KEY`** for Claude Code. The field is in the container and
+  saves to the keychain. Do not go looking for a key on the machine.
+- **A running Hermes gateway** to point at, from `~/Projects/hermes-agent`.
 
 ## What is already known — do not re-derive
 
