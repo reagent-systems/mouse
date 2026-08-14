@@ -174,15 +174,27 @@ So HTTPS, TLS, DNS and the response path all work under the engine, and whatever
 1.0.128 does after passing its own key validation, it is not a plain request to
 api.anthropic.com that stalls.
 
-Next, in order of cheapness:
-  1. Capture what the CLI PRINTS while hanging — the run returns nothing, but a
-     `NodeProgram`'s transcript may hold stderr that the screenless path drops.
-  2. Look for a second host: onboarding, telemetry, statsig, or an OAuth refresh
-     the CLI does once a key is present. A request to a host that never answers
-     would look exactly like this.
-  3. Look for a wait on stdin. With a key it may be prompting — a trust or
-     onboarding confirmation — and the screenless path gives it a stdin that
-     never delivers.
+RULED OUT TOO: startup, and stdin. With the key exported, in the same session
+that then hangs:
+
+    claude --version   0s   1.0.128 (Claude Code)
+    claude --help      0s   full usage text
+
+So the CLI loads, parses, reads its config and prints — none of that waits on a
+screen, a prompt or a stdin that never arrives. The hang is specific to `-p`
+actually making its request.
+
+Which leaves ONE suspect, and it fits every measurement: `claude -p` asks for a
+STREAMING response. A plain request/response works (0.2s, 401, both clients);
+what has not been tested is reading a body that arrives in chunks over time.
+With no key the CLI never gets that far — it fails validation and prints in 3s.
+With a key it opens the stream, and that is exactly where it stops.
+
+Next, and it needs no API key: serve SSE from a local server and read it through
+the engine's `fetch` — `res.body.getReader()` and the async-iteration form both.
+If the reader never ends, that is the bug, and it is ours. `verify/sse` and
+`verify/webstreams` are the harnesses nearest it and neither covers a chunked
+body arriving with real delays between chunks.
 (A probe artefact to avoid repeating: a `setTimeout` left running keeps the
 engine's loop alive after the work resolves, which looks like a hang and is not.)
 
