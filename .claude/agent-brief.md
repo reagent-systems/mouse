@@ -28,10 +28,21 @@ Build order:
    wheels are zips + `Runtimes.swift` already has the zip reader. Registers a
    site-packages dir the wasm Python imports from. Gate it on installing a real
    pure wheel (e.g. `python-dotenv`) and importing it on device.
-2. **The stdio bridge**: Mouse exposes tools to the Python process as an MCP
-   server over the WASI stdio we already own — msh exec, workspace read/write,
-   and an `llm.complete` (or HTTP-proxy) tool so model calls ride URLSession's
-   TLS instead of Python's missing ssl.
+2. **The bridge — files per step, not resident stdio.** Measured constraints:
+   `wasi.start` is SYNCHRONOUS (the engine's JS thread is blocked while Python
+   runs, so nothing async can answer it mid-run) and `fd_read` on stdin answers
+   0 bytes — instant EOF. So a resident MCP-over-stdio process is not possible
+   on today's engine. What is: ONE PYTHON INVOCATION PER AGENT STEP.
+     - Swift writes `bridge/turn.json` (conversation so far + tool results).
+     - Python runs the loop step, exits having written `bridge/out.json`:
+       either `{"answer": …}` or `{"tool": "llm.complete"|"shell"|"read_file"|…,
+       "args": …}`.
+     - Swift executes the tool natively — model calls on URLSession (real TLS),
+       shell on msh, files on the workspace — appends the result, reruns Python.
+   State lives in files between steps, which is also how Hermes already
+   persists sessions. Cold-start per step is the price (~1–3s, measured on the
+   pip probes); a resident process is an optimization for after the engine
+   grows blocking stdin, not a prerequisite.
 3. **Hermes profile for Mouse**: strip to the loop — its own lazy_deps/extras
    mechanism is the hook. Native-dep imports (pydantic-core via pydantic v2)
    are the hard part; measure exactly which import fails first on device and
