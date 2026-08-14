@@ -10,7 +10,7 @@ M="$(cd "$T/../swift/Mouse" && pwd)"
 NODE_SET="$M/NodeEngine.swift $M/NodeSockets.swift $M/NodeWatch.swift $M/NodeKeys.swift $M/NodeScrypt.swift $M/NodeBrotli.swift $M/NodeDNS.swift $M/PackageManager.swift"
 TERM_SET="$NODE_SET $M/TerminalScreen.swift $M/TerminalWidth.swift $M/TerminalPrograms.swift"
 # msh installs language runtimes (`pkg install python`), so the shell set carries them.
-SHELL_SET="$M/Shell.swift $M/ShellLanguage.swift $M/GitCore.swift $M/GitRemote.swift $M/Runtimes.swift $TERM_SET"
+SHELL_SET="$M/Shell.swift $M/ShellLanguage.swift $M/GitCore.swift $M/GitRemote.swift $M/Runtimes.swift $M/PipInstaller.swift $TERM_SET"
 # The terminal SESSION — scrollback, engines, the run/interrupt path — without its SwiftUI views.
 SESSION_SET="$SHELL_SET $M/TerminalSession.swift"
 name="$1"; dir="$T/$name"

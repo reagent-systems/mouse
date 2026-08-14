@@ -8,7 +8,7 @@ never, ever, ever told you to run hermes on my mac. I told you, embed hermes
 into the application." Both are binding. No gateway on the Mac, no external
 service. The Mac is the build host, nothing else.
 
-Measured facts the design must live with (on-device CPython 3.14.6 wasi):
+Measured facts the design must live with (on-device CPython wasi — 3.12.0 since the zlib swap):
 
     import ssl        FAILS      import sqlite3    FAILS
     import asyncio    ok         import zipfile    ok

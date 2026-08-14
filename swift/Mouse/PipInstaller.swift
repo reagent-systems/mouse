@@ -27,12 +27,20 @@ enum Pip {
 
     /// Install packages and their dependency closure. `names` accepts `name` or `name==1.2.3`.
     /// Every landed wheel is reported through `note`; already-present packages are skipped.
+    ///
+    /// A package that CANNOT land (no pure wheel) is fatal only when it was asked for by name.
+    /// A transitive one is skipped and reported instead — one compiled dep deep in a closure
+    /// used to abandon everything still queued behind it, so `openai` lost its own dependencies
+    /// to hermes's pyyaml. Whether a skipped dep actually matters is measured at import time,
+    /// which is a real answer; refusing the whole closure was a guess.
     static func install(_ names: [String], into destination: URL? = nil,
                         note: @escaping @Sendable (String) -> Void) async throws {
         let target = destination ?? sitePackages
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let requested = Set(names.map { canonicalize(split($0).name) })
         var queue = names
         var seen: Set<String> = []
+        var skipped: [String] = []
         while !queue.isEmpty {
             let spec = queue.removeFirst()
             let (name, pin) = split(spec)
@@ -42,15 +50,23 @@ enum Pip {
                 note("\(canonical) is already installed")
                 continue
             }
-            let wheel = try await resolve(canonical, pin: pin)
-            note("fetching \(canonical) \(wheel.version) (\(wheel.size / 1024) kB)")
-            let data = try await download(wheel.url)
-            try ZipArchive.extract(data, to: target)
-            note("installed \(canonical) \(wheel.version)")
-            // The wheel's own METADATA names what it needs. Markered requirements (extras,
-            // other platforms, older pythons) are skipped whole: the one platform this runs on
-            // is exactly the one no marker anticipates, and an extra is opt-in by definition.
-            queue.append(contentsOf: try requirements(of: canonical, version: wheel.version, in: target))
+            do {
+                let wheel = try await resolve(canonical, pin: pin)
+                note("fetching \(canonical) \(wheel.version) (\(wheel.size / 1024) kB)")
+                let data = try await download(wheel.url)
+                try ZipArchive.extract(data, to: target)
+                note("installed \(canonical) \(wheel.version)")
+                // The wheel's own METADATA names what it needs. Markered requirements (extras,
+                // other platforms, older pythons) are skipped whole: the one platform this runs
+                // on is the one no marker anticipates, and an extra is opt-in by definition.
+                queue.append(contentsOf: try requirements(of: canonical, version: wheel.version, in: target))
+            } catch where !requested.contains(canonical) {
+                skipped.append(canonical)
+                note("skipped \(canonical): \("\(error)".replacingOccurrences(of: "pip: ", with: ""))")
+            }
+        }
+        if !skipped.isEmpty {
+            note("skipped \(skipped.count): \(skipped.joined(separator: ", ")) — imports needing them will say so")
         }
     }
 

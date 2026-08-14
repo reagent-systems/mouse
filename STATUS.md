@@ -27,7 +27,7 @@ numbers some of the same ground differently; the mapping is noted per row.
 | **D** — web toolchain | tsc, bundlers, dev servers | **Largely done**, as a byproduct of G | tsc + `tsc --watch`, webpack, esbuild-wasm, vite dev (HMR) and vite build (rollup-wasm) all gated (`verify/esbuild`, `devserver`, `hmr`, `firstrun`). A real SvelteKit project runs `npm run dev` on the device: starts once, pre-bundles its 20 dependencies, and answers a curl from the Mac with HTTP 200 and the rendered 33 kB page. Remaining piece is the Preview surface (phase C) |
 | **B** — WebView JIT | Move JS/wasm execution into WKWebView for JIT speed | **Not started — optional** | Measured: everything runs interpreted; the JIT buys speed, not capability (system.md:2094). No longer a prerequisite for anything |
 | **C** — Preview container | In-app viewing surface for what dev servers serve; LAN hosting | **Not started** | The server half works (vite serves clients outside the app — gated in `verify/devserver`); no in-app viewer exists |
-| **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads the official CPython wasm32-wasi build, hash-checks it, unpacks it (zip reader written here — iOS has no `unzip`) and `python hello.py` runs CPython 3.14.6. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
+| **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads a CPython wasm32-wasi build (VMware Labs' 3.12.0, chosen because it compiles zlib in — the official 3.14 build does not, and no zlib kills `import openai` before any agent code runs), hash-checks it, unpacks it and `python hello.py` runs it. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
 
 ## On the device
 
@@ -51,8 +51,8 @@ launches and is driven on the iPhone 16 Pro simulator
   an opinion about how it prints was printing its raw fields instead.
   Gated in `verify/inspectopts` and `verify/nodeprint`.
 - **Python runs on the phone.** `pkg install python` prints `fetching
-  python 3.14.6 (14 MB)` / `installed python 3.14.6`; `python -c` prints
-  `python 3.14.6 on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
+  python … ` / `installed python`; `python -c` prints
+  its version `on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
   `python hello.py` prints what the script prints. Screenshots at 23:48 on
   2026-07-31.
 - **A node server runs on the phone and answers real requests from off the
