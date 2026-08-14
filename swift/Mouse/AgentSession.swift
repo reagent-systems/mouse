@@ -146,6 +146,16 @@ final class AgentSession {
                 return
             }
         }
+        // The agent itself is a download too — its wheel and the pure part of its closure.
+        if !FileManager.default.fileExists(
+            atPath: Pip.sitePackages.appendingPathComponent("run_agent.py").path) {
+            messages.append(Message(author: .note, text: agent.install))
+            let landed = await run(agent.install, on: terminal)
+            guard landed.ok else {
+                problem = landed.text.isEmpty ? "\(agent.name) did not install" : landed.text
+                return
+            }
+        }
         let root = terminal.root
         let bridge = root.appendingPathComponent(".hermes-bridge", isDirectory: true)
         // The step depends on the runtime shims (ssl, threads); pip lays them when IT runs,

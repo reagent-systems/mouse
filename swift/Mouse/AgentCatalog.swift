@@ -91,7 +91,7 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         id: "hermes",
         name: "Hermes Agent",
         runtime: .python,
-        install: "pip install hermes-agent",
+        install: "pip install hermes-agent==0.19.0",
         // Hermes is a TUI, and a TUI is the gap this container does not host. It does not need
         // one: `tui_gateway` is how Hermes already talks to front-ends that are not a terminal —
         // the Telegram bot is one — speaking newline-delimited JSON over stdio,
