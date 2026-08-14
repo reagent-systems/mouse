@@ -12,11 +12,13 @@
 		13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */; };
 		2023624DA13C04BD2E402AF1 /* NodeScrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */; };
 		20348E0EC1CA68374BEB45D0 /* NodeEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */; };
+		228B8E59CDB542455422113B /* Dictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1954B09B2BF0B9E3B5AE309D /* Dictation.swift */; };
 		26A30C412C7EDEC903FAB619 /* NodeDNS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 933C6240D3EEE403A1818213 /* NodeDNS.swift */; };
 		2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */; };
 		2999E7E33AFEDC980ED858F8 /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00872DE418EF1E21957DA2B3 /* TerminalSession.swift */; };
 		2E7F41B7E5FCEFF2ECC7AA09 /* NodeBrotli.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA007916E1B80807354B7C21 /* NodeBrotli.swift */; };
 		2F0EE6F9105610221954933F /* TerminalWidth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */; };
+		347909752F3F2A92DC40B57A /* AgentContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D6E033D6CB86160958F3E35 /* AgentContainerView.swift */; };
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
 		3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B23A8EB8050D0EFED1198A4 /* Workspace.swift */; };
 		3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */; };
@@ -37,9 +39,11 @@
 		8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503560AF5D76D20B38402E7F /* ContentView.swift */; };
 		95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */; };
 		A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7FDD7DE14447F992EB32D3 /* Shell.swift */; };
+		A52CEF1173F42F8DC093484F /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CAF2A8E2ACEBCC2AD01EF2D /* AgentSession.swift */; };
 		A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D1234209A0254A06BB8E915 /* Terminal.swift */; };
 		AE73F32B4C2FD5EF9A76994C /* GitGraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B299975B30C229DCCCB015 /* GitGraphView.swift */; };
 		B12D6FC121DECB1E6754DA64 /* NodeSockets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */; };
+		B49F9E6B29A297122BCFDF37 /* AgentCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */; };
 		B61F67FB754D9C300BB0C97D /* Runtimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A5E9B8DC023465151C2E32 /* Runtimes.swift */; };
 		CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5808E2C3F3EE351EB16E5DD /* AppFont.swift */; };
 		DC525882F3784C97FF273D57 /* IBMPlexMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */; };
@@ -54,12 +58,16 @@
 		080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellLanguage.swift; sourceTree = "<group>"; };
 		0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeWatch.swift; sourceTree = "<group>"; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
+		119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCatalog.swift; sourceTree = "<group>"; };
 		179217813E4A44F9859669C5 /* GitCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCore.swift; sourceTree = "<group>"; };
 		18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeScrypt.swift; sourceTree = "<group>"; };
+		1954B09B2BF0B9E3B5AE309D /* Dictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dictation.swift; sourceTree = "<group>"; };
+		1CAF2A8E2ACEBCC2AD01EF2D /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
 		2D1234209A0254A06BB8E915 /* Terminal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Terminal.swift; sourceTree = "<group>"; };
 		38F529B8B560B4DB034F9698 /* MouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseApp.swift; sourceTree = "<group>"; };
 		3A88D15C6B606882BE9F472E /* PackageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageManager.swift; sourceTree = "<group>"; };
+		3D6E033D6CB86160958F3E35 /* AgentContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentContainerView.swift; sourceTree = "<group>"; };
 		503560AF5D76D20B38402E7F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		525AB48D09A783EF07137189 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		5A7FDD7DE14447F992EB32D3 /* Shell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Shell.swift; sourceTree = "<group>"; };
@@ -92,6 +100,9 @@
 		3F51774E2273014186C920CC /* Mouse */ = {
 			isa = PBXGroup;
 			children = (
+				119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */,
+				3D6E033D6CB86160958F3E35 /* AgentContainerView.swift */,
+				1CAF2A8E2ACEBCC2AD01EF2D /* AgentSession.swift */,
 				C5808E2C3F3EE351EB16E5DD /* AppFont.swift */,
 				7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */,
 				0E73E50FC2D809F76902185C /* AsciiArt.swift */,
@@ -101,6 +112,7 @@
 				E2B92464EFB49888F46248A5 /* Assets.xcassets */,
 				A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */,
 				503560AF5D76D20B38402E7F /* ContentView.swift */,
+				1954B09B2BF0B9E3B5AE309D /* Dictation.swift */,
 				8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */,
 				179217813E4A44F9859669C5 /* GitCore.swift */,
 				F5B299975B30C229DCCCB015 /* GitGraphView.swift */,
@@ -227,6 +239,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B49F9E6B29A297122BCFDF37 /* AgentCatalog.swift in Sources */,
+				347909752F3F2A92DC40B57A /* AgentContainerView.swift in Sources */,
+				A52CEF1173F42F8DC093484F /* AgentSession.swift in Sources */,
 				CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */,
 				5430CDE9E255DBF12E04A8E5 /* AppSettings.swift in Sources */,
 				8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */,
@@ -235,6 +250,7 @@
 				2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */,
 				5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */,
 				8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */,
+				228B8E59CDB542455422113B /* Dictation.swift in Sources */,
 				0A6F9CDD9D58550755EB4B28 /* ForegroundView.swift in Sources */,
 				6E38F06822105BFE7C367992 /* GitCore.swift in Sources */,
 				AE73F32B4C2FD5EF9A76994C /* GitGraphView.swift in Sources */,
