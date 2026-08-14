@@ -16,7 +16,31 @@ whatever configuration a first run needs (model, API key, backend) is saved and
 does not have to be redone every launch. Build that setup into the container
 rather than requiring the user to go to the Terminal container.
 
-## CORRECTION — the gateway's transport is stdio, and the network face is WebSocket
+## THE DOCS SETTLE IT — talk to Hermes's API Server, not its TUI gateway
+
+From the official docs (hermes-agent.nousresearch.com/docs/user-guide/messaging),
+which should have been read before any of this was built:
+
+- `hermes gateway` is the MESSAGING gateway, and it works by **polling platform
+  APIs outbound** — Telegram, Discord, Slack, Signal, Matrix, ntfy and a long
+  list of others. It exposes no inbound endpoint.
+- **There is no generic or custom channel.** Only named, pre-built platforms.
+  So "be a front-end like Telegram is" is not available: Telegram works because
+  Hermes has Telegram-specific code and polls Telegram's servers.
+- The docs name a separate **"Open WebUI + API Server"** integration. That is
+  the supported way a custom client talks to Hermes, and it is almost certainly
+  an OpenAI-shaped chat-completions endpoint, which this app can speak trivially.
+
+NEXT: fetch the Open WebUI / API Server integration page for its exact path,
+port, payload and auth, then point the container at that. Do not build any more
+transport before reading it.
+
+`tui_gateway` was the wrong target twice over: it is stdio with a WebSocket
+dashboard face, and it is an internal detail rather than a documented interface.
+`HermesGateway`'s framing and `Event` type may still be reusable; its transport
+almost certainly is not.
+
+## Superseded twice — the TCP client and the WebSocket plan
 
 `HermesGateway` speaks newline-delimited JSON over **TCP**, and it is proven
 against a stub — streamed events, split writes, advancing ids, refused
