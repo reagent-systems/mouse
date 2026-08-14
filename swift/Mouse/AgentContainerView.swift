@@ -15,6 +15,7 @@ struct AgentContainerView: View {
     @State private var pickerOpen = false
     @State private var settings = AgentSettings.shared
     @State private var setupDraft = ""
+    @State private var addressDraft = ""
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -37,6 +38,14 @@ struct AgentContainerView: View {
             // A blocked agent does not ask for setup. Hermes needs a gateway address, but
             // nothing here can use one yet, and a field that collects a value the app ignores is
             // worse than no field — it reads as "configure me and I will work".
+            // The address asks on its own terms, not behind the key. Gating it on the key being
+            // empty meant it could never be reached once a key was saved — and a keychain entry
+            // survives deleting the app, so "reinstall to fix it" does not work either. Submit an
+            // address, even the default one, and the row goes.
+            if session.agent.usesGateway, session.agent.blocked == nil,
+               settings.address(for: session.agent).isEmpty {
+                addressField
+            }
             if let setting = session.agent.setting, session.agent.blocked == nil,
                !settings.isSet(for: session.agent) {
                 setup(setting)
@@ -140,6 +149,29 @@ struct AgentContainerView: View {
         .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
+    private var addressField: some View {
+        HStack(spacing: 8) {
+            Text("address")
+                .font(.custom(AppFont.asciiName, size: 10))
+                .opacity(0.4)
+            TextField("127.0.0.1:8642", text: $addressDraft)
+                .font(.custom(AppFont.asciiName, size: 12))
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                .onSubmit { settings.setAddress(addressDraft, for: session.agent) }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.bottom, 6)
+        .onAppear { addressDraft = settings.address(for: session.agent) }
+        .onChange(of: session.agent.id) { _, _ in
+            addressDraft = settings.address(for: session.agent)
+        }
+    }
+
     /// The one field an agent needs before it can answer, shown only while it is empty. Saved
     /// on submit and not asked again — a key retyped every launch is a container nobody opens.
     private func setup(_ setting: CodingAgent.Setting) -> some View {
@@ -159,6 +191,11 @@ struct AgentContainerView: View {
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
             .onSubmit {
+                // Commit the address too: someone who fills both fields and presses return once
+                // should not silently lose the one they did not submit.
+                if session.agent.usesGateway, !addressDraft.isEmpty {
+                    settings.setAddress(addressDraft, for: session.agent)
+                }
                 settings.set(setupDraft, for: session.agent)
                 setupDraft = ""
             }
