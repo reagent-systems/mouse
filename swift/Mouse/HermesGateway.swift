@@ -111,6 +111,13 @@ actor HermesGateway {
                 case .failed(let error):
                     resumed = true
                     continuation.resume(throwing: Failure.unreachable(error.localizedDescription))
+                // `.waiting` is Network.framework saying "refused, but I will keep trying" — it
+                // retries a closed port forever and never reaches `.failed`. For a gateway the
+                // user just typed an address for, the first refusal IS the answer; retrying in
+                // silence is the hang, not the resilience.
+                case .waiting(let error):
+                    resumed = true
+                    continuation.resume(throwing: Failure.unreachable(error.localizedDescription))
                 case .cancelled:
                     resumed = true
                     continuation.resume(throwing: Failure.closed)
