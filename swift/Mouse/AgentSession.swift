@@ -40,6 +40,9 @@ final class AgentSession {
     private(set) var problem: String?
 
     private static let agentKey = "agentContainerAgent"
+    /// How long a single command may hold the terminal before the container gives up on it.
+    /// Installing an agent is a real download, so this is minutes rather than seconds.
+    private static let patience: TimeInterval = 180
 
     init() {
         let saved = UserDefaults.standard.string(forKey: Self.agentKey)
@@ -110,7 +113,20 @@ final class AgentSession {
     private func run(_ command: String, on terminal: TerminalSession) async -> (ok: Bool, text: String) {
         let before = terminal.lines.count
         guard terminal.run(command) else { return (false, "the terminal is busy") }
+        // BOUNDED. An installed bin that msh launches interactively becomes a full-screen
+        // program and owns the terminal until it decides to leave — `claude -p` does exactly
+        // that and was still holding it after ninety seconds with nothing printed. An unbounded
+        // wait here is a container that spins forever with no way to say why.
+        let deadline = Date().addingTimeInterval(Self.patience)
         while terminal.isRunning || terminal.program != nil {
+            if Date() > deadline {
+                terminal.interrupt()
+                let printed = Array(terminal.lines[before...]).filter { $0.kind != .command }
+                    .map(\.text).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                return (false, printed.isEmpty
+                    ? "\(command) is still running after \(Int(Self.patience))s and printed nothing"
+                    : printed)
+            }
             try? await Task.sleep(for: .milliseconds(120))
         }
         let produced = Array(terminal.lines[before...]).filter { $0.kind != .command }
