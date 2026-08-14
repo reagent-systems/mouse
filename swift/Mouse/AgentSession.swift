@@ -38,8 +38,6 @@ final class AgentSession {
     private(set) var installed: Bool?
     /// Whether this session has already exported the agent's saved setting.
     private var exported = false
-    private var gateway: HermesGateway?
-    private var gatewayAddress: String?
     private(set) var working = false
     /// Shown above the input when the last attempt could not proceed.
     private(set) var problem: String?
@@ -124,25 +122,25 @@ final class AgentSession {
         if !answer.ok { problem = answer.text }
     }
 
-    /// Ask the agent over its gateway: one line out, its events and answer back.
+    /// Ask the agent over its API server: the whole conversation up, one answer back.
     private func askGateway(_ prompt: String) async {
-        guard let address = HermesGateway.Address(AgentSettings.shared.value(for: agent)) else {
-            problem = "\(agent.setting?.name ?? "the gateway") first"
+        guard let api = AgentAPI(address: AgentSettings.shared.address(for: agent),
+                                 key: AgentSettings.shared.value(for: agent)) else {
+            problem = "that is not an address"
             return
         }
-        if gateway == nil || gatewayAddress != AgentSettings.shared.value(for: agent) {
-            await gateway?.close()
-            gateway = HermesGateway(address: address)
-            gatewayAddress = AgentSettings.shared.value(for: agent)
+        // The endpoint is stateless, so the exchange so far IS the context. Notes are ours, not
+        // the conversation's, and sending them back would have the agent answering its own
+        // status lines.
+        let history: [(role: String, content: String)] = messages.compactMap { message in
+            switch message.author {
+            case .you: return ("user", message.text)
+            case .agent: return ("assistant", message.text)
+            case .note: return nil
+            }
         }
         do {
-            let objects = try await gateway!.ask(prompt)
-            // The answer is the object carrying our id; everything before it is Hermes
-            // narrating, which belongs in the transcript as notes rather than as the reply.
-            for event in objects.dropLast() {
-                if let text = event.text { messages.append(Message(author: .note, text: text)) }
-            }
-            let reply = objects.last?.text ?? objects.last?.raw ?? "the gateway said nothing"
+            let reply = try await api.complete(history)
             messages.append(Message(author: .agent, text: reply))
         } catch {
             problem = "\(error)"

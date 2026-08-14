@@ -44,6 +44,19 @@ final class AgentSettings {
     /// in the keychain and UserDefaults, which `@Observable` cannot see into.
     private(set) var version = 0
 
+    /// Where the agent's API server is, or "" for the documented default. Not a secret and not
+    /// yet asked for in the UI: `hermes gateway` binds 127.0.0.1:8642 and the simulator can
+    /// reach that, so the default is right until someone runs it elsewhere.
+    func address(for agent: CodingAgent) -> String {
+        UserDefaults.standard.string(forKey: "agent.\(agent.id).address") ?? ""
+    }
+
+    func setAddress(_ value: String, for agent: CodingAgent) {
+        UserDefaults.standard.set(value.trimmingCharacters(in: .whitespaces),
+                                  forKey: "agent.\(agent.id).address")
+        version += 1
+    }
+
     /// The shell line that puts the setting where the agent's own CLI looks for it. `export` is
     /// how a person would do it, and the agent is being driven the way a person would.
     func exportLine(for agent: CodingAgent) -> String? {

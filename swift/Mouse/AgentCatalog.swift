@@ -101,8 +101,11 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         usesGateway: true,
         // Not a key: an address. Hermes runs on a machine and this is a client of its gateway,
         // which is the shape its Telegram front-end already has.
-        setting: Setting(name: "HERMES_GATEWAY", placeholder: "host:port",
-                         secret: false, exported: true),
+        // The key, not the address. Hermes requires bearer auth on every deployment including
+        // the loopback bind, and `hermes gateway` serves 127.0.0.1:8642 by default — which the
+        // simulator reaches — so the key is the one thing that cannot be defaulted.
+        setting: Setting(name: "API_SERVER_KEY", placeholder: "the key from your profile's .env",
+                         secret: true, exported: false),
         // MEASURED, not guessed: `pkg install python` lands CPython 3.14.6, and that wasi build
         // answers `python -m pip --version` with "No module named pip" and `ensurepip` with "No
         // module named ensurepip". There is no way to install a Python package on this device
