@@ -69,10 +69,24 @@ Build order:
        with the pyc cache on ({root}/pycache — PYTHONDONTWRITEBYTECODE is
        gone); cold ≈ 6. Startup cost is now the biggest UX problem, ahead of
        any correctness one.
-     - NEXT: drive hermes's own loop through the bridge instead of the
-       12-line driver, one invocation per step. The loop entry to use, and
-       what state it needs on disk, is the remaining research in
-       ~/Projects/hermes-agent (run_agent.main? hermes_state?).
+     - NEXT, designed — RECORD-AND-REPLAY through `AIAgent.chat`. The loop's
+       front door is `AIAgent(base_url=…, api_key=…, model=…).chat(message)
+       -> str` (run_agent.py:5295), synchronous. Its transport is the openai
+       SDK, which cannot import here (pydantic-core), and wasi Python has no
+       sockets regardless — so the step driver installs a FAKE `openai`
+       module in sys.modules before importing hermes. The fake's
+       chat.completions.create():
+         1. consults the recorded responses in turn.json, returning them in
+            order for calls 1..n-1 (cheap objects with .choices[0].message);
+         2. on the first UNRECORDED call, raises a Capture carrying the
+            request; the driver writes it as {"tool": "llm.complete"} and
+            exits; Mouse executes it on URLSession and reruns with the
+            response appended.
+       Each step deterministically replays prior turns without network — the
+       price is re-running python logic per step, on top of the ≈4 minute
+       warm import, which makes the STARTUP COST the thing to solve next:
+       likely one resident python invocation per CONVERSATION (not per step)
+       once the engine grows blocking stdin, or import pruning.
    Walls known ahead from the dependency list: pydantic-core (via pydantic,
    compiled Rust) and psutil (compiled C). pydantic imports lazily in the
    openai SDK's typed paths — how far the loop gets without it is a
