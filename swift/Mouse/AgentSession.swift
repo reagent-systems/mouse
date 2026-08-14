@@ -160,7 +160,10 @@ final class AgentSession {
     /// An error line is a failure, and its text is the most useful thing on the screen.
     private func run(_ command: String, on terminal: TerminalSession) async -> (ok: Bool, text: String) {
         let before = terminal.lines.count
-        guard terminal.run(command) else { return (false, "the terminal is busy") }
+        // Screenless: this container has no terminal grid, and an agent handed one never
+        // returns. `claude -p` answers in three seconds down this path and hangs forever down
+        // the other.
+        guard terminal.run(command, screenless: true) else { return (false, "the terminal is busy") }
         // BOUNDED. An installed bin that msh launches interactively becomes a full-screen
         // program and owns the terminal until it decides to leave — `claude -p` does exactly
         // that and was still holding it after ninety seconds with nothing printed. An unbounded
