@@ -144,7 +144,37 @@ That was three separate faults, and all three are now found and fixed:
   `verify/scopedbin`. `claude` now resolves and starts — and then holds the
   terminal as a program with no output, which is the auth wall below.
 
-## CLAUDE CODE DOES NOT HANG FOR WANT OF A KEY
+## CLAUDE CODE WORKS — OUR LAUNCH PATH IS THE BUG
+
+The experiment below settled it. Piping anything into the command defeats
+`if interactive, stdin.isEmpty` in `runNode`, which sends it down the path that
+RETURNS output instead of handing it to `launchProgram` as a screen-owning
+program:
+
+    echo '' | claude -p 'say hi'        3s
+      Invalid API key · Please run /login
+
+Three seconds, and a real answer from the real CLI. It starts fine on this
+engine, reaches its auth check and reports it in words. Every hang was our
+launch path: `runInstalledBin` passes `interactive: true`, the bin becomes a
+`NodeProgram` that owns the terminal, and a print-mode invocation that wants to
+write and exit sits there forever.
+
+THE FIX belongs in how the agent is invoked, not in a pipe trick. `-p` is a
+non-interactive invocation and should be dispatched as one. Options, best first:
+  1. Let `TerminalSession.run` take a non-interactive flag that `AgentSession`
+     sets, threading through to `runNode`'s `interactive:`.
+  2. Decide interactivity from the command — a bin invoked with `-p`/`--print`
+     is not a screen program. Narrower, and guesses at CLI conventions.
+Do NOT ship `echo '' | …` as the mechanism; it works by accident of the
+stdin test and would confuse the next reader.
+
+One loose end: `export ANTHROPIC_API_KEY=… && echo '' | claude -p …` hung for
+63s where the same pipeline without the `export &&` returned in 3. Something
+about the compound puts it back on the interactive path — worth understanding,
+because `AgentSession` exports before it launches.
+
+## Superseded — "does not hang for want of a key"
 
 Measured, so nobody spends a key finding out:
 
