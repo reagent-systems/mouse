@@ -17,6 +17,12 @@ struct AgentContainerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            Text("\(session.agent.name.lowercased()) on \(deck?.workspace?.repoFullName ?? "no project")")
+                .font(.custom(AppFont.asciiName, size: 11))
+                .opacity(0.55)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Color.clear.frame(height: 12)
             exchange
             Spacer(minLength: 0)
             if let problem = session.problem ?? dictation.problem {
@@ -46,9 +52,11 @@ struct AgentContainerView: View {
                         row(message).id(message.id)
                     }
                     if session.working {
-                        Text("…")
-                            .font(.custom(AppFont.asciiName, size: 13))
-                            .opacity(0.5)
+                        ThinkingOrbLabel(state: .working, text: "working…")
+                    } else if dictation.listening {
+                        ThinkingOrbLabel(state: .listening, text: "agent listening…")
+                    } else if session.messages.isEmpty {
+                        ThinkingOrbLabel(state: .idle, text: "ask \(session.agent.name.lowercased())")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -155,11 +163,6 @@ struct AgentContainerView: View {
 
     private var statusLine: some View {
         HStack(spacing: 8) {
-            Text(deck?.workspace?.repoFullName ?? "no project")
-                .font(.custom(AppFont.asciiName, size: 10))
-                .opacity(0.4)
-                .lineLimit(1)
-                .truncationMode(.middle)
             Spacer(minLength: 0)
             Button {
                 pickerOpen.toggle()

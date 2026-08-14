@@ -35,6 +35,7 @@
 		5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAE14386F75AAF0B835E324C /* GitHubPush.swift */; };
 		6E38F06822105BFE7C367992 /* GitCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 179217813E4A44F9859669C5 /* GitCore.swift */; };
 		7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2B92464EFB49888F46248A5 /* Assets.xcassets */; };
+		772F0D445CEB88040FF63AE2 /* ThinkingOrb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0193B1BE4E33E64176275AE0 /* ThinkingOrb.swift */; };
 		8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E73E50FC2D809F76902185C /* AsciiArt.swift */; };
 		8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503560AF5D76D20B38402E7F /* ContentView.swift */; };
 		95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */; };
@@ -52,6 +53,7 @@
 
 /* Begin PBXFileReference section */
 		00872DE418EF1E21957DA2B3 /* TerminalSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSession.swift; sourceTree = "<group>"; };
+		0193B1BE4E33E64176275AE0 /* ThinkingOrb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThinkingOrb.swift; sourceTree = "<group>"; };
 		03A5E9B8DC023465151C2E32 /* Runtimes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Runtimes.swift; sourceTree = "<group>"; };
 		03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeSockets.swift; sourceTree = "<group>"; };
 		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -138,6 +140,7 @@
 				525AB48D09A783EF07137189 /* TerminalScreen.swift */,
 				00872DE418EF1E21957DA2B3 /* TerminalSession.swift */,
 				B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */,
+				0193B1BE4E33E64176275AE0 /* ThinkingOrb.swift */,
 				5B23A8EB8050D0EFED1198A4 /* Workspace.swift */,
 				BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */,
 				70539524C5912AC66F3C3EA3 /* Fonts */,
@@ -275,6 +278,7 @@
 				5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */,
 				2999E7E33AFEDC980ED858F8 /* TerminalSession.swift in Sources */,
 				2F0EE6F9105610221954933F /* TerminalWidth.swift in Sources */,
+				772F0D445CEB88040FF63AE2 /* ThinkingOrb.swift in Sources */,
 				3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */,
 				DD34307A47D2C84BD6C63C19 /* WorkspaceViews.swift in Sources */,
 			);
