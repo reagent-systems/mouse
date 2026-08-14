@@ -16,7 +16,31 @@ whatever configuration a first run needs (model, API key, backend) is saved and
 does not have to be redone every launch. Build that setup into the container
 rather than requiring the user to go to the Terminal container.
 
-## Next step, designed — the Hermes gateway client
+## CORRECTION — the gateway's transport is stdio, and the network face is WebSocket
+
+`HermesGateway` speaks newline-delimited JSON over **TCP**, and it is proven
+against a stub — streamed events, split writes, advancing ids, refused
+addresses, and a real conversation rendered in the container. But `tui_gateway`
+does not listen on TCP. `tui_gateway/server.py` drives the agent over a child
+process's **stdin/stdout** (`proc.stdin.write(json.dumps({"id", "command"}) +
+"\n")`), and its network face is the **WebSocket** layer in `tui_gateway/ws.py`,
+served by uvicorn, which is what the dashboard attaches to.
+
+So the line protocol is right and the socket is wrong. Two ways to close it, and
+the first is the honest one:
+
+1. **Speak the WebSocket layer.** Hermes already serves it for a non-terminal
+   front-end, which is the same argument that makes the Telegram bot work.
+   `HermesGateway` keeps its framing and its `Event`; only the transport under
+   `connect`/`write`/`receive` changes. Read `tui_gateway/ws.py` for the URL
+   shape and whatever handshake it expects.
+2. A stdio-to-TCP bridge on the host — fewer changes here, but it asks the user
+   to run a shim, which is a worse product than talking to what Hermes serves.
+
+The TCP path stays useful either way: it is what the stub gate exercises, and it
+is the fallback for anyone who does run a bridge.
+
+## Superseded — the original gateway client design
 
 The container asks for `HERMES_GATEWAY host:port` and then refuses to use it,
 because Hermes is marked blocked for having no local install. That is
