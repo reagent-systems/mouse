@@ -287,11 +287,22 @@ argv reaches programs intact (`argv=-p|hi|--output-format|json` measured), so
 the flag arrives and something later rejects the mode. `--print 'hi'` HANGS
 instead of exiting mute — a real divergence from `-p`, unexplained.
 
-Next moves, in order of cheapness:
-1. `claude --debug -p 'hi'` on the LIVE path, polling lines — 2.x's debug may
-   say why print mode was refused (TTY check? stdin heuristic?).
-2. Read `.claude/telemetry/1p_failed_events.*` — event_type names what ran.
-3. The `--print` hang: interrupt it and read the ledger, which now names hosts.
+SOLVED ONE LAYER DOWN: the telemetry files named `tengu_unhandled_rejection`
+on every run, a first-registered listener caught the real object, and it was
+OUR OWN spawnSync guard — the engine REFUSED the `timeout` option on
+principle, claude 2.x probes ripgrep with spawnSync{timeout}, and the throw
+became the silent startup death. The guard now refuses only `input` (the one
+genuinely unimplementable option); an ignored timeout on an
+already-completed synchronous run is the truth, not a lie.
+
+STILL MUTE after that fix: `-p` no longer dies of the rejection but produces
+no output and no API request; under require() the module loads and returns
+without running main. Next diagnostic: the in-place cli.js instrumentation
+pattern works (prepend hooks under a MOUSE_HOOK marker) — extend it to log
+the promise chain around its main() entry, or diff what main-detection reads
+(process.argv[1] vs import.meta) between real node and the engine. The
+telemetry-reading recipe (JSONL in 1p_failed_events.*, event_data.event_name)
+is the fastest signal for each new layer.
 
 ## Superseded — the statsig stream as an engine bug
 

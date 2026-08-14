@@ -12146,11 +12146,16 @@ final class NodeEngine: @unchecked Sendable {
           },
           spawnSync: function(command, argv, options) {
             options = options || {};
-            // These cannot be honoured on the msh path — there is no live child to feed, kill or
-            // measure, because a synchronous run reports what the command PRODUCED. Saying so
-            // beats accepting them: an ignored `input` leaves a program waiting for output that
-            // depends on stdin it thinks it sent, and an ignored `timeout` never fires.
-            for (const unsupported of ['input', 'timeout', 'maxBuffer', 'killSignal']) {
+            // `input` cannot be honoured on the msh path — there is no live child to feed, and
+            // an ignored `input` leaves a program parsing output that depends on stdin it
+            // thinks it sent. The OTHER guard rails (`timeout`, `maxBuffer`, `killSignal`) are
+            // accepted and ignored now: a synchronous msh run has already COMPLETED by the
+            // time they could matter, so a timeout that never fires is the truth, not a lie —
+            // and refusing them killed real programs. claude-code 2.x probes ripgrep with
+            // spawnSync{timeout}, the refusal became an unhandled rejection, and the CLI died
+            // silently at startup. Guarding against a hang that cannot happen cost the whole
+            // program.
+            for (const unsupported of ['input']) {
               if (options[unsupported] !== undefined) {
                 throw Object.assign(
                   new Error("child_process.spawnSync's `" + unsupported + "` option is not " +
