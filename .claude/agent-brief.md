@@ -144,11 +144,35 @@ That was three separate faults, and all three are now found and fixed:
   `verify/scopedbin`. `claude` now resolves and starts — and then holds the
   terminal as a program with no output, which is the auth wall below.
 
-## The two things only the user can supply
+## CLAUDE CODE DOES NOT HANG FOR WANT OF A KEY
 
-- **An `ANTHROPIC_API_KEY`** for Claude Code. The field is in the container and
-  saves to the keychain. Do not go looking for a key on the machine.
-- **A running Hermes gateway** to point at, from `~/Projects/hermes-agent`.
+Measured, so nobody spends a key finding out:
+
+    npm install -g @anthropic-ai/claude-code@1.0.128      added 1 packages / bin: claude
+    export ANTHROPIC_API_KEY=sk-ant-invalid-for-testing && claude -p 'say hi'
+        42s, still running, nothing printed
+
+An invalid key should be REJECTED, quickly and in words. Instead the CLI takes
+the terminal as a full-screen program and never comes back, exactly as it did
+with no key at all. So authentication is not the wall — something in 1.0.128's
+startup does not complete on this engine, and a real key will not change it.
+
+Where to look next: msh runs an installed bin through `runInstalledBin` with
+`interactive: true`, which hands it to `context.launchProgram` as a `NodeProgram`
+that owns the screen and returns immediately. `-p` is supposed to be the
+non-interactive mode, so either the CLI is not taking that path, or it is
+waiting on a stdin/TTY that never delivers. Run it NON-interactively — the same
+call with `interactive: false` goes through `engine.run` and returns output —
+and compare. That one experiment separates "our launch path is wrong" from
+"the CLI cannot start here".
+
+## The one thing only the user can supply
+
+- **A running `hermes gateway`** and its profile's `API_SERVER_KEY`. The client,
+  the key field and the address field are all built and gated; nothing else is
+  needed for Hermes to answer.
+
+Claude Code needs no key from anyone until the hang above is understood.
 
 ## What is already known — do not re-derive
 
