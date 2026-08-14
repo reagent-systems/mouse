@@ -277,6 +277,22 @@ Also true: 2.1.98 on real node used the MAC'S OAuth login despite an env key
 being set — on device there is no such fallback, so a real key in the field
 remains the auth story once the spin is fixed.
 
+## WHERE 2.1.98 STANDS after the five fixes (transpiler guard, stream/consumers,
+## stream/web, Symbol.dispose, rename(2))
+
+`--version` prints; `-p 'hi'` runs to completion, exits rc=0, prints NOTHING,
+and sends NOTHING (a stand-in base_url logged no request). Its own session
+record says `"kind":"interactive"` for a `-p` run — it never took print mode.
+argv reaches programs intact (`argv=-p|hi|--output-format|json` measured), so
+the flag arrives and something later rejects the mode. `--print 'hi'` HANGS
+instead of exiting mute — a real divergence from `-p`, unexplained.
+
+Next moves, in order of cheapness:
+1. `claude --debug -p 'hi'` on the LIVE path, polling lines — 2.x's debug may
+   say why print mode was refused (TTY check? stdin heuristic?).
+2. Read `.claude/telemetry/1p_failed_events.*` — event_type names what ran.
+3. The `--print` hang: interrupt it and read the ledger, which now names hosts.
+
 ## Superseded — the statsig stream as an engine bug
 
 The interrupt ledger answered on its second use:
