@@ -190,28 +190,36 @@ what has not been tested is reading a body that arrives in chunks over time.
 With no key the CLI never gets that far — it fails validation and prints in 3s.
 With a key it opens the stream, and that is exactly where it stops.
 
-TESTED, and the answer is better than the question. Reading a chunked body with
-real delays works exactly right:
+TESTED. Reading a chunked body with real delays works exactly right:
 
     headers at 0.0s status=200
       chunk 1 at 0.0s … chunk 4 at 1.2s
     reader DONE at 1.6s after 4 chunks
 
-But THE PROCESS NEVER EXITED. The work finished in 1.6 seconds and the run had
-to be killed. That is the true shape of this bug, and it explains every symptom:
-a program that completes its work and never exits looks identical to one that
-hangs, and the container only shows output when the run COMPLETES — so a
-finished-but-unexited `claude -p` prints nothing, forever.
+and the process exits on its own afterwards. Both forms do:
 
-So the question is no longer "does streaming work" but "what does a consumed
-streamed body leave ref'd in the event loop". A socket, a reader, or a stream
-that stays a reason to keep running. `NodeEngine`'s exit logic is
-handle-counting: find what a streamed response registers and never releases.
-`verify/streamlife` and `verify/httpclose` are the harnesses nearest it.
+    text()          exited after 2s
+    getReader()     exited after 1s
 
-Worth checking first, because it is one line: whether the same probe with a
-NON-streamed body (`await r.text()`) exits on its own. If it does, the leak is
-in the streaming path specifically.
+An earlier note here claimed the process never exited and built a whole theory
+on it. That was MY HARNESS lying: the watchdog printed "KILLED" unconditionally
+after its sleep, whether or not the process was still alive. The probe had
+already finished. Streaming is fine, exiting is fine, and no theory should be
+built on a message a test prints regardless of outcome.
+
+SO THE CLAUDE `-p` HANG IS STILL UNEXPLAINED. Eliminated by measurement so far:
+the missing key, the launch path (real bug, fixed, not this), the `&&` compound,
+the network (fetch and https.request both 0.2s to the real API), startup
+(`--version` and `--help` instant WITH a key set), stdin, and now streaming and
+event-loop exit.
+
+What has NOT been looked at: what the CLI does between passing validation and
+issuing its request. It writes state — `~/.claude`-style config, onboarding
+flags, a project trust record. A write to a path the workspace filesystem
+handles differently, or a lock/retry around one, would fit: instant without a
+key because validation short-circuits first, slow with one because that path is
+only reached when the key looks usable. Instrument the engine's fs calls during
+the hang and see what it touches last.
 (A probe artefact to avoid repeating: a `setTimeout` left running keeps the
 engine's loop alive after the work resolves, which looks like a hang and is not.)
 
