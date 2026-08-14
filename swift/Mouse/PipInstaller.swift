@@ -25,6 +25,24 @@ enum Pip {
         RuntimeStore.root.appendingPathComponent("python/site-packages", isDirectory: true)
     }
 
+    /// Standard-library holes this wasi build has that PURE code can paper over at import
+    /// time. Laid down whenever pip touches the site-packages dir and refreshed every time:
+    /// `import ssl` is something half the ecosystem does defensively — asyncio itself pulls it
+    /// in — and an import that explodes on arrival hides code that would run fine delegating
+    /// its network to Mouse. USE of the shim refuses in words.
+    private static let stdlibShims: [(file: String, source: String)] = [
+        ("ssl.py", "# This CPython wasi build has no _ssl and can never load one. Python-side TLS does not\n# exist here BY DESIGN: network with TLS is Mouse's, reached through the agent's tools.\n# This shim exists so `import ssl` — which half the ecosystem does defensively — succeeds,\n# and any actual USE says what is going on instead of pretending.\nclass SSLError(OSError): pass\nclass SSLCertVerificationError(SSLError): pass\nclass SSLZeroReturnError(SSLError): pass\nclass SSLWantReadError(SSLError): pass\nclass SSLWantWriteError(SSLError): pass\nclass SSLSyscallError(SSLError): pass\nclass SSLEOFError(SSLError): pass\nCertificateError = SSLCertVerificationError\n\nCERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = 0, 1, 2\nPROTOCOL_TLS, PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER = 2, 16, 17\nHAS_SNI = False\nHAS_ALPN = False\nOP_NO_COMPRESSION = 0x20000\nOP_NO_TICKET = 0x4000\n\nclass TLSVersion:\n    MINIMUM_SUPPORTED = -2\n    TLSv1_2 = 771\n    TLSv1_3 = 772\n    MAXIMUM_SUPPORTED = -1\n\ndef _refuse(*_a, **_k):\n    raise SSLError(\"no TLS in this Python — network runs through Mouse's tools\")\n\nclass SSLContext:\n    def __init__(self, protocol=PROTOCOL_TLS_CLIENT, *a, **k):\n        self.protocol = protocol\n        self.check_hostname = True\n        self.verify_mode = CERT_REQUIRED\n        self.minimum_version = TLSVersion.TLSv1_2\n        self.maximum_version = TLSVersion.MAXIMUM_SUPPORTED\n        self.options = 0\n    def load_default_certs(self, *a, **k): pass\n    def load_verify_locations(self, *a, **k): pass\n    def load_cert_chain(self, *a, **k): pass\n    def set_ciphers(self, *a, **k): pass\n    def set_alpn_protocols(self, *a, **k): pass\n    wrap_socket = _refuse\n    wrap_bio = _refuse\n\ndef create_default_context(*a, **k):\n    return SSLContext()\n\ndef _create_unverified_context(*a, **k):\n    return SSLContext()\n\nclass SSLObject: pass\nclass MemoryBIO:\n    def __init__(self): self._eof = False\n    @property\n    def pending(self): return 0\n    @property\n    def eof(self): return self._eof\n    def read(self, *a): return b\"\"\n    def write(self, *a): _refuse()\n    def write_eof(self): self._eof = True\n\nclass Purpose:\n    SERVER_AUTH = \"1.3.6.1.5.5.7.3.1\"\n    CLIENT_AUTH = \"1.3.6.1.5.5.7.3.2\"\n\nOPENSSL_VERSION = \"mouse-ssl-shim (no TLS; network is Mouse's)\"\nOPENSSL_VERSION_INFO = (0, 0, 0, 0, 0)\nOPENSSL_VERSION_NUMBER = 0\nCHANNEL_BINDING_TYPES = []\nVERIFY_DEFAULT = 0\nVERIFY_X509_STRICT = 0x20\nVERIFY_X509_TRUSTED_FIRST = 0x8000\ndef match_hostname(cert, hostname): _refuse()\ndef DER_cert_to_PEM_cert(der): _refuse()\ndef PEM_cert_to_DER_cert(pem): _refuse()\nclass SSLSocket:\n    def __getattr__(self, name): _refuse()\n\nwrap_socket = _refuse\nget_default_verify_paths = lambda: None\n"),
+        ("webbrowser.py", "# Not in this wasi build's stdlib zip. There is no browser to open on this side anyway —\n# the container shows URLs to the user; opening one is a Mouse affordance, not Python's.\nclass Error(Exception): pass\n\ndef open(url, new=0, autoraise=True):\n    return False\ndef open_new(url): return open(url, 1)\ndef open_new_tab(url): return open(url, 2)\ndef get(using=None): raise Error(\"no browser inside the agent runtime\")\ndef register(*a, **k): pass\n"),
+        ("sitecustomize.py", "# Startup patches for holes in this wasi build, imported by `site` on every run.\n# wasi has no threads, and the build omits concurrent.futures.thread entirely. An executor\n# that runs the callable INLINE at submit() is the truthful single-threaded degradation:\n# same Future surface, work done on the only thread there is.\nimport sys, types\nimport concurrent.futures as _cf\n\n_thread_mod = types.ModuleType('concurrent.futures.thread')\n\nclass ThreadPoolExecutor(_cf.Executor):\n    def __init__(self, max_workers=None, thread_name_prefix=\"\", *a, **k):\n        self._shutdown = False\n    def submit(self, fn, /, *args, **kwargs):\n        future = _cf.Future()\n        try:\n            future.set_result(fn(*args, **kwargs))\n        except BaseException as error:\n            future.set_exception(error)\n        return future\n    def map(self, fn, *iterables, timeout=None, chunksize=1):\n        return map(fn, *iterables)\n    def shutdown(self, wait=True, *, cancel_futures=False):\n        self._shutdown = True\n\n_thread_mod.ThreadPoolExecutor = ThreadPoolExecutor\nsys.modules['concurrent.futures.thread'] = _thread_mod\n_cf.ThreadPoolExecutor = ThreadPoolExecutor\n"),
+    ]
+
+    static func layShims(in target: URL) {
+        for shim in stdlibShims {
+            try? shim.source.write(to: target.appendingPathComponent(shim.file),
+                                   atomically: true, encoding: .utf8)
+        }
+    }
+
     /// Install packages and their dependency closure. `names` accepts `name` or `name==1.2.3`.
     /// Every landed wheel is reported through `note`; already-present packages are skipped.
     ///
@@ -37,6 +55,7 @@ enum Pip {
                         note: @escaping @Sendable (String) -> Void) async throws {
         let target = destination ?? sitePackages
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        layShims(in: target)
         let requested = Set(names.map { canonicalize(split($0).name) })
         var queue = names
         var seen: Set<String> = []

@@ -57,13 +57,22 @@ Build order:
      - `Path.home()` needed a HOME: Runtimes.json sets `HOME=/`, so agent
        state (`~/.hermes`) lands in the WORKSPACE — per-project agent state,
        which fits Mouse.
-     - CURRENT WALL: `import run_agent` HANGS — 319s, zero output, no error.
-       Something in the import chain blocks forever. Next measurement:
-       `python -X importtime -c "import run_agent"` on the LIVE terminal path
-       (not screenless — that only shows output at completion), polling lines;
-       the last import started before the silence names the module. Suspects:
-       a socket call at import (wasi has none), or a wasi syscall our shim
-       leaves unanswered.
+     - The "hang" was a CRAWL: -X importtime on the live path showed imports
+       streaming at hundreds of ms each. The chain then died at real lines,
+       each now answered: `import ssl` (auth.py:26) → a pure ssl shim that
+       imports clean and refuses at use; `import webbrowser` → shimmed, there
+       is no browser on that side; `concurrent.futures.thread` (the build
+       omits it; wasi has no threads) → an INLINE executor via sitecustomize.
+     - **`import run_agent` SUCCEEDS on the device.** Warnings only: a plugin
+       fails on hashlib.scrypt (this build's hashlib lacks it), and the
+       futures patch logs an unknown-location note. Warm import ≈ 4 minutes
+       with the pyc cache on ({root}/pycache — PYTHONDONTWRITEBYTECODE is
+       gone); cold ≈ 6. Startup cost is now the biggest UX problem, ahead of
+       any correctness one.
+     - NEXT: drive hermes's own loop through the bridge instead of the
+       12-line driver, one invocation per step. The loop entry to use, and
+       what state it needs on disk, is the remaining research in
+       ~/Projects/hermes-agent (run_agent.main? hermes_state?).
    Walls known ahead from the dependency list: pydantic-core (via pydantic,
    compiled Rust) and psutil (compiled C). pydantic imports lazily in the
    openai SDK's typed paths — how far the loop gets without it is a
