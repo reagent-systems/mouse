@@ -43,10 +43,21 @@ Build order:
    persists sessions. Cold-start per step is the price (~1–3s, measured on the
    pip probes); a resident process is an optimization for after the engine
    grows blocking stdin, not a prerequisite.
-3. **Hermes profile for Mouse**: strip to the loop — its own lazy_deps/extras
-   mechanism is the hook. Native-dep imports (pydantic-core via pydantic v2)
-   are the hard part; measure exactly which import fails first on device and
-   solve THAT, not the predicted list.
+3. **Hermes profile for Mouse** — MEASURED now, not predicted. `pip install
+   hermes-agent==0.19.0` lands EIGHT packages clean, hermes-agent's own 9.9 MB
+   pure wheel included, plus openai 3.0.0, httpx, rich, tenacity, fire, dotenv,
+   certifi. The closure stops at pyyaml (no pure wheel published). On device:
+     - `import openai` dies on `import zlib` — the wasi CPython BUILD ships no
+       zlib module. Engine-side gap, not a packaging one: candidates are a
+       different CPython wasi artifact that includes zlib, or a shim.
+     - `import run_agent` dies at hermes's own `utils.py:14 import yaml` —
+       the pyyaml wall. Candidates: a pure-yaml substitute under the `yaml`
+       name (the PackageManager.wasmSubstitutes pattern, for wheels), or
+       hermes's ruamel.yaml (pure) with an adapter.
+   Walls known ahead from the dependency list: pydantic-core (via pydantic,
+   compiled Rust) and psutil (compiled C). pydantic imports lazily in the
+   openai SDK's typed paths — how far the loop gets without it is a
+   measurement, not a guess.
 
 Verify each stage on the simulator; a stage that only works with something
 running on the Mac fails the user's constraint by definition.
