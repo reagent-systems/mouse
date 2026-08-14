@@ -17,7 +17,10 @@ name="$1"; dir="$T/$name"
 # Pick the source set from what the harness actually REFERENCES, not from its name. Keying on
 # names meant every new terminal or shell harness failed to build until someone remembered to
 # add it here — which is a verification gap wearing the costume of a typo.
-if grep -qE 'TerminalSession' "$dir/main.swift" 2>/dev/null; then
+# The agent container's gateway client stands alone — a socket and a line protocol, no engine.
+if grep -qE 'HermesGateway' "$dir/main.swift" 2>/dev/null; then
+  SRC="$M/HermesGateway.swift"
+elif grep -qE 'TerminalSession' "$dir/main.swift" 2>/dev/null; then
   SRC="$SESSION_SET"
 elif grep -qE 'Shell\(|ShellLanguage|GitCore|GitRemote' main_probe 2>/dev/null || \
    grep -qE 'Shell\(|ShellLanguage|GitCore|GitRemote' "$dir/main.swift" 2>/dev/null; then

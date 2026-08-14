@@ -68,8 +68,6 @@ struct AgentContainerView: View {
                     }
                     if session.working {
                         ThinkingOrbLabel(state: .working, text: "working…")
-                    } else if session.messages.isEmpty, !dictation.listening {
-                        ThinkingOrbLabel(state: .idle, text: "ask \(session.agent.name.lowercased())")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
