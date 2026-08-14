@@ -213,6 +213,19 @@ the network (fetch and https.request both 0.2s to the real API), startup
 (`--version` and `--help` instant WITH a key set), stdin, and now streaming and
 event-loop exit.
 
+MEASURED SINCE: it emits NOTHING while hung. On the live path — where a program
+writes into the transcript as it goes, so partial output is visible — `claude
+--debug -p 'say hi'` produced not one line in 24 seconds. `--debug` should be
+noisy from the first moment. So it blocks BEFORE its first write, which rules
+out anything that happens after the CLI starts doing visible work, and makes an
+early await the suspect: something in its startup path that only runs when a key
+is present.
+
+Note the measurement trick, since it took three iterations to find: the
+screenless path returns output only when the run COMPLETES, so it shows nothing
+about a hang. Run the same command WITHOUT `screenless` and poll
+`session.lines` — a program emits into the transcript live.
+
 What has NOT been looked at: what the CLI does between passing validation and
 issuing its request. It writes state — `~/.claude`-style config, onboarding
 flags, a project trust record. A write to a path the workspace filesystem
