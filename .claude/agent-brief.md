@@ -239,7 +239,26 @@ That was three separate faults, and all three are now found and fixed:
   `verify/scopedbin`. `claude` now resolves and starts — and then holds the
   terminal as a program with no output, which is the auth wall below.
 
-## THE REMAINING CLAUDE CODE BUG: A KEY BEING PRESENT MAKES IT HANG
+## CLAUDE CODE: nine eliminations, and the tool the hunt needs next
+
+Everything below is measured, not reasoned:
+
+    dead base_url (http://127.0.0.1:9)     hangs the same — NOT the network target
+    net.connect to a refused port          error event in 1ms — sockets fine
+    execSync('security …') screenless      throws instantly — no bridge deadlock
+    the grid during the hang               empty, onScreen=false — no hidden TUI
+    ~/.claude.json onboarding seeded       read correctly (homedir=/), still hangs
+    fetch / https.request / streaming / exit / startup / stdin — all previously green
+
+With a key, `claude -p` awaits SOMETHING that never resolves, before its first
+write, regardless of endpoint, with every external ruled out. Blind bisection
+of a 9.4 MB minified bundle is the wrong tool. The right one is engine-side:
+a diagnostic that answers "what is this process waiting ON" — pending timers,
+sockets, unresolved host calls — dumped when a run is interrupted. That is a
+real engine feature (the streaming probe needed the same question answered),
+and it turns this class of bug from guesswork into a lookup.
+
+## Superseded — the single-suspect framing
 
 Not the compound. `export FOO=bar && echo compound-ok` returns in 0s, so `&&`
 is fine and the earlier note blaming it was wrong. What actually correlates is
