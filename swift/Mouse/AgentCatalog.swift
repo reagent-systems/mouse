@@ -68,12 +68,21 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         name: "Hermes Agent",
         runtime: .python,
         install: "pip install hermes-agent",
-        // Hermes is a TUI, and a TUI is the gap this container does not try to host. It does
-        // not need to: `tui_gateway` is how Hermes already talks to front-ends that are not a
-        // terminal — the Telegram bot is one — and it speaks newline-delimited JSON over stdio,
-        // `{"id": …, "command": …}` in, events out. That is a protocol, not a screen.
+        // Hermes is a TUI, and a TUI is the gap this container does not host. It does not need
+        // one: `tui_gateway` is how Hermes already talks to front-ends that are not a terminal —
+        // the Telegram bot is one — speaking newline-delimited JSON over stdio,
+        // `{"id": …, "command": …}` in, events out. A protocol, not a screen.
         launch: "python -m tui_gateway.entry",
         executable: "hermes",
-        blocked: nil
+        // MEASURED, not guessed: `pkg install python` lands CPython 3.14.6, and that wasi build
+        // answers `python -m pip --version` with "No module named pip" and `ensurepip` with "No
+        // module named ensurepip". There is no way to install a Python package on this device
+        // today, so `pip install hermes-agent` cannot run, and hermes-agent's own native
+        // dependencies would be the next wall behind it.
+        //
+        // The way in is the one Telegram uses: Hermes runs on a machine, and the chat front-end
+        // is a CLIENT of its gateway. That is a network client this container can be, and it is
+        // the next thing to build here.
+        blocked: "no pip on the device — reachable by running hermes elsewhere and connecting to its gateway"
     )
 }

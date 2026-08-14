@@ -77,8 +77,11 @@ final class AgentSession {
 
         if installed != true {
             messages.append(Message(author: .note, text: agent.install))
-            guard await run(agent.install, on: terminal) else {
-                problem = "\(agent.name) did not install"
+            let install = await run(agent.install, on: terminal)
+            guard install.ok else {
+                // The command's own words, not a summary of them: "command not found: pip" says
+                // what to do next and "\(agent.name) did not install" does not.
+                problem = install.text.isEmpty ? "\(agent.name) did not install" : install.text
                 return
             }
             installed = true
@@ -88,29 +91,32 @@ final class AgentSession {
         // to keep a sentence together is the difference between asking a question and running
         // the words in it as commands.
         let quoted = prompt.replacingOccurrences(of: "'", with: "'\\''")
-        let answered = await run("\(agent.launch) -p '\(quoted)'", on: terminal)
-        let reply = transcriptTail(of: terminal)
-        messages.append(Message(author: .agent, text: reply.isEmpty
-            ? (answered ? "(no output)" : "\(agent.launch) failed") : reply))
+        let answer = await run("\(agent.launch) -p '\(quoted)'", on: terminal)
+        messages.append(Message(author: .agent, text: answer.text.isEmpty
+            ? "\(agent.launch) printed nothing" : answer.text))
+        if !answer.ok { problem = answer.text }
     }
 
-    /// Run one command and wait for it to finish. `TerminalSession.run` is fire-and-forget, so
-    /// completion is observed rather than awaited — `isRunning` falling is the signal.
-    private func run(_ command: String, on terminal: TerminalSession) async -> Bool {
+    /// Run one command and wait for it to finish, answering with what it printed and whether it
+    /// FAILED. `TerminalSession.run` is fire-and-forget, so completion is observed rather than
+    /// awaited.
+    ///
+    /// Two things this got wrong, both of which turned a plain failure into `(no output)` on
+    /// screen. It waited only on `isRunning`, but a command that takes the terminal as a
+    /// full-screen `program` leaves that false — so the wait ended immediately and the next
+    /// command was refused, printing nothing at all. And it called any new line success, so
+    /// `msh: command not found: pip` counted as a successful install and the launch went ahead.
+    /// An error line is a failure, and its text is the most useful thing on the screen.
+    private func run(_ command: String, on terminal: TerminalSession) async -> (ok: Bool, text: String) {
         let before = terminal.lines.count
-        guard terminal.run(command) else { return false }
-        while terminal.isRunning {
+        guard terminal.run(command) else { return (false, "the terminal is busy") }
+        while terminal.isRunning || terminal.program != nil {
             try? await Task.sleep(for: .milliseconds(120))
         }
-        return terminal.lines.count > before
+        let produced = Array(terminal.lines[before...]).filter { $0.kind != .command }
+        let failed = produced.contains { $0.kind == .error }
+        let text = produced.map(\.text).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (!failed, text)
     }
 
-    /// Everything the last command printed: the lines after its echoed command line.
-    private func transcriptTail(of terminal: TerminalSession) -> String {
-        guard let start = terminal.lines.lastIndex(where: { $0.kind == .command }) else { return "" }
-        return terminal.lines[terminal.lines.index(after: start)...]
-            .map(\.text)
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }
