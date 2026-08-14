@@ -57,6 +57,14 @@ final class NodeEngine: @unchecked Sendable {
     private var tty: TTY?
     private let queue = DispatchQueue(label: "mouse.node", qos: .userInitiated)
     private var context: JSContext!
+    /// A hook run once, right after the JSContext exists — the extension point diagnostics
+    /// hang off. The Mac-side probes use it to arm a JSC job watchdog through dlsym'd private
+    /// API, which must never ship in the app; the app leaves both of these nil. The static
+    /// form exists because probes drive engines the SHELL creates, out of their reach.
+    var contextConfigurator: ((JSContext) -> Void)?
+    nonisolated(unsafe) static var globalContextConfigurator: ((NodeEngine, JSContext) -> Void)?
+    /// A live backtrace captured by such a diagnostic, surfaced into `err` when the run ends.
+    var watchdogBacktrace: String?
     private var virtualMachine: JSVirtualMachine!
     /// `vm` contexts, each a separate global in the same virtual machine.
     private var vmContexts: [Int: JSContext] = [:]
@@ -347,6 +355,8 @@ final class NodeEngine: @unchecked Sendable {
         // sandbox possible at all.
         virtualMachine = JSVirtualMachine()!
         context = JSContext(virtualMachine: virtualMachine)!
+        contextConfigurator?(context)
+        Self.globalContextConfigurator?(self, context)
         context.name = "mouse-node"
         var fatal: String? = nil
         var fatalValue: JSValue? = nil
@@ -492,6 +502,10 @@ final class NodeEngine: @unchecked Sendable {
         // process.exit(), or a fatal error. Anything it writes still belongs in the output.
         context.objectForKeyedSubscript("__mouseEmitExit")?.call(withArguments: [exitCode ?? 0])
 
+        if let trace = watchdogBacktrace {
+            err += "job watchdog: a single job overran and was terminated. Its live stack:\n"
+                + remapStack(trace) + "\n"
+        }
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
 
@@ -1076,7 +1090,14 @@ final class NodeEngine: @unchecked Sendable {
         }
         let renamePath: @convention(block) (String, String) -> Bool = { [weak self] from, to in
             guard let self else { return false }
-            return (try? FileManager.default.moveItem(at: self.realURL(from), to: self.realURL(to))) != nil
+            // POSIX rename, not FileManager.moveItem: rename(2) REPLACES an existing
+            // destination atomically, which is the entire point of the tmp-then-rename pattern
+            // every tool's atomic config write uses. moveItem refuses when the destination
+            // exists, and swallowing that refusal left claude-code's .claude.json.tmp.* files
+            // stranded beside a config that never updated — with rc=0 and no output, because
+            // the CLI treats its own config write as best-effort.
+            let source = self.realURL(from), destination = self.realURL(to)
+            return rename(source.path, destination.path) == 0
         }
         // statfs(2) — free space and block counts. Build tools check available space before
         // writing large artifacts, and node exports it.
@@ -2621,7 +2642,7 @@ final class NodeEngine: @unchecked Sendable {
         "fs", "path", "os", "util", "events", "buffer", "tty", "assert", "url",
         "child_process", "http", "https", "net", "crypto", "stream", "zlib",
         "readline", "readline/promises", "string_decoder", "constants", "querystring",
-        "fs/promises", "stream/promises", "process", "module", "timers", "timers/promises",
+        "fs/promises", "stream/promises", "stream/consumers", "stream/web", "process", "module", "timers", "timers/promises",
         "path/posix", "path/win32", "http2", "tls", "dns", "worker_threads", "async_hooks",
         "v8", "vm", "perf_hooks", "inspector", "dgram", "cluster", "diagnostics_channel",
         "console", "util/types", "domain", "wasi",
@@ -3425,6 +3446,15 @@ final class NodeEngine: @unchecked Sendable {
     }
 
     static func transpileESM(_ source: String, liveBindings: Bool = true) -> String {
+        // Live-binding promotion runs regex shadow scans over the WHOLE source per imported
+        // name, and ICU's matcher is superlinear on patterns like `\([^()]*name[^()]*\)`
+        // against megabyte-long minified lines — claude-code 2.1.98 loads such a chunk on its
+        // authenticated path, and a `sample` mid-hang put 2331 of 2334 ticks inside
+        // RegexMatcher::find under transpileESM. A bundle that size is a build artifact, not a
+        // hand-written module whose `export let` needs live reads; the snapshot path is the
+        // one this engine used for its whole life before live bindings, and it is correct for
+        // everything a bundler emits. Vite's biggest real chunk (2.1 MB) stays promoted.
+        let liveBindings = liveBindings && source.utf16.count < 4_000_000
         var text = source
         // Emitted BEFORE the body: function declarations are hoisted, so a cycle reaching back
         // into this module finds them, and every export reads through a getter rather than
@@ -3934,6 +3964,17 @@ final class NodeEngine: @unchecked Sendable {
       'use strict';
       const bridge = __mouse;
       globalThis.global = globalThis;
+
+      // Explicit resource management (ES2026 `using`): this JSC does not define the well-known
+      // symbols yet, and bundles compiled against them (claude-code 2.x) throw "Object not
+      // disposable" from their own helpers when the symbol lookup comes back undefined. The
+      // engine already attaches [Symbol.dispose] to timers, so the polyfill must come FIRST.
+      if (!Symbol.dispose) {
+        Object.defineProperty(Symbol, 'dispose', { value: Symbol.for('nodejs.dispose') });
+      }
+      if (!Symbol.asyncDispose) {
+        Object.defineProperty(Symbol, 'asyncDispose', { value: Symbol.for('nodejs.asyncDispose') });
+      }
 
       // ---- Buffer (Uint8Array + encodings) ----
       function utf8Encode(str) {
@@ -11630,6 +11671,37 @@ final class NodeEngine: @unchecked Sendable {
         return Stream;
       };
       coreFactories['stream/promises'] = function() { return coreRequire('stream').promises; };
+      // node:stream/consumers — the five drain-it-all helpers. Accepts node streams and web
+      // ReadableStreams alike, because callers hand it whichever they have (claude-code does).
+      coreFactories['stream/consumers'] = function() {
+        async function collect(stream) {
+          const chunks = [];
+          if (stream && typeof stream.getReader === 'function') {
+            const reader = stream.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(Buffer.from(value));
+            }
+          } else {
+            for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+          }
+          return Buffer.concat(chunks);
+        }
+        return {
+          buffer: collect,
+          text: async function(stream) { return (await collect(stream)).toString('utf8'); },
+          json: async function(stream) { return JSON.parse((await collect(stream)).toString('utf8')); },
+          arrayBuffer: async function(stream) {
+            const buf = await collect(stream);
+            return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+          },
+          blob: async function(stream) {
+            const buf = await collect(stream);
+            return new Blob([buf]);
+          },
+        };
+      };
 
       coreFactories.constants = function() { return {}; };
       coreFactories.querystring = function() {
