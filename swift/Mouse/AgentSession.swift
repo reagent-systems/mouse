@@ -30,11 +30,14 @@ final class AgentSession {
             guard agent.id != oldValue.id else { return }
             UserDefaults.standard.set(agent.id, forKey: Self.agentKey)
             installed = nil
+            exported = false
         }
     }
 
     /// Nil until asked, then the answer to "is this agent's executable here".
     private(set) var installed: Bool?
+    /// Whether this session has already exported the agent's saved setting.
+    private var exported = false
     private(set) var working = false
     /// Shown above the input when the last attempt could not proceed.
     private(set) var problem: String?
@@ -57,6 +60,7 @@ final class AgentSession {
         terminal = TerminalSession(root: root)
         messages = []
         installed = nil
+        exported = false
     }
 
     /// Ask the agent. Installs it first if this is the first time, because an agent that is not
@@ -72,11 +76,22 @@ final class AgentSession {
             problem = blocked
             return
         }
+        guard AgentSettings.shared.isSet(for: agent) else {
+            problem = "\(agent.setting?.name ?? "setup") first"
+            return
+        }
         problem = nil
         working = true
         defer { working = false }
 
         messages.append(Message(author: .you, text: prompt))
+
+        // The saved setup, into the session's environment. Once per session: `export` persists
+        // for the life of the shell, and repeating it would put the key in the transcript twice.
+        if !exported, let line = AgentSettings.shared.exportLine(for: agent) {
+            _ = await run(line, on: terminal)
+            exported = true
+        }
 
         if installed != true {
             messages.append(Message(author: .note, text: agent.install))

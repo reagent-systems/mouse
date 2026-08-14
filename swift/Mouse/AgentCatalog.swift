@@ -23,6 +23,20 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     let launch: String
     /// The executable the install is expected to leave behind, used to answer "is it here yet".
     let executable: String
+    /// The one thing this agent needs before it can answer, saved between launches.
+    let setting: Setting?
+
+    struct Setting: Sendable, Hashable {
+        /// The environment variable, or the settings key — the agent's own name for it.
+        let name: String
+        /// What the field asks for. Short: it sits under a text field, not in a manual.
+        let placeholder: String
+        /// Keychain rather than UserDefaults.
+        let secret: Bool
+        /// Exported into the shell before the agent runs.
+        let exported: Bool
+    }
+
     /// Set when the agent cannot work on this device today. The picker shows the entry and the
     /// reason rather than hiding it — a missing choice reads as an oversight.
     let blocked: String?
@@ -55,6 +69,10 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         install: "npm i -g @anthropic-ai/claude-code@1.0.128",
         launch: "claude",
         executable: "claude",
+        // Without a key the CLI waits for a login it cannot get on a phone, which is what a
+        // three-minute silence and no output turned out to be.
+        setting: Setting(name: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…",
+                         secret: true, exported: true),
         blocked: nil
     )
 
@@ -74,6 +92,10 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // `{"id": …, "command": …}` in, events out. A protocol, not a screen.
         launch: "python -m tui_gateway.entry",
         executable: "hermes",
+        // Not a key: an address. Hermes runs on a machine and this is a client of its gateway,
+        // which is the shape its Telegram front-end already has.
+        setting: Setting(name: "HERMES_GATEWAY", placeholder: "host:port",
+                         secret: false, exported: true),
         // MEASURED, not guessed: `pkg install python` lands CPython 3.14.6, and that wasi build
         // answers `python -m pip --version` with "No module named pip" and `ensurepip` with "No
         // module named ensurepip". There is no way to install a Python package on this device

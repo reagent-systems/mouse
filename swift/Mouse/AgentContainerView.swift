@@ -13,6 +13,8 @@ struct AgentContainerView: View {
     @State private var dictation = Dictation()
     @State private var draft = ""
     @State private var pickerOpen = false
+    @State private var settings = AgentSettings.shared
+    @State private var setupDraft = ""
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -32,6 +34,7 @@ struct AgentContainerView: View {
                     .padding(.bottom, 6)
             }
             if pickerOpen { picker }
+            if let setting = session.agent.setting, !settings.isSet(for: session.agent) { setup(setting) }
             input
             statusLine
         }
@@ -125,6 +128,35 @@ struct AgentContainerView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// The one field an agent needs before it can answer, shown only while it is empty. Saved
+    /// on submit and not asked again — a key retyped every launch is a container nobody opens.
+    private func setup(_ setting: CodingAgent.Setting) -> some View {
+        HStack(spacing: 8) {
+            Text(setting.name)
+                .font(.custom(AppFont.asciiName, size: 10))
+                .opacity(0.4)
+            Group {
+                if setting.secret {
+                    SecureField(setting.placeholder, text: $setupDraft)
+                } else {
+                    TextField(setting.placeholder, text: $setupDraft)
+                }
+            }
+            .font(.custom(AppFont.asciiName, size: 12))
+            .textFieldStyle(.plain)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .onSubmit {
+                settings.set(setupDraft, for: session.agent)
+                setupDraft = ""
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.bottom, 8)
     }
 
     // MARK: - Picker and status

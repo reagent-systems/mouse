@@ -47,6 +47,7 @@
 		B49F9E6B29A297122BCFDF37 /* AgentCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */; };
 		B61F67FB754D9C300BB0C97D /* Runtimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A5E9B8DC023465151C2E32 /* Runtimes.swift */; };
 		CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5808E2C3F3EE351EB16E5DD /* AppFont.swift */; };
+		D855B4B114C514E0BD93F235 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7BC5BA08EEADE47C5B986F /* AgentSettings.swift */; };
 		DC525882F3784C97FF273D57 /* IBMPlexMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */; };
 		DD34307A47D2C84BD6C63C19 /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */; };
 /* End PBXBuildFile section */
@@ -77,6 +78,7 @@
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
 		7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundView.swift; sourceTree = "<group>"; };
+		8F7BC5BA08EEADE47C5B986F /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
 		933C6240D3EEE403A1818213 /* NodeDNS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeDNS.swift; sourceTree = "<group>"; };
 		98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Bold.ttf"; sourceTree = "<group>"; };
 		9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPrograms.swift; sourceTree = "<group>"; };
@@ -105,6 +107,7 @@
 				119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */,
 				3D6E033D6CB86160958F3E35 /* AgentContainerView.swift */,
 				1CAF2A8E2ACEBCC2AD01EF2D /* AgentSession.swift */,
+				8F7BC5BA08EEADE47C5B986F /* AgentSettings.swift */,
 				C5808E2C3F3EE351EB16E5DD /* AppFont.swift */,
 				7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */,
 				0E73E50FC2D809F76902185C /* AsciiArt.swift */,
@@ -245,6 +248,7 @@
 				B49F9E6B29A297122BCFDF37 /* AgentCatalog.swift in Sources */,
 				347909752F3F2A92DC40B57A /* AgentContainerView.swift in Sources */,
 				A52CEF1173F42F8DC093484F /* AgentSession.swift in Sources */,
+				D855B4B114C514E0BD93F235 /* AgentSettings.swift in Sources */,
 				CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */,
 				5430CDE9E255DBF12E04A8E5 /* AppSettings.swift in Sources */,
 				8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */,
