@@ -17,6 +17,8 @@ struct AgentContainerView: View {
     @State private var setupDraft = ""
     @State private var addressDraft = ""
     @FocusState private var inputFocused: Bool
+    @FocusState private var addressFocused: Bool
+    @FocusState private var setupFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -42,7 +44,7 @@ struct AgentContainerView: View {
             // empty meant it could never be reached once a key was saved — and a keychain entry
             // survives deleting the app, so "reinstall to fix it" does not work either. Submit an
             // address, even the default one, and the row goes.
-            if session.agent.embedded, session.agent.blocked == nil,
+            if session.agent.embedded || session.agent.endpointVariable != nil, session.agent.blocked == nil,
                settings.address(for: session.agent).isEmpty {
                 addressField
             }
@@ -160,7 +162,16 @@ struct AgentContainerView: View {
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .keyboardType(.URL)
+                .focused($addressFocused)
+                // Saved on return AND on tapping away: on a phone, leaving a field is how
+                // most people finish it, and a value that quietly evaporates on blur is a
+                // setting that never sticks.
                 .onSubmit { settings.setAddress(addressDraft, for: session.agent) }
+                .onChange(of: addressFocused) { was, is_ in
+                    if was, !is_, !addressDraft.isEmpty {
+                        settings.setAddress(addressDraft, for: session.agent)
+                    }
+                }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -190,20 +201,28 @@ struct AgentContainerView: View {
             .textFieldStyle(.plain)
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
-            .onSubmit {
-                // Commit the address too: someone who fills both fields and presses return once
-                // should not silently lose the one they did not submit.
-                if session.agent.embedded, !addressDraft.isEmpty {
-                    settings.setAddress(addressDraft, for: session.agent)
-                }
-                settings.set(setupDraft, for: session.agent)
-                setupDraft = ""
+            .focused($setupFocused)
+            .onSubmit { commitSetup() }
+            // The same blur rule as the address: finished is finished, whether the finger
+            // found return or the next field.
+            .onChange(of: setupFocused) { was, is_ in
+                if was, !is_, !setupDraft.isEmpty { commitSetup() }
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.bottom, 8)
+    }
+
+    private func commitSetup() {
+        // Commit the address too: someone who fills both fields and finishes once should not
+        // silently lose the one they did not submit.
+        if session.agent.embedded || session.agent.endpointVariable != nil, !addressDraft.isEmpty {
+            settings.setAddress(addressDraft, for: session.agent)
+        }
+        settings.set(setupDraft, for: session.agent)
+        setupDraft = ""
     }
 
     // MARK: - Picker and status

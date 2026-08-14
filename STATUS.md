@@ -70,17 +70,22 @@ launches and is driven on the iPhone 16 Pro simulator
   only while a program runs; tapping it sends the interrupt the program
   already knew how to handle. Verified: the server stopped, the prompt came
   back, and the port stopped answering.
-- **An agent CLI starts and renders its UI on the phone.** claude-code
-  1.0.128 installs through our own npm, reports `1.0.128 (Claude Code)`,
-  and its React/ink TUI draws its bordered `Welcome to Claude Code` frame
-  on the phase-T screen. Screenshot at 23:58.
+- **An agent CLI answers a prompt on the phone.** claude-code 2.1.98
+  installs through our own npm, runs `-p` to completion on the engine, and
+  its answer renders in the Agent container's exchange on the simulator
+  (screenshot Aug 14, against an Anthropic-shaped stand-in; a real key and
+  an empty address point the same path at api.anthropic.com). The 1.0.x
+  line that first rendered its TUI here is dead UPSTREAM — it awaits
+  statsig.anthropic.com, which no longer resolves — and hangs identically
+  on real node. 2.1.98 is the newest release that is JavaScript the whole
+  way down.
 - **claude-code's CURRENT releases cannot run here, and that is a change in
   the package, not a regression in the engine.** `@anthropic-ai/claude-code`
   now ships `bin/claude.exe` — a per-platform NATIVE binary — with
   `cli-wrapper.cjs` as a fallback that spawns it. iOS will not execute
   unsigned native code, so this is the platform wall the wasm strategy
-  exists for, reached from a new direction. The JS-bundle versions (1.0.128
-  and its era) still run. Any claim here about "claude-code" means those.
+  exists for, reached from a new direction. The JS-bundle versions (through
+  2.1.9x) still run. Any claim here about "claude-code" means those.
 - **Interactive TUIs work.** `npx create-vite` walks its whole flow on the
   phone: text prompt, framework menu, variant menu, install confirmation —
   every transition painting live, colours intact, selections tracking.

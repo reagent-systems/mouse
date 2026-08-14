@@ -277,8 +277,28 @@ Also true: 2.1.98 on real node used the MAC'S OAuth login despite an env key
 being set — on device there is no such fallback, so a real key in the field
 remains the auth story once the spin is fixed.
 
-## WHERE 2.1.98 STANDS after the five fixes (transpiler guard, stream/consumers,
-## stream/web, Symbol.dispose, rename(2))
+## CLAUDE CODE: DONE — 2.1.98 answers in the container on the simulator
+
+The whole path, measured end to end (Aug 14): pick Claude Code in the
+container → `npm i -g @anthropic-ai/claude-code@2.1.98` runs on the app's own
+npm → `claude -p '<prompt>'` runs on the engine → it POSTs
+`/v1/messages?beta=true` with `stream: true` → parses the SSE events →
+prints the answer → the container renders it as an agent message. Screenshot
+taken with an Anthropic-shaped stand-in at 127.0.0.1:8699 (SSE:
+message_start / content_block_delta / message_stop — the non-stream JSON
+shape makes it exit(1) on `K.input_tokens`, so the stand-in must stream).
+With a real key and no address the same path hits api.anthropic.com.
+
+What it took, in order: scoped bins registered (`verify/scopedbin`), the five
+engine fixes below, the spawnSync guard relaxed to refuse only `input`, the
+catalog pin moved 1.0.128 → 2.1.98 (1.0.128 is dead upstream — statsig
+NXDOMAIN), and ANTHROPIC_BASE_URL exported when the container's address field
+is set (`endpointVariable` in the catalog). Setup fields commit on blur as
+well as return, and AgentSettings reads subscribe views via `version` — a
+saved key/address now hides its field immediately.
+
+## Superseded — where 2.1.98 stood after the five fixes (transpiler guard,
+## stream/consumers, stream/web, Symbol.dispose, rename(2))
 
 `--version` prints; `-p 'hi'` runs to completion, exits rc=0, prints NOTHING,
 and sends NOTHING (a stand-in base_url logged no request). Its own session

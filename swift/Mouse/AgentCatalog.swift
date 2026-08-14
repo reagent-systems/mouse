@@ -23,6 +23,11 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     let launch: String
     /// The executable the install is expected to leave behind, used to answer "is it here yet".
     let executable: String
+    /// The env var that redirects this agent's endpoint when the address field is set, for
+    /// CLI agents. nil when the agent has no such override, or is embedded (the embedded path
+    /// uses the address directly).
+    let endpointVariable: String?
+
     /// Whether this agent runs EMBEDDED: its loop as Python steps on the device's own wasi
     /// CPython, with Mouse executing every tool the loop asks for. The alternative is a local
     /// CLI on the Node layer (Claude Code).
@@ -63,17 +68,21 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
 
     /// Claude Code — Node, so it runs on the layer this app already is.
     ///
-    /// Pinned deliberately. `@anthropic-ai/claude-code`'s current releases ship `bin/claude.exe`,
-    /// a per-platform NATIVE binary, with the JS bundle only as a fallback; iOS cannot execute
-    /// the binary. The 1.0.x line is the last that is JavaScript the whole way down, and it is
-    /// what STATUS.md records running on the phone.
+    /// Pinned deliberately, and MOVED: 1.0.128 died everywhere in 2026 (it awaits statsig
+    /// initialisation and statsig.anthropic.com is NXDOMAIN now), and the installer-stub era
+    /// that ships `claude.exe` — a native binary iOS can never run — starts by 2.1.232. The
+    /// 2.1.9x line is the newest that is JavaScript the whole way down, and 2.1.98 is measured
+    /// answering through this engine's streaming pipeline in one second.
     static let claudeCode = CodingAgent(
         id: "claude-code",
         name: "Claude Code",
         runtime: .node,
-        install: "npm i -g @anthropic-ai/claude-code@1.0.128",
+        install: "npm i -g @anthropic-ai/claude-code@2.1.98",
         launch: "claude",
         executable: "claude",
+        // ANTHROPIC_BASE_URL, when the address field is set: any Anthropic-shaped endpoint —
+        // a relay, a proxy, a test double — and empty means the real API.
+        endpointVariable: "ANTHROPIC_BASE_URL",
         embedded: false,
         // Without a key the CLI waits for a login it cannot get on a phone, which is what a
         // three-minute silence and no output turned out to be.
@@ -98,6 +107,7 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // `{"id": …, "command": …}` in, events out. A protocol, not a screen.
         launch: "python -m tui_gateway.entry",
         executable: "hermes",
+        endpointVariable: nil,
         // Embedded, per the user's architecture: the loop runs on the device's Python, and
         // Mouse is the scoped tool surface it drives — model calls on URLSession's real TLS
         // (this Python has no ssl), shell on msh, files on the workspace.

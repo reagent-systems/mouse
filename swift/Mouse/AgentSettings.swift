@@ -19,6 +19,8 @@ final class AgentSettings {
 
     /// The saved value for an agent's setting, or "" when nothing is stored.
     func value(for agent: CodingAgent) -> String {
+        _ = version // the keychain and UserDefaults are invisible to @Observable; this read
+                    // subscribes the calling view to the writes, which all bump `version`
         guard let setting = agent.setting else { return "" }
         return setting.secret
             ? (Self.keychainRead(setting.name) ?? "")
@@ -48,7 +50,8 @@ final class AgentSettings {
     /// yet asked for in the UI: `hermes gateway` binds 127.0.0.1:8642 and the simulator can
     /// reach that, so the default is right until someone runs it elsewhere.
     func address(for agent: CodingAgent) -> String {
-        UserDefaults.standard.string(forKey: "agent.\(agent.id).address") ?? ""
+        _ = version // same subscription as `value(for:)`
+        return UserDefaults.standard.string(forKey: "agent.\(agent.id).address") ?? ""
     }
 
     func setAddress(_ value: String, for agent: CodingAgent) {

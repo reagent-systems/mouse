@@ -99,6 +99,13 @@ final class AgentSession {
         // for the life of the shell, and repeating it would put the key in the transcript twice.
         if !exported, let line = AgentSettings.shared.exportLine(for: agent) {
             _ = await run(line, on: terminal)
+            if let variable = agent.endpointVariable {
+                let address = AgentSettings.shared.address(for: agent)
+                if !address.isEmpty {
+                    let url = address.contains("://") ? address : "http://" + address
+                    _ = await run("export \(variable)=\(url)", on: terminal)
+                }
+            }
             exported = true
         }
 
