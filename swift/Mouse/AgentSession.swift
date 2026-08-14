@@ -41,6 +41,9 @@ final class AgentSession {
     private(set) var working = false
     /// Shown above the input when the last attempt could not proceed.
     private(set) var problem: String?
+    /// True while the agent's own sign-in program owns the terminal screen. The container
+    /// swaps the exchange for the screen, and the input field feeds the program.
+    private(set) var loggingIn = false
 
     private static let agentKey = "agentContainerAgent"
     /// How long a single command may hold the terminal before the container gives up on it.
@@ -65,17 +68,29 @@ final class AgentSession {
         exported = false
     }
 
+    /// Whether the agent can answer: its saved key, or — for an agent with its own sign-in —
+    /// the credential that sign-in left in the workspace's home. Claude Code's `setup-token`
+    /// writes `.claude/.credentials.json` there (the engine's homedir is the workspace root).
+    var authenticated: Bool {
+        if AgentSettings.shared.isSet(for: agent) { return true }
+        guard agent.login != nil, let root = terminal?.root else { return false }
+        return FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(".claude/.credentials.json").path)
+    }
+
     /// Ask the agent. Installs it first if this is the first time, because an agent that is not
     /// here yet is a download, not an error.
     func send(_ text: String) async {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !working else { return }
+        guard !prompt.isEmpty, !working, !loggingIn else { return }
         if let blocked = agent.blocked {
             problem = blocked
             return
         }
-        guard AgentSettings.shared.isSet(for: agent) else {
-            problem = "\(agent.setting?.name ?? "setup") first"
+        guard authenticated else {
+            problem = agent.login == nil
+                ? "\(agent.setting?.name ?? "setup") first"
+                : "sign in, or \(agent.setting?.name ?? "a key") first"
             return
         }
         problem = nil
@@ -129,6 +144,40 @@ final class AgentSession {
         messages.append(Message(author: .agent, text: answer.text.isEmpty
             ? "\(agent.launch) printed nothing" : answer.text))
         if !answer.ok { problem = answer.text }
+    }
+
+    /// Run the agent's own sign-in program on the terminal SCREEN, inside the container.
+    /// Returns when the program exits; `authenticated` then says whether it took.
+    func login() async {
+        guard let command = agent.login, let terminal, !working, !loggingIn else { return }
+        problem = nil
+        if installed != true {
+            working = true
+            messages.append(Message(author: .note, text: agent.install))
+            let install = await run(agent.install, on: terminal)
+            working = false
+            guard install.ok else {
+                problem = install.text.isEmpty ? "\(agent.name) did not install" : install.text
+                return
+            }
+            installed = true
+        }
+        loggingIn = true
+        defer { loggingIn = false }
+        guard terminal.run(command) else { return }
+        while terminal.isRunning || terminal.program != nil {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        messages.append(Message(author: .note,
+                                text: authenticated ? "signed in" : "sign-in did not finish"))
+    }
+
+    /// The user's way out of a sign-in that is going nowhere. One tap, decisive: claude's
+    /// sign-in screen swallows ^C as a keystroke (MEASURED — like vite, it keeps running),
+    /// and the terminal's two-press ritual belongs to the Terminal container, not a chat.
+    func cancelLogin() {
+        guard loggingIn else { return }
+        terminal?.stopForProjectChange()
     }
 
     /// One conversation turn of the embedded agent.

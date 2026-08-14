@@ -28,7 +28,7 @@ struct AgentContainerView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Color.clear.frame(height: 12)
-            exchange
+            if session.loggingIn { loginScreen } else { exchange }
             Spacer(minLength: 0)
             if let problem = session.problem ?? dictation.problem {
                 Text(problem)
@@ -45,11 +45,14 @@ struct AgentContainerView: View {
             // survives deleting the app, so "reinstall to fix it" does not work either. Submit an
             // address, even the default one, and the row goes.
             if session.agent.embedded || session.agent.endpointVariable != nil, session.agent.blocked == nil,
-               settings.address(for: session.agent).isEmpty {
+               !session.loggingIn, settings.address(for: session.agent).isEmpty {
                 addressField
             }
+            // Two ways in, both the agent's own: its sign-in flow, or its key. Either one
+            // satisfies `authenticated` and both rows go.
             if let setting = session.agent.setting, session.agent.blocked == nil,
-               !settings.isSet(for: session.agent) {
+               !session.loggingIn, !session.authenticated {
+                if session.agent.login != nil { loginRow }
                 setup(setting)
             }
             if let blocked = session.agent.blocked {
@@ -225,6 +228,88 @@ struct AgentContainerView: View {
         setupDraft = ""
     }
 
+    // MARK: - Sign-in, the agent's own
+
+    /// Starts the agent's documented sign-in program on the terminal screen, in here.
+    private var loginRow: some View {
+        Button {
+            Task { await session.login() }
+        } label: {
+            HStack(spacing: 8) {
+                Text("sign in")
+                    .font(.custom(AppFont.asciiName, size: 12))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 8)
+    }
+
+    /// The sign-in program's screen, where the exchange normally is. The input field below
+    /// keeps working — while a program owns the terminal, sending feeds it the line.
+    @ViewBuilder
+    private var loginScreen: some View {
+        if let terminal = session.terminal {
+            VStack(alignment: .leading, spacing: 8) {
+                GeometryReader { geo in
+                    TerminalScreenGrid(terminal: terminal)
+                        .onAppear { applyGrid(geo.size, terminal: terminal) }
+                        .onChange(of: geo.size) { _, size in applyGrid(size, terminal: terminal) }
+                }
+                HStack(spacing: 8) {
+                    if let url = signInURL(terminal) {
+                        Link(destination: url) {
+                            Text("open \(url.host() ?? "the sign-in page")")
+                                .font(.custom(AppFont.asciiName, size: 11))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.white.opacity(0.1),
+                                            in: Capsule())
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Button {
+                        session.cancelLogin()
+                    } label: {
+                        Text("stop")
+                            .font(.custom(AppFont.asciiName, size: 11))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.white.opacity(0.1), in: Capsule())
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func applyGrid(_ size: CGSize, terminal: TerminalSession) {
+        terminal.setGridSize(rows: Int(size.height / TerminalCellMetrics.height),
+                             columns: Int(size.width / TerminalCellMetrics.width))
+    }
+
+    /// The sign-in URL as the program printed it — reassembled across hard-wrapped rows (a
+    /// full-width row continues on the next) so the link carries the whole query string.
+    private func signInURL(_ terminal: TerminalSession) -> URL? {
+        _ = terminal.screenGeneration
+        let screen = terminal.screen
+        var joined = ""
+        for row in 0..<screen.rows {
+            let text = screen.text(row: row)
+            joined += text
+            if text.count < screen.columns { joined += "\n" }
+        }
+        guard let range = joined.range(of: #"https://\S+"#, options: .regularExpression) else {
+            return nil
+        }
+        return URL(string: String(joined[range]))
+    }
+
     // MARK: - Picker and status
 
     private var picker: some View {
@@ -280,6 +365,13 @@ struct AgentContainerView: View {
     private func send() {
         let text = draft
         draft = ""
+        // While the sign-in program owns the terminal, the field feeds IT — pasted code,
+        // then return — instead of starting a conversation turn.
+        if session.loggingIn, let terminal = session.terminal, terminal.program != nil {
+            if !text.isEmpty { _ = terminal.sendPaste(text) }
+            _ = terminal.sendKey("\r")
+            return
+        }
         Task { await session.send(text) }
     }
 

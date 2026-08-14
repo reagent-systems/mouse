@@ -79,6 +79,15 @@ launches and is driven on the iPhone 16 Pro simulator
   statsig.anthropic.com, which no longer resolves — and hangs identically
   on real node. 2.1.98 is the newest release that is JavaScript the whole
   way down.
+- **Claude Code's own sign-in runs inside the Agent container.** The `sign
+  in` row hosts `claude setup-token` — its real ink screen — on an embedded
+  terminal grid: the OAuth URL renders, an `open claude.com` chip
+  reassembles it from the wrapped rows and opens Safari on Anthropic's
+  login page, the chat input feeds the program (bogus code → claude's own
+  "OAuth error: Invalid code", Enter → fresh retry), and `stop` reclaims
+  the terminal in one tap. A finished sign-in stores claude's credential in
+  the workspace home and both auth rows (sign-in and ANTHROPIC_API_KEY)
+  disappear. Verified on the simulator Aug 14 up to the account-owner step.
 - **claude-code's CURRENT releases cannot run here, and that is a change in
   the package, not a regression in the engine.** `@anthropic-ai/claude-code`
   now ships `bin/claude.exe` — a per-platform NATIVE binary — with

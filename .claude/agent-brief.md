@@ -277,6 +277,24 @@ Also true: 2.1.98 on real node used the MAC'S OAuth login despite an env key
 being set — on device there is no such fallback, so a real key in the field
 remains the auth story once the spin is fixed.
 
+## SIGN-IN: claude's own prompts, inside the chat container
+
+The user goes through Claude Code's normal first-run auth in the container:
+either the ANTHROPIC_API_KEY field, or a `sign in` row that runs
+`claude setup-token` — claude's documented OAuth flow — on an embedded
+terminal screen where the exchange normally sits. MEASURED on the simulator:
+the ink UI renders (art, OAuth URL, "Paste code here if prompted >"), an
+`open claude.com` chip reassembles the hard-wrapped URL and opens Safari on
+Anthropic's real login page, the input field feeds the program (a bogus code
+came back "OAuth error: Invalid code … Press Enter to retry", and Enter
+retried with a fresh URL), and a `stop` chip takes the terminal back in one
+tap — setup-token swallows ^C as a keystroke, so the chip uses the hard stop,
+not the two-press ritual. A finished sign-in lands
+`.claude/.credentials.json` in the workspace home (engine homedir = workspace
+root); `AgentSession.authenticated` accepts either that file or the saved
+key, and both auth rows hide. Only the final step — a real Anthropic account
+authorizing — remains for the user; everything around it is verified.
+
 ## CLAUDE CODE: DONE — 2.1.98 answers in the container on the simulator
 
 The whole path, measured end to end (Aug 14): pick Claude Code in the

@@ -28,6 +28,11 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     /// uses the address directly).
     let endpointVariable: String?
 
+    /// The agent's OWN sign-in command — a full-screen program the container hosts on an
+    /// embedded terminal screen, so authenticating works the way the agent documents it
+    /// instead of the way a settings form imagines it. nil when a key is the only way in.
+    let login: String?
+
     /// Whether this agent runs EMBEDDED: its loop as Python steps on the device's own wasi
     /// CPython, with Mouse executing every tool the loop asks for. The alternative is a local
     /// CLI on the Node layer (Claude Code).
@@ -83,9 +88,12 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // ANTHROPIC_BASE_URL, when the address field is set: any Anthropic-shaped endpoint —
         // a relay, a proxy, a test double — and empty means the real API.
         endpointVariable: "ANTHROPIC_BASE_URL",
+        // `setup-token` is Claude Code's documented sign-in: it renders its own screen,
+        // prints the OAuth URL, takes the pasted code, and stores a long-lived credential in
+        // the workspace's home. MEASURED rendering and prompting on this engine.
+        login: "claude setup-token",
         embedded: false,
-        // Without a key the CLI waits for a login it cannot get on a phone, which is what a
-        // three-minute silence and no output turned out to be.
+        // The other way in. Either this key or a completed sign-in satisfies the container.
         setting: Setting(name: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…",
                          secret: true, exported: true),
         blocked: nil
@@ -108,6 +116,7 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         launch: "python -m tui_gateway.entry",
         executable: "hermes",
         endpointVariable: nil,
+        login: nil,
         // Embedded, per the user's architecture: the loop runs on the device's Python, and
         // Mouse is the scoped tool surface it drives — model calls on URLSession's real TLS
         // (this Python has no ssl), shell on msh, files on the workspace.
