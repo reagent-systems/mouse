@@ -46,6 +46,24 @@ enum Pip {
             let (name, pin) = split(spec)
             let canonical = canonicalize(name)
             guard seen.insert(canonical).inserted else { continue }
+            // Substitutes come BEFORE the installed check so their adapter is refreshed on
+            // every ask — an adapter that grows a missing name must reach installs that
+            // already exist.
+            if let substitute = substitutes[canonical] {
+                note("\(canonical) has no pure wheel — installing \(substitute.install) in its place")
+                queue.append(substitute.install)
+                if let file = substitute.adapterFile, let source = substitute.adapterSource {
+                    try source.write(to: target.appendingPathComponent(file),
+                                     atomically: true, encoding: .utf8)
+                }
+                // A dist-info of its own, so "is pyyaml here" answers yes and the closure never
+                // asks again.
+                let dist = target.appendingPathComponent("\(canonical)-0.0.0.substituted.dist-info")
+                try FileManager.default.createDirectory(at: dist, withIntermediateDirectories: true)
+                try "Metadata-Version: 2.1\nName: \(canonical)\nVersion: 0.0.0.substituted\n"
+                    .write(to: dist.appendingPathComponent("METADATA"), atomically: true, encoding: .utf8)
+                continue
+            }
             if installed(canonical, in: target) {
                 note("\(canonical) is already installed")
                 continue
@@ -69,6 +87,20 @@ enum Pip {
             note("skipped \(skipped.count): \(skipped.joined(separator: ", ")) — imports needing them will say so")
         }
     }
+
+    // MARK: - Substitutes
+
+    /// The Python face of the house substitution pattern (`rollup` -> `@rollup/wasm-node`):
+    /// a package that only exists compiled, replaced by a pure-published equivalent under the
+    /// importable name the requester's code actually uses.
+    ///
+    /// pyyaml is the one that matters today — hermes's `utils.py` does `import yaml` on its
+    /// first page — and ruamel.yaml is no stranger standing in: it BEGAN as a PyYAML fork,
+    /// hermes already pins it, and its author publishes it pure. The adapter is the PyYAML
+    /// surface callers actually use, expressed as ruamel calls.
+    private static let substitutes: [String: (install: String, adapterFile: String?, adapterSource: String?)] = [
+        "pyyaml": ("ruamel.yaml", "yaml.py", "# pyyaml has no pure-Python wheel, and this Python cannot load compiled extensions.\n# Installed by Mouse's pip as the `yaml` module: PyYAML's common surface over\n# ruamel.yaml (itself a PyYAML fork), which is pure and installed alongside.\nfrom ruamel.yaml import YAML as _YAML\nfrom ruamel.yaml.error import YAMLError  # noqa: F401  (PyYAML's name, re-exported)\nimport io as _io\n\ndef _load(stream, typ):\n    data = stream.read() if hasattr(stream, \"read\") else stream\n    return _YAML(typ=typ, pure=True).load(data)\n\ndef safe_load(stream): return _load(stream, \"safe\")\ndef load(stream, Loader=None): return _load(stream, \"safe\" if Loader is None else \"unsafe\")\ndef full_load(stream): return _load(stream, \"unsafe\")\n\ndef safe_load_all(stream):\n    data = stream.read() if hasattr(stream, \"read\") else stream\n    return _YAML(typ=\"safe\", pure=True).load_all(data)\n\ndef _dump(data, stream, typ, **kw):\n    yml = _YAML(typ=typ, pure=True)\n    yml.default_flow_style = kw.get(\"default_flow_style\", False)\n    if stream is None:\n        out = _io.StringIO()\n        yml.dump(data, out)\n        return out.getvalue()\n    yml.dump(data, stream)\n    return None\n\ndef safe_dump(data, stream=None, **kw): return _dump(data, stream, \"safe\", **kw)\ndef dump(data, stream=None, **kw): return _dump(data, stream, \"rt\", **kw)\n\nclass SafeLoader:  # noqa: N801 — PyYAML's names, kept for isinstance/subclass users\n    pass\nclass Loader(SafeLoader):\n    pass\n\nclass SafeDumper:  # subclassed in the wild (hermes's IndentDumper); representers are a no-op\n    @classmethod\n    def add_representer(cls, data_type, representer):\n        pass\nclass Dumper(SafeDumper):\n    pass\n\ndef add_representer(data_type, representer, Dumper=Dumper):\n    pass\n"),
+    ]
 
     // MARK: - The registry
 

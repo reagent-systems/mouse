@@ -50,10 +50,20 @@ Build order:
      - `import openai` dies on `import zlib` — the wasi CPython BUILD ships no
        zlib module. Engine-side gap, not a packaging one: candidates are a
        different CPython wasi artifact that includes zlib, or a shim.
-     - `import run_agent` dies at hermes's own `utils.py:14 import yaml` —
-       the pyyaml wall. Candidates: a pure-yaml substitute under the `yaml`
-       name (the PackageManager.wasmSubstitutes pattern, for wheels), or
-       hermes's ruamel.yaml (pure) with an adapter.
+     - The yaml wall FELL: pip substitutes pyyaml with ruamel.yaml (a PyYAML
+       fork, pure, already in hermes's pins) plus a `yaml.py` adapter of the
+       PyYAML surface. `yaml.safe_load` works on device; hermes's utils.py
+       imports through its yaml lines including the SafeDumper subclass.
+     - `Path.home()` needed a HOME: Runtimes.json sets `HOME=/`, so agent
+       state (`~/.hermes`) lands in the WORKSPACE — per-project agent state,
+       which fits Mouse.
+     - CURRENT WALL: `import run_agent` HANGS — 319s, zero output, no error.
+       Something in the import chain blocks forever. Next measurement:
+       `python -X importtime -c "import run_agent"` on the LIVE terminal path
+       (not screenless — that only shows output at completion), polling lines;
+       the last import started before the silence names the module. Suspects:
+       a socket call at import (wasi has none), or a wasi syscall our shim
+       leaves unanswered.
    Walls known ahead from the dependency list: pydantic-core (via pydantic,
    compiled Rust) and psutil (compiled C). pydantic imports lazily in the
    openai SDK's typed paths — how far the loop gets without it is a

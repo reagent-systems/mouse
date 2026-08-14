@@ -17,7 +17,8 @@
         "PYTHONHOME": "{root}/usr/local",
         "PYTHONPATH": "{root}/usr/local/lib/python3.12:{root}/site-packages",
         "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONUNBUFFERED": "1"
+        "PYTHONUNBUFFERED": "1",
+        "HOME": "/"
       },
       "rewriteScriptPaths": true,
       "summary": "CPython, wasm32-wasi build with zlib (VMware Labs)"
