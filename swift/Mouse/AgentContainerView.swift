@@ -34,7 +34,19 @@ struct AgentContainerView: View {
                     .padding(.bottom, 6)
             }
             if pickerOpen { picker }
-            if let setting = session.agent.setting, !settings.isSet(for: session.agent) { setup(setting) }
+            // A blocked agent does not ask for setup. Hermes needs a gateway address, but
+            // nothing here can use one yet, and a field that collects a value the app ignores is
+            // worse than no field — it reads as "configure me and I will work".
+            if let setting = session.agent.setting, session.agent.blocked == nil,
+               !settings.isSet(for: session.agent) {
+                setup(setting)
+            }
+            if let blocked = session.agent.blocked {
+                Text(blocked)
+                    .font(.custom(AppFont.asciiName, size: 10))
+                    .opacity(0.4)
+                    .padding(.bottom, 8)
+            }
             input
             statusLine
         }
