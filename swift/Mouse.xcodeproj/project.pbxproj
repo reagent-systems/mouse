@@ -51,6 +51,7 @@
 		D855B4B114C514E0BD93F235 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7BC5BA08EEADE47C5B986F /* AgentSettings.swift */; };
 		DC525882F3784C97FF273D57 /* IBMPlexMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */; };
 		DD34307A47D2C84BD6C63C19 /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA49DFD4B52682285B51D396 /* WorkspaceViews.swift */; };
+		F027CE6A4DE2E85D3551C7A9 /* PipInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0D465DCBBF6AD11F92C29D /* PipInstaller.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -100,6 +101,7 @@
 		F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StripPersistence.swift; sourceTree = "<group>"; };
 		F5B299975B30C229DCCCB015 /* GitGraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitGraphView.swift; sourceTree = "<group>"; };
 		FB01C138F6E8F2292E1D3EC4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		FC0D465DCBBF6AD11F92C29D /* PipInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipInstaller.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -137,6 +139,7 @@
 				03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */,
 				0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */,
 				3A88D15C6B606882BE9F472E /* PackageManager.swift */,
+				FC0D465DCBBF6AD11F92C29D /* PipInstaller.swift */,
 				03A5E9B8DC023465151C2E32 /* Runtimes.swift */,
 				5A7FDD7DE14447F992EB32D3 /* Shell.swift */,
 				080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */,
@@ -277,6 +280,7 @@
 				B12D6FC121DECB1E6754DA64 /* NodeSockets.swift in Sources */,
 				4AE107D17AAB32363E162AA3 /* NodeWatch.swift in Sources */,
 				4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */,
+				F027CE6A4DE2E85D3551C7A9 /* PipInstaller.swift in Sources */,
 				B61F67FB754D9C300BB0C97D /* Runtimes.swift in Sources */,
 				A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */,
 				95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */,

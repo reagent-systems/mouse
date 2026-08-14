@@ -1238,6 +1238,7 @@ final class MouseShell {
         case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "pkg": return await pkgCmd(args, context: context)
+        case "pip", "pip3": return await pipCmd(args, context: context)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1311,6 +1312,34 @@ final class MouseShell {
     /// exists only as a mount prefix answers ENOENT.
     private var runtimeMounts: [(prefix: String, url: URL)] {
         RuntimeStore.installedNames().isEmpty ? [] : [(prefix: "/usr", url: RuntimeStore.usr)]
+    }
+
+    /// `pip install <name>[==version] …` — pure-Python wheels only, straight from PyPI into
+    /// the runtime's site-packages. See `Pip` for why that subset is the honest one here.
+    private func pipCmd(_ args: [String], context: Context) async -> IO {
+        guard args.first == "install", args.count >= 2 else {
+            return IO(err: "pip: usage: pip install <package>[==version] …\n", status: 2)
+        }
+        guard RuntimeStore.installed("python") != nil else {
+            return IO(err: "pip: python is not installed — `pkg install python`\n", status: 1)
+        }
+        // Notes cross from the installer's task to the shell's context through a stream —
+        // `Context` is actor-bound and must not be captured in a @Sendable closure.
+        let (stream, continuation) = AsyncStream.makeStream(of: String.self)
+        let specs = Array(args.dropFirst())
+        let installer = Task {
+            defer { continuation.finish() }
+            try await Pip.install(specs) { continuation.yield($0) }
+        }
+        for await line in stream {
+            context.emit(Output(text: line, isError: false))
+        }
+        do {
+            try await installer.value
+        } catch {
+            return IO(err: "\(error)\n", status: 1)
+        }
+        return IO()
     }
 
     private func pkgCmd(_ args: [String], context: Context) async -> IO {
@@ -1724,7 +1753,7 @@ final class MouseShell {
     static let builtinNames: Set<String> = [
         "help", "clear", "pwd", "cd", "ls", "cat", "echo", "printf", "mkdir", "touch", "rm",
         "mv", "cp", "head", "tail", "wc", "sort", "uniq", "tr", "cut", "seq", "grep", "find",
-        "date", "whoami", "true", "false", "env", "export", "unset", "history", "which",
+        "date", "whoami", "true", "false", "env", "export", "unset", "history", "which", "pip",
         "basename", "dirname", "open", "sleep", "ping", "curl", "wget", "tee", "xargs",
         "rev", "tac", "nl", "base64", "md5sum", "md5", "sha256sum", "shasum", "sed", "diff",
         "git", "less", "more", "nano", "vi", "vim", "uname", "lsb_release", "df", "free",

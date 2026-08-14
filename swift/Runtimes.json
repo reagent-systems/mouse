@@ -12,7 +12,7 @@
       "commands": ["python", "python3"],
       "env": {
         "PYTHONHOME": "{root}",
-        "PYTHONPATH": "{root}/lib/python3.14",
+        "PYTHONPATH": "{root}/lib/python3.14:{root}/site-packages",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1"
       },

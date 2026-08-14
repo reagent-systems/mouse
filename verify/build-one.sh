@@ -20,6 +20,9 @@ name="$1"; dir="$T/$name"
 # The agent container's API client stands alone — one HTTP call, no engine behind it.
 if grep -qE 'AgentAPI' "$dir/main.swift" 2>/dev/null; then
   SRC="$M/AgentAPI.swift"
+# The wheel installer needs the zip reader (Runtimes) and TarGz (PackageManager) behind it.
+elif grep -qE 'Pip\.' "$dir/main.swift" 2>/dev/null; then
+  SRC="$M/PipInstaller.swift $M/Runtimes.swift $NODE_SET"
 elif grep -qE 'TerminalSession' "$dir/main.swift" 2>/dev/null; then
   SRC="$SESSION_SET"
 elif grep -qE 'Shell\(|ShellLanguage|GitCore|GitRemote' main_probe 2>/dev/null || \
