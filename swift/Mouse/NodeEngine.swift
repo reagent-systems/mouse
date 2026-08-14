@@ -699,6 +699,13 @@ final class NodeEngine: @unchecked Sendable {
                 if pendingLookups > 0 { reasons.append("\(pendingLookups) dns lookup\(pendingLookups == 1 ? "" : "s")") }
                 if !reasons.isEmpty {
                     err += "interrupted while waiting on: " + reasons.joined(separator: ", ") + "\n"
+                } else {
+                    // Interrupted with NOTHING pending and the loop still alive: the program was
+                    // not waiting, it was RUNNING — a synchronous spin the quiescence checks
+                    // never got a chance to see. Saying so separates "stuck on IO" from "stuck
+                    // in a loop", which are different bugs in different places.
+                    err += "interrupted while busy: nothing pending — the program was computing "
+                        + "or spinning, not waiting\n"
                 }
                 exitCode = 130
                 break

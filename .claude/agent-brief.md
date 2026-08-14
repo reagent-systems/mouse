@@ -255,12 +255,27 @@ hang. Two of my earlier eliminations were also watchdog lies (an uncondition-
 al echo after sleep reads as a kill); the interrupt ledger is the tool that
 cut through.
 
-THE FIX is a different claude-code version: the last JS-only release newer
-than 1.0.128 whose statsig init fails open or times out. Enumerate
-`npm view @anthropic-ai/claude-code versions`, find the last without
-`claude.exe`, and test `-p` with a key on the engine. If none work, the
-fallback is an engine hosts-override answering statsig locally — grubby, and
-only worth it if no version does.
+THE VERSION HUNT, measured: the JS line runs to at least 2.1.98 (cli.js in
+the tarball; the 24 KB installer stubs start by 2.1.232). On real node,
+2.1.98 with a key answers in 2 seconds. On our engine it hangs — and this one
+IS ours, with a sharper shape than any before:
+
+    interrupt at 40s → only the ^C echo. No ledger report, no busy report.
+
+The loop never reached its own cancelled-check: ONE SYNCHRONOUS JS JOB runs
+forever, and cancellation is only observed between jobs. Nothing is pending;
+the thread is spinning inside a single job (an Atomics.wait polyfill or a
+Date.now() spin are the classic shapes).
+
+NEXT TOOL: a job watchdog on JSC's execution-time-limit
+(JSContextGroupSetExecutionTimeLimit): when one job exceeds N seconds,
+terminate it and surface the JS stack of the termination — that names the
+spin site in the 9 MB bundle directly. Then decide whether the spun-on
+primitive is implementable or the call site is patchable.
+
+Also true: 2.1.98 on real node used the MAC'S OAuth login despite an env key
+being set — on device there is no such fallback, so a real key in the field
+remains the auth story once the spin is fixed.
 
 ## Superseded — the statsig stream as an engine bug
 
