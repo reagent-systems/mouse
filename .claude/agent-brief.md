@@ -190,11 +190,28 @@ what has not been tested is reading a body that arrives in chunks over time.
 With no key the CLI never gets that far — it fails validation and prints in 3s.
 With a key it opens the stream, and that is exactly where it stops.
 
-Next, and it needs no API key: serve SSE from a local server and read it through
-the engine's `fetch` — `res.body.getReader()` and the async-iteration form both.
-If the reader never ends, that is the bug, and it is ours. `verify/sse` and
-`verify/webstreams` are the harnesses nearest it and neither covers a chunked
-body arriving with real delays between chunks.
+TESTED, and the answer is better than the question. Reading a chunked body with
+real delays works exactly right:
+
+    headers at 0.0s status=200
+      chunk 1 at 0.0s … chunk 4 at 1.2s
+    reader DONE at 1.6s after 4 chunks
+
+But THE PROCESS NEVER EXITED. The work finished in 1.6 seconds and the run had
+to be killed. That is the true shape of this bug, and it explains every symptom:
+a program that completes its work and never exits looks identical to one that
+hangs, and the container only shows output when the run COMPLETES — so a
+finished-but-unexited `claude -p` prints nothing, forever.
+
+So the question is no longer "does streaming work" but "what does a consumed
+streamed body leave ref'd in the event loop". A socket, a reader, or a stream
+that stays a reason to keep running. `NodeEngine`'s exit logic is
+handle-counting: find what a streamed response registers and never releases.
+`verify/streamlife` and `verify/httpclose` are the harnesses nearest it.
+
+Worth checking first, because it is one line: whether the same probe with a
+NON-streamed body (`await r.text()`) exits on its own. If it does, the leak is
+in the streaming path specifically.
 (A probe artefact to avoid repeating: a `setTimeout` left running keeps the
 engine's loop alive after the work resolves, which looks like a hang and is not.)
 
