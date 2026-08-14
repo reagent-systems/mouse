@@ -99,6 +99,18 @@ final class NodeEngine: @unchecked Sendable {
     private let jobsLock = NSLock()
     private var jobs: [() -> Void] = []
     private var outstanding = 0
+    /// Why `outstanding` is what it is, by label — the interrupt report reads this, because
+    /// "1 host call in flight" cost a day and "1 http request in flight" costs a minute.
+    private var outstandingWhy: [String: Int] = [:]
+    private func hold(_ why: String) {
+        outstanding += 1
+        outstandingWhy[why, default: 0] += 1
+    }
+    private func release(_ why: String) {
+        outstanding -= 1
+        outstandingWhy[why, default: 0] -= 1
+        if outstandingWhy[why] == 0 { outstandingWhy.removeValue(forKey: why) }
+    }
     /// MessagePort deliveries. Node runs these in their OWN loop phase: after nextTick and the
     /// microtask queue, before immediates — verified against real node, including the case where
     /// the nextTick is queued AFTER the postMessage and still runs first. A microtask-based drain
@@ -143,7 +155,7 @@ final class NodeEngine: @unchecked Sendable {
         enqueueJob { [weak self] in
             guard let self, webSocketTasks[id] != nil else { return }
             webSocketTasks[id] = nil
-            outstanding -= 1
+            release("engine job")
         }
     }
     /// A forked child's message channel back to its parent. nil when there is none, which is
@@ -667,7 +679,30 @@ final class NodeEngine: @unchecked Sendable {
 
     private func runEventLoop() {
         while exitCode == nil {
-            if cancelled { exitCode = 130; break }
+            if cancelled {
+                // An interrupt is the one moment the question "what was this waiting ON" has
+                // an answerable, useful answer — a run that had to be killed was waiting on
+                // SOMETHING, and the loop's own liveness accounting knows what. claude-code's
+                // silent hang burned days for want of this line.
+                let refed = timers.filter(\.refed)
+                var reasons: [String] = []
+                if !refed.isEmpty {
+                    let soonest = refed.map { $0.due.timeIntervalSinceNow }.min() ?? 0
+                    reasons.append("\(refed.count) timer\(refed.count == 1 ? "" : "s") (next in \(String(format: "%.1f", max(0, soonest)))s)")
+                }
+                if outstanding > 0 {
+                    let named = outstandingWhy.map { "\($0.value)× \($0.key)" }.sorted().joined(separator: ", ")
+                    reasons.append(named.isEmpty ? "\(outstanding) host calls in flight" : named)
+                }
+                if hasOpenHandles { reasons.append("open sockets/servers") }
+                if stdinActive { reasons.append("stdin listeners") }
+                if pendingLookups > 0 { reasons.append("\(pendingLookups) dns lookup\(pendingLookups == 1 ? "" : "s")") }
+                if !reasons.isEmpty {
+                    err += "interrupted while waiting on: " + reasons.joined(separator: ", ") + "\n"
+                }
+                exitCode = 130
+                break
+            }
             drainTicks()
 
             jobsLock.lock()
@@ -1153,17 +1188,17 @@ final class NodeEngine: @unchecked Sendable {
             guard let self else { return }
             if hold, !channelHoldsLoop {
                 channelHoldsLoop = true
-                outstanding += 1
+                self.hold("child ipc")
             } else if !hold, channelHoldsLoop {
                 channelHoldsLoop = false
-                outstanding -= 1
+                release("child ipc")
                 wakeup.signal()
             }
         }
         let ipcDisconnect: @convention(block) () -> Void = { [weak self] in
             guard let self, channelHoldsLoop else { return }
             channelHoldsLoop = false
-            outstanding -= 1
+            release("child ipc")
             wakeup.signal()
         }
         expose("ipcHold", ipcHold)
@@ -1191,7 +1226,7 @@ final class NodeEngine: @unchecked Sendable {
             let isEval = mode.hasPrefix("eval")
             let carried = Carried(trampolined(callback))
             let id = sockets.claimExternalID()
-            outstanding += 1
+            hold("spawned child")
             // `options.env` finally reaches the child. A caller that passes env expects exactly
             // it (node REPLACES the environment rather than merging), and the JS side is what
             // decides whether to inherit — same as node, where `{...process.env}` is the caller's
@@ -1254,7 +1289,7 @@ final class NodeEngine: @unchecked Sendable {
                         carried.value.call(withArguments: ["stderr", message])
                         carried.value.call(withArguments: ["exit", 1])
                         self.children[id] = nil
-                        if self.refedChildren.remove(id) != nil { self.outstanding -= 1 }
+                        if self.refedChildren.remove(id) != nil { self.release("child ref") }
                     }
                     return Int32(id)
                 }
@@ -1273,7 +1308,7 @@ final class NodeEngine: @unchecked Sendable {
                     self.children[id] = nil
                     // Only give back the handle if it is still held; an unref'd child already
                     // returned it.
-                    if self.refedChildren.remove(id) != nil { self.outstanding -= 1 }
+                    if self.refedChildren.remove(id) != nil { self.release("child ref") }
                 }
             }
             return Int32(id)
@@ -1304,17 +1339,17 @@ final class NodeEngine: @unchecked Sendable {
         // other handle here is owned by the host side (a socket, a child, a timer).
         let loopHold: @convention(block) (Bool) -> Void = { [weak self] hold in
             guard let self else { return }
-            outstanding += hold ? 1 : -1
+            if hold { self.hold("loop hold") } else { self.release("loop hold") }
         }
         expose("loopHold", loopHold)
         let spawnRef: @convention(block) (Int32, Bool) -> Void = { [weak self] id, refed in
             guard let self, children[Int(id)] != nil else { return }
             if refed, !refedChildren.contains(Int(id)) {
                 refedChildren.insert(Int(id))
-                outstanding += 1
+                hold("child ref")
             } else if !refed, refedChildren.contains(Int(id)) {
                 refedChildren.remove(Int(id))
-                outstanding -= 1
+                release("child ref")
             }
         }
         expose("spawnRef", spawnRef)
@@ -1335,11 +1370,11 @@ final class NodeEngine: @unchecked Sendable {
             request.httpMethod = method
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
-            self.outstanding += 1
+            self.hold("http request")
             let carried = Carried(trampolined(callback))
             URLSession.shared.dataTask(with: request) { data, response, error in
                 self.enqueueJob {
-                    self.outstanding -= 1
+                    self.release("http request")
                     if let error {
                         carried.value.call(withArguments: [["error": error.localizedDescription]])
                         return
@@ -1382,13 +1417,16 @@ final class NodeEngine: @unchecked Sendable {
             request.httpMethod = method
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
-            outstanding += 1
+            // The label carries the DESTINATION: "1× http stream" says a request is stuck,
+            // "http stream to api.anthropic.com" says which one.
+            let label = "http stream to \(url.host ?? urlText)"
+            hold(label)
             let collector = StreamCollector(
                 deliver: { [weak self] event, payload in
                     self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
                 },
                 finished: { [weak self] in
-                    self?.enqueueJob { self?.outstanding -= 1 }
+                    self?.enqueueJob { self?.release(label) }
                 })
             // A delegate session must be invalidated or it retains its delegate forever;
             // StreamCollector does that when the task completes.
@@ -1410,7 +1448,7 @@ final class NodeEngine: @unchecked Sendable {
                 self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
             }
             let id = sockets.claimExternalID()
-            outstanding += 1
+            hold("websocket")
             // `open` comes from the DELEGATE's handshake callback, not from a ping round-trip:
             // a ping races the first inbound frame, so the server's greeting could arrive
             // before the open event — node fires open first, always. The gate below also holds
@@ -1597,7 +1635,7 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [records ?? [], code ?? ""])
                 }
             }
-            outstanding += 1
+            hold("dns")
             pendingLookups += 1
         }
         let dnsReverse: @convention(block) (String, JSValue) -> Void = { [weak self] address, callback in
@@ -1608,7 +1646,7 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [names ?? [], code ?? ""])
                 }
             }
-            outstanding += 1
+            hold("dns")
             pendingLookups += 1
         }
         let dnsService: @convention(block) (String, Int32, JSValue) -> Void = { [weak self] address, port, callback in
@@ -1619,7 +1657,7 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [host ?? "", service ?? "", code ?? ""])
                 }
             }
-            outstanding += 1
+            hold("dns")
             pendingLookups += 1
         }
         // Every completion above releases the handle it took, so a program waiting only on a
@@ -1627,7 +1665,7 @@ final class NodeEngine: @unchecked Sendable {
         let dnsDone: @convention(block) () -> Void = { [weak self] in
             guard let self, pendingLookups > 0 else { return }
             pendingLookups -= 1
-            outstanding -= 1
+            release("dns")
         }
         expose("dnsResolve", dnsResolve)
         expose("dnsReverse", dnsReverse)

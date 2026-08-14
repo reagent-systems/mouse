@@ -239,7 +239,27 @@ That was three separate faults, and all three are now found and fixed:
   `verify/scopedbin`. `claude` now resolves and starts — and then holds the
   terminal as a program with no output, which is the auth wall below.
 
-## CLAUDE CODE: nine eliminations, and the tool the hunt needs next
+## CLAUDE CODE: FOUND — it awaits a stream to statsig.anthropic.com
+
+The interrupt ledger answered on its second use:
+
+    interrupted while waiting on: 9 timers, 1× http stream to statsig.anthropic.com
+
+With a key, 1.0.128 initialises statsig (feature flags/telemetry) BEFORE its
+first output, and that streaming request never completes on our engine — held
+past 127 seconds when URLRequest's default timeout is 60, so delegate events
+for that session are not being delivered at all. That is the engine bug to fix
+next: reproduce with a bare httpStream to statsig.anthropic.com, find why
+didCompleteWithError never fires (large/gzip body? redirect? the response
+never draining?), and fix the transport. DISABLE_TELEMETRY /
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC did not bypass it in 1.0.128.
+
+Where the tool lives: `outstanding` is now a LABELED ledger (`hold(_)` /
+`release(_)`), and an interrupted run reports what it was waiting on — named
+hosts for http streams. Any future "it just hangs" starts by pressing ^C and
+reading the answer.
+
+## Superseded — nine eliminations reached by hand
 
 Everything below is measured, not reasoned:
 
