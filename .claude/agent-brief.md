@@ -144,7 +144,32 @@ That was three separate faults, and all three are now found and fixed:
   `verify/scopedbin`. `claude` now resolves and starts — and then holds the
   terminal as a program with no output, which is the auth wall below.
 
-## CLAUDE CODE WORKS — OUR LAUNCH PATH IS THE BUG
+## THE REMAINING CLAUDE CODE BUG: A KEY BEING PRESENT MAKES IT HANG
+
+Not the compound. `export FOO=bar && echo compound-ok` returns in 0s, so `&&`
+is fine and the earlier note blaming it was wrong. What actually correlates is
+whether a key is set:
+
+    claude -p 'say hi'                       3s   "Invalid API key · Please run /login"
+    export ANTHROPIC_API_KEY=sk-ant-invalid
+    claude -p 'say hi'                      63s   still running, nothing printed
+
+Two SEPARATE commands on one session — exactly how `AgentSession` does it. With
+no key the CLI short-circuits at its own validation and prints. With a key it
+gets past validation and makes a real HTTPS call to the API, and THAT is where
+it stops. So the suspect is the engine's network path under whatever HTTP client
+claude-code 1.0.128 uses, not the shell and not the launch path.
+
+THIS WILL HIT A VALID KEY TOO. A real key also gets past validation into the
+same request. Do not tell the user Claude Code is one key away again until this
+is understood.
+
+Next: find what the CLI's request actually does. Run it with the engine's own
+diagnostics, or reproduce the same request shape through `fetch`/`https` in a
+small script and see whether it returns. `verify/fetchtypes`, `verify/reqsock`
+and `verify/neterrors` are the harnesses nearest this.
+
+## Superseded — the launch path (fixed, and it was real)
 
 The experiment below settled it. Piping anything into the command defeats
 `if interactive, stdin.isEmpty` in `runNode`, which sends it down the path that
