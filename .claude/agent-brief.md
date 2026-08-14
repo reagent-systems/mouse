@@ -16,7 +16,44 @@ whatever configuration a first run needs (model, API key, backend) is saved and
 does not have to be redone every launch. Build that setup into the container
 rather than requiring the user to go to the Terminal container.
 
-## THE DOCS SETTLE IT — talk to Hermes's API Server, not its TUI gateway
+## THE ANSWER, from the docs — an OpenAI-compatible endpoint
+
+`/docs/user-guide/features/api-server`. Everything needed to build the client:
+
+- **Start it:** `hermes gateway`. The API server listens on
+  **`http://127.0.0.1:8642`** by default — loopback, so a real phone needs the
+  host bound wider or reached over the LAN; the SIMULATOR shares the Mac's
+  network stack and can use 127.0.0.1 directly.
+- **Endpoint:** `POST /v1/chat/completions`, plain OpenAI shape:
+
+      {"model": "hermes-agent",
+       "messages": [{"role": "user", "content": "…"}],
+       "stream": false}
+
+  answering with `choices[0].message.content`. `"stream": true` gives SSE with
+  token chunks plus `hermes.tool.progress` events for tool visibility — the
+  streamed narration the orb was built for. `GET /health` is a cheap reachability
+  check and `GET /v1/models` names the profile.
+- **Auth:** `Authorization: Bearer <API_SERVER_KEY>`, REQUIRED for every
+  deployment including the default loopback bind. It cannot be disabled. The key
+  is a static value the user sets in the env / profile `.env`.
+- **Model name:** defaults to the profile name, or `hermes-agent` for the default
+  profile.
+- **THE PROFILES the user meant:** multi-profile routing gives each profile its
+  own `API_SERVER_KEY` in its own `.env`. So a saved setup here is a (base URL,
+  key, model) triple per profile, and the container's settings should hold that
+  shape rather than a single string.
+
+This is an ordinary HTTP client — no socket, no framing, no WebSocket. It also
+generalises: anything OpenAI-shaped could be another entry in the catalog.
+
+### What to do with `HermesGateway`
+Delete the transport. The `Event` type is close to what an SSE stream yields and
+may survive; `connect`/`write`/`receive`/`readLine` and the whole TCP path do
+not, and neither does `verify/hermesgateway`'s stub. Replacing them with a
+URLSession POST is smaller than what is being removed.
+
+## Superseded — the TUI gateway reading
 
 From the official docs (hermes-agent.nousresearch.com/docs/user-guide/messaging),
 which should have been read before any of this was built:
