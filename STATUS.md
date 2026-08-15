@@ -86,8 +86,12 @@ launches and is driven on the iPhone 16 Pro simulator
   login page, the chat input feeds the program (bogus code → claude's own
   "OAuth error: Invalid code", Enter → fresh retry), and `stop` reclaims
   the terminal in one tap. A finished sign-in stores claude's credential in
-  the workspace home and both auth rows (sign-in and ANTHROPIC_API_KEY)
-  disappear. Verified on the simulator Aug 14 up to the account-owner step.
+  the SHARED home — the container exports HOME=/home, a mount every shell
+  carries, so one sign-in covers every project while cwd stays the ring's
+  workspace — and both auth rows (sign-in and ANTHROPIC_API_KEY) disappear.
+  Verified on the simulator Aug 15: a sign-in run wrote its config only to
+  the shared home; the per-workspace copies kept the previous day's
+  timestamps.
 - **claude-code's CURRENT releases cannot run here, and that is a change in
   the package, not a regression in the engine.** `@anthropic-ai/claude-code`
   now ships `bin/claude.exe` — a per-platform NATIVE binary — with

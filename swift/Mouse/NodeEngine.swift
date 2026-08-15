@@ -8895,14 +8895,17 @@ final class NodeEngine: @unchecked Sendable {
           type: function(){ return 'Darwin'; },
           arch: function(){ return 'arm64'; },
           release: function(){ return '23.0.0'; },
-          homedir: function(){ return '/'; },
+          // Real node's rule: $HOME wins, and only then the platform account. The Agent
+          // container leans on this — it exports HOME=/home so every agent shares one home
+          // (credentials, config) while cwd stays the project.
+          homedir: function(){ return process.env.HOME || '/'; },
           tmpdir: function(){ return '/tmp'; },
           hostname: function(){ return 'mouse'; },
           cpus: function(){ return [{ model: 'Apple', speed: 0, times: {} }]; },
           totalmem: function(){ return 4 * 1024 * 1024 * 1024; },
           freemem: function(){ return 1024 * 1024 * 1024; },
           EOL: '\n',
-          userInfo: function(){ return { username: 'mouse', homedir: '/', shell: '/bin/msh' }; },
+          userInfo: function(){ return { username: 'mouse', homedir: process.env.HOME || '/', shell: '/bin/msh' }; },
           endianness: function(){ return 'LE'; },
           uptime: function(){ return Math.floor(Date.now() / 1000) % 86400; },
           loadavg: function(){ return [0, 0, 0]; },

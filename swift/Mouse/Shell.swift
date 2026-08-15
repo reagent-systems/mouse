@@ -1311,7 +1311,13 @@ final class MouseShell {
     /// interpreters that canonicalize their load paths walk those ancestors, and a path that
     /// exists only as a mount prefix answers ENOENT.
     private var runtimeMounts: [(prefix: String, url: URL)] {
-        RuntimeStore.installedNames().isEmpty ? [] : [(prefix: "/usr", url: RuntimeStore.usr)]
+        // /home rides along unconditionally for the same reason /usr does: a stable
+        // filesystem shape. It backs the shared agent home (see RuntimeStore.home).
+        var mounts: [(prefix: String, url: URL)] = [(prefix: "/home", url: RuntimeStore.home)]
+        if !RuntimeStore.installedNames().isEmpty {
+            mounts.append((prefix: "/usr", url: RuntimeStore.usr))
+        }
+        return mounts
     }
 
     /// `pip install <name>[==version] …` — pure-Python wheels only, straight from PyPI into

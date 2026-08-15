@@ -90,7 +90,8 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         endpointVariable: "ANTHROPIC_BASE_URL",
         // `setup-token` is Claude Code's documented sign-in: it renders its own screen,
         // prints the OAuth URL, takes the pasted code, and stores a long-lived credential in
-        // the workspace's home. MEASURED rendering and prompting on this engine.
+        // the SHARED home (/home) — sign in once, every project has it. MEASURED rendering
+        // and prompting on this engine.
         login: "claude setup-token",
         embedded: false,
         // The other way in. Either this key or a completed sign-in satisfies the container.

@@ -31,6 +31,7 @@ final class AgentSession {
             UserDefaults.standard.set(agent.id, forKey: Self.agentKey)
             installed = nil
             exported = false
+            homed = false
         }
     }
 
@@ -38,6 +39,8 @@ final class AgentSession {
     private(set) var installed: Bool?
     /// Whether this session has already exported the agent's saved setting.
     private var exported = false
+    /// Whether this session has already pointed the shell at the shared agent home.
+    private var homed = false
     private(set) var working = false
     /// Shown above the input when the last attempt could not proceed.
     private(set) var problem: String?
@@ -66,16 +69,27 @@ final class AgentSession {
         messages = []
         installed = nil
         exported = false
+        homed = false
     }
 
     /// Whether the agent can answer: its saved key, or — for an agent with its own sign-in —
-    /// the credential that sign-in left in the workspace's home. Claude Code's `setup-token`
-    /// writes `.claude/.credentials.json` there (the engine's homedir is the workspace root).
+    /// the credential that sign-in left in the SHARED home. Claude Code's `setup-token`
+    /// writes `.claude/.credentials.json` under $HOME, and the container points every agent
+    /// at `/home` (RuntimeStore.home on disk), so one sign-in covers every project.
     var authenticated: Bool {
         if AgentSettings.shared.isSet(for: agent) { return true }
-        guard agent.login != nil, let root = terminal?.root else { return false }
+        guard agent.login != nil else { return false }
         return FileManager.default.fileExists(
-            atPath: root.appendingPathComponent(".claude/.credentials.json").path)
+            atPath: RuntimeStore.home.appendingPathComponent(".claude/.credentials.json").path)
+    }
+
+    /// Point the session's shell at the shared home, once. Everything an agent keeps in
+    /// $HOME — sign-in credential, config — lands in one place regardless of project; cwd
+    /// stays the workspace, so the agent still works on THIS project.
+    private func pointAtSharedHome(_ terminal: TerminalSession) async {
+        guard !homed, !agent.embedded else { return }
+        _ = await run("export HOME=/home", on: terminal)
+        homed = true
     }
 
     /// Ask the agent. Installs it first if this is the first time, because an agent that is not
@@ -109,6 +123,8 @@ final class AgentSession {
             await askEmbedded(prompt, terminal: terminal)
             return
         }
+
+        await pointAtSharedHome(terminal)
 
         // The saved setup, into the session's environment. Once per session: `export` persists
         // for the life of the shell, and repeating it would put the key in the transcript twice.
@@ -151,6 +167,7 @@ final class AgentSession {
     func login() async {
         guard let command = agent.login, let terminal, !working, !loggingIn else { return }
         problem = nil
+        await pointAtSharedHome(terminal)
         if installed != true {
             working = true
             messages.append(Message(author: .note, text: agent.install))

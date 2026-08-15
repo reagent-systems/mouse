@@ -117,6 +117,17 @@ enum RuntimeStore {
 
     static let root: URL = usr.appendingPathComponent("lib", isDirectory: true)
 
+    /// One home directory for every workspace, mounted at `/home`. What lives here is the
+    /// state that should NOT be per-project: an agent's sign-in credential, its config. The
+    /// Agent container exports HOME=/home so signing in once is signing in everywhere, while
+    /// cwd — the project — stays the ring's workspace.
+    static let home: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MouseHome", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
     struct Installed {
         let name: String
         let version: String

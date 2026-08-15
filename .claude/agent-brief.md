@@ -290,10 +290,15 @@ came back "OAuth error: Invalid code … Press Enter to retry", and Enter
 retried with a fresh URL), and a `stop` chip takes the terminal back in one
 tap — setup-token swallows ^C as a keystroke, so the chip uses the hard stop,
 not the two-press ritual. A finished sign-in lands
-`.claude/.credentials.json` in the workspace home (engine homedir = workspace
-root); `AgentSession.authenticated` accepts either that file or the saved
-key, and both auth rows hide. Only the final step — a real Anthropic account
-authorizing — remains for the user; everything around it is verified.
+`.claude/.credentials.json` in the SHARED home: the Agent container exports
+HOME=/home (RuntimeStore.home on disk, mounted by the shell alongside /usr),
+and `os.homedir()` now honors $HOME the way real node does. Sign in once,
+every project has it — cwd stays the workspace, so the agent still works on
+the ring's project. MEASURED: a sign-in run wrote .claude/.claude.json only
+to MouseHome; the workspace copies kept yesterday's timestamps.
+`AgentSession.authenticated` accepts that file or the saved key, and both
+auth rows hide. Only the final step — a real Anthropic account authorizing —
+remains for the user; everything around it is verified.
 
 ## CLAUDE CODE: DONE — 2.1.98 answers in the container on the simulator
 
