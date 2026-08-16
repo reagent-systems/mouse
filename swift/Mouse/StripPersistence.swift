@@ -106,6 +106,11 @@ extension CarouselDeck {
             lanes[index].current = reserve.removeFirst()
         }
         lanes.removeAll { retired($0.current) }
+        // A container added to the catalog AFTER this ring was saved exists in no snapshot, so
+        // without this an existing install would never see it — the Agent container arrived that
+        // way. Anything catalogued but absent joins the reserve, where the next swipe reaches it.
+        let present = Set(lanes.map { $0.current.kind } + reserve.map { $0.kind })
+        reserve.append(contentsOf: ContainerType.catalog().filter { !present.contains($0.kind) })
         if lanes.isEmpty {
             lanes = [Lane(current: reserve.isEmpty ? ContainerType.entry(kind: ContainerType.gitHubKind)
                                                    : reserve.removeFirst())]

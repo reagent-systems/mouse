@@ -27,7 +27,7 @@ numbers some of the same ground differently; the mapping is noted per row.
 | **D** — web toolchain | tsc, bundlers, dev servers | **Largely done**, as a byproduct of G | tsc + `tsc --watch`, webpack, esbuild-wasm, vite dev (HMR) and vite build (rollup-wasm) all gated (`verify/esbuild`, `devserver`, `hmr`, `firstrun`). A real SvelteKit project runs `npm run dev` on the device: starts once, pre-bundles its 20 dependencies, and answers a curl from the Mac with HTTP 200 and the rendered 33 kB page. Remaining piece is the Preview surface (phase C) |
 | **B** — WebView JIT | Move JS/wasm execution into WKWebView for JIT speed | **Not started — optional** | Measured: everything runs interpreted; the JIT buys speed, not capability (system.md:2094). No longer a prerequisite for anything |
 | **C** — Preview container | In-app viewing surface for what dev servers serve; LAN hosting | **Not started** | The server half works (vite serves clients outside the app — gated in `verify/devserver`); no in-app viewer exists |
-| **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads the official CPython wasm32-wasi build, hash-checks it, unpacks it (zip reader written here — iOS has no `unzip`) and `python hello.py` runs CPython 3.14.6. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
+| **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads a CPython wasm32-wasi build (VMware Labs' 3.12.0, chosen because it compiles zlib in — the official 3.14 build does not, and no zlib kills `import openai` before any agent code runs), hash-checks it, unpacks it and `python hello.py` runs it. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
 
 ## On the device
 
@@ -51,8 +51,8 @@ launches and is driven on the iPhone 16 Pro simulator
   an opinion about how it prints was printing its raw fields instead.
   Gated in `verify/inspectopts` and `verify/nodeprint`.
 - **Python runs on the phone.** `pkg install python` prints `fetching
-  python 3.14.6 (14 MB)` / `installed python 3.14.6`; `python -c` prints
-  `python 3.14.6 on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
+  python … ` / `installed python`; `python -c` prints
+  its version `on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
   `python hello.py` prints what the script prints. Screenshots at 23:48 on
   2026-07-31.
 - **A node server runs on the phone and answers real requests from off the
@@ -70,17 +70,35 @@ launches and is driven on the iPhone 16 Pro simulator
   only while a program runs; tapping it sends the interrupt the program
   already knew how to handle. Verified: the server stopped, the prompt came
   back, and the port stopped answering.
-- **An agent CLI starts and renders its UI on the phone.** claude-code
-  1.0.128 installs through our own npm, reports `1.0.128 (Claude Code)`,
-  and its React/ink TUI draws its bordered `Welcome to Claude Code` frame
-  on the phase-T screen. Screenshot at 23:58.
+- **An agent CLI answers a prompt on the phone.** claude-code 2.1.98
+  installs through our own npm, runs `-p` to completion on the engine, and
+  its answer renders in the Agent container's exchange on the simulator
+  (screenshot Aug 14, against an Anthropic-shaped stand-in; a real key and
+  an empty address point the same path at api.anthropic.com). The 1.0.x
+  line that first rendered its TUI here is dead UPSTREAM — it awaits
+  statsig.anthropic.com, which no longer resolves — and hangs identically
+  on real node. 2.1.98 is the newest release that is JavaScript the whole
+  way down.
+- **Claude Code's own sign-in runs inside the Agent container.** The `sign
+  in` row hosts `claude setup-token` — its real ink screen — on an embedded
+  terminal grid: the OAuth URL renders, an `open claude.com` chip
+  reassembles it from the wrapped rows and opens Safari on Anthropic's
+  login page, the chat input feeds the program (bogus code → claude's own
+  "OAuth error: Invalid code", Enter → fresh retry), and `stop` reclaims
+  the terminal in one tap. A finished sign-in stores claude's credential in
+  the SHARED home — the container exports HOME=/home, a mount every shell
+  carries, so one sign-in covers every project while cwd stays the ring's
+  workspace — and both auth rows (sign-in and ANTHROPIC_API_KEY) disappear.
+  Verified on the simulator Aug 15: a sign-in run wrote its config only to
+  the shared home; the per-workspace copies kept the previous day's
+  timestamps.
 - **claude-code's CURRENT releases cannot run here, and that is a change in
   the package, not a regression in the engine.** `@anthropic-ai/claude-code`
   now ships `bin/claude.exe` — a per-platform NATIVE binary — with
   `cli-wrapper.cjs` as a fallback that spawns it. iOS will not execute
   unsigned native code, so this is the platform wall the wasm strategy
-  exists for, reached from a new direction. The JS-bundle versions (1.0.128
-  and its era) still run. Any claim here about "claude-code" means those.
+  exists for, reached from a new direction. The JS-bundle versions (through
+  2.1.9x) still run. Any claim here about "claude-code" means those.
 - **Interactive TUIs work.** `npx create-vite` walks its whole flow on the
   phone: text prompt, framework menu, variant menu, install confirmation —
   every transition painting live, colours intact, selections tracking.

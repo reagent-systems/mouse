@@ -148,8 +148,9 @@ enum TerminalCellMetrics {
 /// The SCREEN renderer: rows of styled cells while a program owns the terminal. Redraws are
 /// driven by `screenGeneration` (the grid itself is a Foundation engine, not observable).
 /// No gestures of its own — the gesture law: content gets taps and the keyboard, the shell
-/// keeps the drags.
-private struct TerminalScreenGrid: View {
+/// keeps the drags. Internal, not private: the Agent container embeds it when an agent's own
+/// sign-in flow (a full-screen program) has to run inside the chat.
+struct TerminalScreenGrid: View {
     let terminal: TerminalSession
 
     var body: some View {
