@@ -118,6 +118,11 @@
   const slotsEl = document.getElementById('slots');
   const blackEl = document.getElementById('black');
 
+  // Marketing-embed mode: lighter defaults so the hero never blocks the main
+  // thread (no OCR/tesseract download, fewer particles). The standalone widget
+  // is unaffected.
+  const EMBED = new URLSearchParams(location.search).get('embed') === '1';
+
   const RAMP = '.:-=+*#%@';
   // ramp first (indices 0..8 are the tonal glyphs), then every printable char
   let CHARS = RAMP;
@@ -149,7 +154,7 @@
   const MODES = ['dot', 'ascii', 'hybrid'];
   const GLYPH = { dot: '\u00b7', ascii: '@', hybrid: '\u259a' };
   let mode = 'hybrid';
-  let densityScale = 1, maxCharPx = 36;
+  let densityScale = EMBED ? 0.55 : 1, maxCharPx = 36;
   let W = 0, H = 0, DPR = 1, N = 0, frame = 0;
 
   let px, py, vx, vy, tx, ty, bx, by, pf, bo, wv, tg, tcol, cOrder, jit, cellOf, items;
@@ -626,7 +631,7 @@
         renderSlots();
         seed();
         applyTargets(idx);
-        if (!animated) runOCR();
+        if (!animated && !EMBED) runOCR();
         done();
       };
       img.src = url;
@@ -1127,7 +1132,7 @@
 
   // --- marketing embed hooks ---
   const params = new URLSearchParams(location.search);
-  const embed = params.get('embed') === '1';
+  const embed = EMBED;
   if (embed) {
     document.documentElement.classList.add('embed');
     setMenu(false);
