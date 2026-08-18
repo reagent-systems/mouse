@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://reagent-systems.github.io/mouse/sitemap.xml
