@@ -105,24 +105,39 @@ final class Dictation {
 
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
+        // No usable input (a device with no microphone route) makes installTap throw an
+        // Objective-C exception that Swift cannot catch — so it is refused here, in words.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "Dictation", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "no microphone input"])
+        }
+        // The tap runs on the audio engine's realtime thread. This class is @MainActor, so a
+        // plain closure literal here would INHERIT that isolation and trap on its first call
+        // (dispatch_assert_queue, measured: SIGTRAP the moment the orb was tapped). @Sendable
+        // opts out; the request is the only thing it touches.
+        nonisolated(unsafe) let sink = request
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
+            sink.append(buffer)
         }
         engine.prepare()
         try engine.start()
 
-        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+        // Same rule: recognition results arrive on the recognizer's queue. Take the values
+        // there, cross to the main actor with them, touch state only on the main actor.
+        task = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, error in
+            let heard = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal ?? false
+            let failed = error != nil
             Task { @MainActor in
                 guard let self else { return }
-                if let result {
-                    let heard = result.bestTranscription.formattedString
+                if let heard {
                     if heard != self.transcript {
                         self.transcript = heard
                         self.lastChange = Date()
                     }
-                    if result.isFinal { self.endpoint() }
+                    if isFinal { self.endpoint() }
                 }
-                if error != nil { self.stop() }
+                if failed { self.stop() }
             }
         }
     }
