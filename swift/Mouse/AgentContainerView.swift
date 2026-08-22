@@ -11,6 +11,10 @@ struct AgentContainerView: View {
 
     @State private var session = AgentSession()
     @State private var dictation = Dictation()
+    @State private var speech = Speech()
+    /// The current turn was SPOKEN, so its answer is spoken back and the microphone reopens
+    /// after — a conversation, not a form. A typed turn stays silent.
+    @State private var voiceTurn = false
     @State private var draft = ""
     @State private var pickerOpen = false
     @State private var settings = AgentSettings.shared
@@ -69,6 +73,36 @@ struct AgentContainerView: View {
         .foregroundStyle(.white)
         .onAppear { session.attach(root: deck?.workspace?.root) }
         .onChange(of: deck?.workspace?.root) { _, root in session.attach(root: root) }
+        // Hands-free: the speaker stopped, the words go. No tap between saying and asking.
+        .onChange(of: dictation.finished) { _, finished in
+            guard finished else { return }
+            let spoken = dictation.take()
+            guard !spoken.isEmpty else { return }
+            draft = draft.isEmpty ? spoken : draft + " " + spoken
+            voiceTurn = true
+            send()
+        }
+        // The answer, spoken as it streams: every delta feeds the synthesizer, which speaks
+        // each sentence the moment it completes. The whole is flushed when the turn ends.
+        .onChange(of: session.messages.last?.text) { _, text in
+            guard voiceTurn, let text, session.messages.last?.author == .agent else { return }
+            speech.feed(text)
+        }
+        .onChange(of: session.working) { _, working in
+            guard voiceTurn, !working else { return }
+            speech.finish()
+            // Nothing to say (a problem, or a silent agent): hand the microphone back now.
+            if !speech.speaking { Task { await dictation.start() } }
+        }
+        // Spoken answer done: listen for the reply. Six seconds of silence gives the mic back.
+        .onChange(of: speech.speaking) { was, speaking in
+            guard voiceTurn, was, !speaking, !session.working else { return }
+            Task { await dictation.start() }
+        }
+        // The microphone closed on silence with nothing said: the conversation is over.
+        .onChange(of: dictation.heardNothing) { _, nothing in
+            if nothing { voiceTurn = false }
+        }
     }
 
     // MARK: - The exchange
@@ -132,7 +166,8 @@ struct AgentContainerView: View {
             Button {
                 Task { await toggleDictation() }
             } label: {
-                ThinkingOrb(state: dictation.listening ? .listening : .idle, size: 20)
+                ThinkingOrb(state: dictation.listening ? .listening
+                            : speech.speaking ? .working : .idle, size: 20)
                     .frame(width: 32, height: 32)
                     .opacity(dictation.available ? 1 : 0.3)
                     .contentShape(Rectangle())
@@ -346,6 +381,14 @@ struct AgentContainerView: View {
 
     private var statusLine: some View {
         HStack(spacing: 8) {
+            // The two numbers a voice agent is judged by, from the last turn: seconds to the
+            // first word, and to the whole answer.
+            if let latency = session.latency {
+                Text(latency.firstWord.map { String(format: "%.1fs first word · %.1fs", $0, latency.whole) }
+                     ?? String(format: "%.1fs", latency.whole))
+                    .font(.custom(AppFont.asciiName, size: 10))
+                    .opacity(0.4)
+            }
             Spacer(minLength: 0)
             Button {
                 pickerOpen.toggle()
@@ -372,17 +415,25 @@ struct AgentContainerView: View {
             _ = terminal.sendKey("\r")
             return
         }
+        if voiceTurn { speech.begin() } else { speech.stop() }
         Task { await session.send(text) }
     }
 
+    /// The orb: tap to talk; tap while talking to stop and SEND what was said — a second
+    /// tap means "done", not "discard"; tap while the answer is being spoken to interrupt it
+    /// and talk over it.
     private func toggleDictation() async {
         if dictation.listening {
             dictation.stop()
             let spoken = dictation.take()
             if !spoken.isEmpty {
                 draft = draft.isEmpty ? spoken : draft + " " + spoken
+                voiceTurn = true
+                send()
             }
         } else {
+            if speech.speaking { speech.stop() }
+            voiceTurn = true
             await dictation.start()
         }
     }

@@ -46,6 +46,7 @@
 		AE73F32B4C2FD5EF9A76994C /* GitGraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B299975B30C229DCCCB015 /* GitGraphView.swift */; };
 		B12D6FC121DECB1E6754DA64 /* NodeSockets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */; };
 		B49F9E6B29A297122BCFDF37 /* AgentCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119D8305D7BBD8F65808AE6A /* AgentCatalog.swift */; };
+		B4CA31D6D99B8A9820577443 /* Speech.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06B72D6F7604038F895B646A /* Speech.swift */; };
 		B61F67FB754D9C300BB0C97D /* Runtimes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A5E9B8DC023465151C2E32 /* Runtimes.swift */; };
 		CBFE9B07C55D2D88C76AE7EF /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5808E2C3F3EE351EB16E5DD /* AppFont.swift */; };
 		D855B4B114C514E0BD93F235 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7BC5BA08EEADE47C5B986F /* AgentSettings.swift */; };
@@ -60,6 +61,7 @@
 		03A5E9B8DC023465151C2E32 /* Runtimes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Runtimes.swift; sourceTree = "<group>"; };
 		03EAFE39A6EE12DDA5EA8D3F /* NodeSockets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeSockets.swift; sourceTree = "<group>"; };
 		05D6F771DF19B303F2B844F2 /* Mouse.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		06B72D6F7604038F895B646A /* Speech.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Speech.swift; sourceTree = "<group>"; };
 		080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellLanguage.swift; sourceTree = "<group>"; };
 		0D7D43BF3F50D2D3AAC7E907 /* NodeWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeWatch.swift; sourceTree = "<group>"; };
 		0E73E50FC2D809F76902185C /* AsciiArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArt.swift; sourceTree = "<group>"; };
@@ -143,6 +145,7 @@
 				03A5E9B8DC023465151C2E32 /* Runtimes.swift */,
 				5A7FDD7DE14447F992EB32D3 /* Shell.swift */,
 				080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */,
+				06B72D6F7604038F895B646A /* Speech.swift */,
 				F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */,
 				2D1234209A0254A06BB8E915 /* Terminal.swift */,
 				9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */,
@@ -284,6 +287,7 @@
 				B61F67FB754D9C300BB0C97D /* Runtimes.swift in Sources */,
 				A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */,
 				95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */,
+				B4CA31D6D99B8A9820577443 /* Speech.swift in Sources */,
 				4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */,
 				A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */,
 				0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */,

@@ -65,6 +65,10 @@ final class NodeEngine: @unchecked Sendable {
     nonisolated(unsafe) static var globalContextConfigurator: ((NodeEngine, JSContext) -> Void)?
     /// A live backtrace captured by such a diagnostic, surfaced into `err` when the run ends.
     var watchdogBacktrace: String?
+    /// Every stdout write, AS IT HAPPENS, for a run without a TTY — the chat's way of showing
+    /// an answer while it is still arriving. `out` still accumulates; the host decides which
+    /// copy it wants. Called on the JS thread.
+    var liveStdout: (@Sendable (String) -> Void)?
     private var virtualMachine: JSVirtualMachine!
     /// `vm` contexts, each a separate global in the same virtual machine.
     private var vmContexts: [Int: JSContext] = [:]
@@ -915,7 +919,7 @@ final class NodeEngine: @unchecked Sendable {
 
         let stdoutWrite: @convention(block) (String) -> Void = { [weak self] text in
             guard let self else { return }
-            if let tty = self.tty { tty.write(text) } else { self.out += text }
+            if let tty = self.tty { tty.write(text) } else { self.out += text; self.liveStdout?(text) }
         }
         let stderrWrite: @convention(block) (String) -> Void = { [weak self] text in
             guard let self else { return }

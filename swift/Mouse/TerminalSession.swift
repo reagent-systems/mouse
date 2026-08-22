@@ -323,7 +323,10 @@ final class TerminalSession {
             historyChanged: { hooks.historyChanged() },
             githubToken: { hooks.githubToken() },
             githubLogin: { hooks.githubLogin() },
-            launchProgram: launcher
+            launchProgram: launcher,
+            // No grid means no program can take the screen — so its output flows here, as
+            // it is produced, the way a terminal would have shown it.
+            liveOutput: screenless
         )
         isRunning = true
         runningTask = Task { @MainActor [weak self] in

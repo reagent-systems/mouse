@@ -14,6 +14,14 @@ final class Dictation {
     /// Live text while speaking, replaced on every partial result.
     private(set) var transcript = ""
     private(set) var listening = false
+    /// Flipped when the speaker STOPPED — about a second of silence after words — with a
+    /// transcript worth sending. Hands-free: the container sends on this rather than waiting
+    /// for a tap. Cleared on the next `start`.
+    private(set) var finished = false
+    /// Flipped when the microphone closed on its own with NOTHING said — the give-up
+    /// timeout. The container reads it as "the conversation is over" and stops reopening
+    /// the mic; a tap-to-stop or an endpoint never sets it.
+    private(set) var heardNothing = false
     /// Set when a request cannot proceed — permission refused, no model, no recognizer.
     private(set) var problem: String?
 
@@ -21,6 +29,15 @@ final class Dictation {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private let engine = AVAudioEngine()
+    /// When the transcript last changed — the clock the endpoint watches.
+    private var lastChange = Date()
+    private var endpointWatch: Task<Void, Never>?
+    /// Silence after words that ends a turn. Long enough for a breath mid-sentence, short
+    /// enough that the answer starts before the speaker wonders whether anything heard them.
+    private static let endpointAfter: TimeInterval = 1.1
+    /// Silence with NO words that gives the microphone back — a tap with nothing said, or a
+    /// hands-free turn the speaker did not take.
+    private static let giveUpAfter: TimeInterval = 6
 
     var available: Bool { recognizer?.isAvailable == true }
 
@@ -29,6 +46,8 @@ final class Dictation {
     func start() async {
         guard !listening else { return }
         problem = nil
+        finished = false
+        heardNothing = false
         guard let recognizer, recognizer.isAvailable else {
             problem = "speech recognition unavailable"
             return
@@ -40,6 +59,8 @@ final class Dictation {
         do {
             try beginCapture(with: recognizer)
             listening = true
+            lastChange = Date()
+            watchForEndpoint()
         } catch {
             problem = "\(error.localizedDescription)"
             stop()
@@ -47,6 +68,8 @@ final class Dictation {
     }
 
     func stop() {
+        endpointWatch?.cancel()
+        endpointWatch = nil
         guard listening || engine.isRunning else { return }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
@@ -69,7 +92,10 @@ final class Dictation {
 
     private func beginCapture(with recognizer: SFSpeechRecognizer) throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .measurement, options: .duckOthers)
+        // playAndRecord, not record: the answer is spoken back on the same session, and the
+        // speaker's next words (a barge-in) must start the microphone without renegotiating.
+        try session.setCategory(.playAndRecord, mode: .measurement,
+                                options: [.defaultToSpeaker, .duckOthers, .allowBluetooth])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -89,12 +115,44 @@ final class Dictation {
             Task { @MainActor in
                 guard let self else { return }
                 if let result {
-                    self.transcript = result.bestTranscription.formattedString
-                    if result.isFinal { self.stop() }
+                    let heard = result.bestTranscription.formattedString
+                    if heard != self.transcript {
+                        self.transcript = heard
+                        self.lastChange = Date()
+                    }
+                    if result.isFinal { self.endpoint() }
                 }
                 if error != nil { self.stop() }
             }
         }
+    }
+
+    /// The endpoint detector: on-device recognition reports partials and rarely finalizes on
+    /// its own, so the turn ends on SILENCE — measured from the last change to the transcript.
+    private func watchForEndpoint() {
+        endpointWatch?.cancel()
+        endpointWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard let self, self.listening else { return }
+                let quiet = Date().timeIntervalSince(self.lastChange)
+                if !self.transcript.isEmpty, quiet > Self.endpointAfter {
+                    self.endpoint()
+                    return
+                }
+                if self.transcript.isEmpty, quiet > Self.giveUpAfter {
+                    self.stop()
+                    self.heardNothing = true
+                    return
+                }
+            }
+        }
+    }
+
+    private func endpoint() {
+        let worthSending = !transcript.trimmingCharacters(in: .whitespaces).isEmpty
+        stop()
+        finished = worthSending
     }
 
     private static func authorizeSpeech() async -> Bool {

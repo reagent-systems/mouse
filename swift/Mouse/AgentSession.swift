@@ -47,6 +47,9 @@ final class AgentSession {
     /// True while the agent's own sign-in program owns the terminal screen. The container
     /// swaps the exchange for the screen, and the input field feeds the program.
     private(set) var loggingIn = false
+    /// The last turn, timed from send: seconds to the first word of the answer, and to the
+    /// whole of it. A voice agent lives or dies by the first number; it is shown, not hidden.
+    private(set) var latency: (firstWord: TimeInterval?, whole: TimeInterval)?
 
     private static let agentKey = "agentContainerAgent"
     /// How long a single command may hold the terminal before the container gives up on it.
@@ -156,10 +159,65 @@ final class AgentSession {
         // to keep a sentence together is the difference between asking a question and running
         // the words in it as commands.
         let quoted = prompt.replacingOccurrences(of: "'", with: "'\\''")
-        let answer = await run("\(agent.launch) -p '\(quoted)'", on: terminal)
-        messages.append(Message(author: .agent, text: answer.text.isEmpty
-            ? "\(agent.launch) printed nothing" : answer.text))
-        if !answer.ok { problem = answer.text }
+        let started = Date()
+        guard let flags = agent.stream else {
+            let answer = await run("\(agent.launch) -p '\(quoted)'", on: terminal)
+            messages.append(Message(author: .agent, text: answer.text.isEmpty
+                ? "\(agent.launch) printed nothing" : answer.text))
+            latency = (firstWord: nil, whole: Date().timeIntervalSince(started))
+            if !answer.ok { problem = answer.errors.isEmpty ? answer.text : answer.errors }
+            return
+        }
+        // Streaming: the agent message exists from the first delta and grows as the answer
+        // arrives — the part a listener hears first. The `result` line, when it comes, is the
+        // whole answer as the agent meant it and replaces what was assembled from deltas.
+        messages.append(Message(author: .agent, text: ""))
+        let index = messages.count - 1
+        var assembled = ""
+        var whole: String?
+        var firstWordAt: Date?
+        let answer = await run("\(agent.launch) -p '\(quoted)' \(flags)", on: terminal) { [weak self] line in
+            guard let self else { return }
+            switch Self.streamedLine(line) {
+            case .delta(let text):
+                if firstWordAt == nil { firstWordAt = Date() }
+                assembled += text
+                self.messages[index].text = assembled
+            case .whole(let text):
+                whole = text
+            case .other:
+                break
+            }
+        }
+        let text = (whole ?? assembled).trimmingCharacters(in: .whitespacesAndNewlines)
+        messages[index].text = text.isEmpty ? "\(agent.launch) printed nothing" : text
+        latency = (firstWord: firstWordAt?.timeIntervalSince(started),
+                   whole: Date().timeIntervalSince(started))
+        if !answer.ok { problem = answer.errors.isEmpty ? answer.text : answer.errors }
+    }
+
+    /// One line of the agent's streamed output, classified. Claude Code's stream-json: text
+    /// deltas ride in `stream_event` lines; the finished answer rides in the `result` line.
+    /// Anything else — warnings, the init record, tool events — is not part of the answer.
+    private enum StreamedLine { case delta(String), whole(String), other }
+
+    private static func streamedLine(_ line: String) -> StreamedLine {
+        guard line.hasPrefix("{"),
+              let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let type = object["type"] as? String else { return .other }
+        switch type {
+        case "stream_event":
+            guard let event = object["event"] as? [String: Any],
+                  event["type"] as? String == "content_block_delta",
+                  let delta = event["delta"] as? [String: Any],
+                  delta["type"] as? String == "text_delta",
+                  let text = delta["text"] as? String else { return .other }
+            return .delta(text)
+        case "result":
+            return .whole(object["result"] as? String ?? "")
+        default:
+            return .other
+        }
     }
 
     /// Run the agent's own sign-in program on the terminal SCREEN, inside the container.
@@ -312,12 +370,14 @@ final class AgentSession {
     /// command was refused, printing nothing at all. And it called any new line success, so
     /// `msh: command not found: pip` counted as a successful install and the launch went ahead.
     /// An error line is a failure, and its text is the most useful thing on the screen.
-    private func run(_ command: String, on terminal: TerminalSession) async -> (ok: Bool, text: String) {
+    private func run(_ command: String, on terminal: TerminalSession,
+                     onLine: ((String) -> Void)? = nil) async -> (ok: Bool, text: String, errors: String) {
         let before = terminal.lines.count
+        var seen = before
         // Screenless: this container has no terminal grid, and an agent handed one never
         // returns. `claude -p` answers in three seconds down this path and hangs forever down
         // the other.
-        guard terminal.run(command, screenless: true) else { return (false, "the terminal is busy") }
+        guard terminal.run(command, screenless: true) else { return (false, "the terminal is busy", "") }
         // BOUNDED. An installed bin that msh launches interactively becomes a full-screen
         // program and owns the terminal until it decides to leave — `claude -p` does exactly
         // that and was still holding it after ninety seconds with nothing printed. An unbounded
@@ -330,14 +390,24 @@ final class AgentSession {
                     .map(\.text).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
                 return (false, printed.isEmpty
                     ? "\(command) is still running after \(Int(Self.patience))s and printed nothing"
-                    : printed)
+                    : printed, "")
             }
-            try? await Task.sleep(for: .milliseconds(120))
+            // Lines as they land — the streaming caller reads each one now, not at exit.
+            if let onLine, terminal.lines.count > seen {
+                for line in terminal.lines[seen...] where line.kind != .command { onLine(line.text) }
+                seen = terminal.lines.count
+            }
+            try? await Task.sleep(for: .milliseconds(onLine == nil ? 120 : 50))
+        }
+        if let onLine, terminal.lines.count > seen {
+            for line in terminal.lines[seen...] where line.kind != .command { onLine(line.text) }
         }
         let produced = Array(terminal.lines[before...]).filter { $0.kind != .command }
         let failed = produced.contains { $0.kind == .error }
         let text = produced.map(\.text).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return (!failed, text)
+        let errors = produced.filter { $0.kind == .error }.map(\.text).joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (!failed, text, errors)
     }
 
 }

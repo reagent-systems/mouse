@@ -79,6 +79,18 @@ launches and is driven on the iPhone 16 Pro simulator
   statsig.anthropic.com, which no longer resolves — and hangs identically
   on real node. 2.1.98 is the newest release that is JavaScript the whole
   way down.
+- **The Agent container answers while the answer is still arriving, and speaks it.** A
+  top-level screenless Node run now streams stdout through the shell line by line
+  (`Context.liveOutput`; children spawned through the bridge still return theirs whole), and
+  Claude Code runs in `stream-json`: the agent message exists from the first delta and grows,
+  the `result` line replaces it with the whole. Measured on the simulator: **1.1 s to the first
+  word, 4.5 s to the whole** of a 29-word answer paced at 120 ms/word by the stand-in — the
+  status line shows both numbers after every turn. On-device speech reads each sentence the
+  moment it completes (`Speech`, AVSpeechSynthesizer; fenced and inline code stay on screen),
+  the microphone ends a turn on ~1.1 s of silence and reopens after the answer is spoken, and a
+  tap on the orb while it speaks is a barge-in. Spoken turns only: a typed prompt stays silent.
+  `verify/voice` gates the sentence-boundary and code-stripping rules headlessly; the audio
+  path itself needs a device.
 - **Claude Code's own sign-in runs inside the Agent container.** The `sign
   in` row hosts `claude setup-token` — its real ink screen — on an embedded
   terminal grid: the OAuth URL renders, an `open claude.com` chip

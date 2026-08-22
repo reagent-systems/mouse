@@ -33,6 +33,11 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     /// instead of the way a settings form imagines it. nil when a key is the only way in.
     let login: String?
 
+    /// Flags that make the agent's print mode STREAM its answer as JSON lines, so the chat can
+    /// show (and speak) the first phrase while the rest is still arriving. nil when the agent
+    /// answers only whole; the container then waits for the whole.
+    let stream: String?
+
     /// Whether this agent runs EMBEDDED: its loop as Python steps on the device's own wasi
     /// CPython, with Mouse executing every tool the loop asks for. The alternative is a local
     /// CLI on the Node layer (Claude Code).
@@ -93,6 +98,9 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // the SHARED home (/home) — sign in once, every project has it. MEASURED rendering
         // and prompting on this engine.
         login: "claude setup-token",
+        // MEASURED on 2.1.98: one `stream_event` line per text delta, then `assistant`, then a
+        // `result` line carrying the whole answer. `--verbose` is required for stream-json.
+        stream: "--output-format stream-json --verbose --include-partial-messages",
         embedded: false,
         // The other way in. Either this key or a completed sign-in satisfies the container.
         setting: Setting(name: "ANTHROPIC_API_KEY", placeholder: "sk-ant-…",
@@ -118,6 +126,7 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         executable: "hermes",
         endpointVariable: nil,
         login: nil,
+        stream: nil,
         // Embedded, per the user's architecture: the loop runs on the device's Python, and
         // Mouse is the scoped tool surface it drives — model calls on URLSession's real TLS
         // (this Python has no ssl), shell on msh, files on the workspace.

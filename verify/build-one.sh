@@ -20,6 +20,10 @@ name="$1"; dir="$T/$name"
 # The agent container's API client stands alone — one HTTP call, no engine behind it.
 if grep -qE 'AgentAPI' "$dir/main.swift" 2>/dev/null; then
   SRC="$M/AgentAPI.swift"
+# The voice layer's pure rules — sentence boundaries, what of an answer is said aloud — stand
+# alone; the synthesizer behind them is iOS's and is not what the gate checks.
+elif grep -qE 'Speech\.' "$dir/main.swift" 2>/dev/null; then
+  SRC="$M/Speech.swift"
 # The wheel installer needs the zip reader (Runtimes) and TarGz (PackageManager) behind it.
 elif grep -qE 'Pip\.' "$dir/main.swift" 2>/dev/null; then
   SRC="$M/PipInstaller.swift $M/Runtimes.swift $NODE_SET"

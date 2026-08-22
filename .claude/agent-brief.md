@@ -277,6 +277,26 @@ Also true: 2.1.98 on real node used the MAC'S OAuth login despite an env key
 being set — on device there is no such fallback, so a real key in the field
 remains the auth story once the spin is fixed.
 
+## VOICE, LOW LATENCY: the turn as a stream, not a wait
+
+Measured on the simulator (Aug 16, stand-in pacing 120 ms/word): **1.1 s to the
+first word, 4.5 s to the whole** — before this branch the chat showed nothing until
+the whole arrived. What it took: (1) `NodeEngine.liveStdout` + `Context.liveOutput`
+— a top-level screenless node run emits stdout lines as written; bridge children
+(claude's spawned `git`, `rg`) still return theirs whole to the parent, so the
+flag is per-context and the shell sets it only for the agent's screenless runs;
+(2) `CodingAgent.stream` flags (`--output-format stream-json --verbose
+--include-partial-messages`, MEASURED shape on 2.1.98: `stream_event` deltas,
+`assistant`, then `result`); (3) `AgentSession.run(onLine:)` polls at 50 ms while
+streaming and the agent message grows per delta; (4) `Speech` speaks each completed
+sentence as it arrives, skips code; (5) `Dictation` endpoints on 1.1 s of silence
+after words and gives up after 6 s of nothing; the container reopens the mic
+after a spoken answer and treats an orb tap during speech as barge-in. Latency
+trap recorded: claude waits 3 s for stdin when stdin is not a TTY on real node;
+the engine's stdin answers EOF immediately, so the phone does not pay it.
+Hermes's ~4-minute per-step import bill is the remaining latency wall, untouched
+here.
+
 ## SIGN-IN: claude's own prompts, inside the chat container
 
 The user goes through Claude Code's normal first-run auth in the container:
