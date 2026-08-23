@@ -295,6 +295,10 @@ struct AgentContainerView: View {
     private var loginScreen: some View {
         if let terminal = session.terminal {
             VStack(alignment: .leading, spacing: 8) {
+                // The Terminal container's key row, up top, unchanged: up/down/left/right,
+                // esc, tab, canc. An agent's own wizard or menu wants the same keys here
+                // that it would want there.
+                TerminalKeyStrip(session: terminal)
                 // The grid, whichever kind of program this is: one that draws a screen
                 // (claude's ink sign-in) and one that prints and asks (hermes's setup wizard)
                 // both land on it — a prompt with no newline yet is on the grid and in no
@@ -372,6 +376,25 @@ struct AgentContainerView: View {
                             .font(.custom(AppFont.asciiName, size: 10))
                             .opacity(0.4)
                         Spacer(minLength: 0)
+                        // The agent's own setup or sign-in, reachable AGAIN from here once
+                        // it has gone through — `hermes setup` is a thing people re-run, and
+                        // a sign-in expires. The row below the chat only asks the first time.
+                        if let title = entry.loginTitle, entry.blocked == nil {
+                            Button {
+                                session.agent = entry
+                                pickerOpen = false
+                                Task { await session.login() }
+                            } label: {
+                                Text(title)
+                                    .font(.custom(AppFont.asciiName, size: 10))
+                                    .opacity(0.55)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(.white.opacity(0.08), in: Capsule())
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
                         if entry.id == session.agent.id {
                             Text("•").font(.custom(AppFont.asciiName, size: 13))
                         }

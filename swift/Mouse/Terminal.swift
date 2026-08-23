@@ -458,7 +458,9 @@ private final class ProgramKeyTextField: UITextField {
 ///
 /// Same shape as the git module's toolbar — bare labels on their own row at the top of the
 /// container, not chips — so a container's commands read the same wherever they appear.
-private struct TerminalKeyStrip: View {
+/// Internal, not private: the Agent container shows the same row above an agent's own sign-in
+/// or setup program — the keys a menu or a wizard wants are the same keys wherever it runs.
+struct TerminalKeyStrip: View {
     let session: TerminalSession
 
     // Words, not arrow glyphs: the git module's row reads `commit sync branch merge refresh`,
