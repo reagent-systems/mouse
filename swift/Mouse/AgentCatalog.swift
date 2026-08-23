@@ -28,10 +28,20 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
     /// uses the address directly).
     let endpointVariable: String?
 
-    /// The agent's OWN sign-in command — a full-screen program the container hosts on an
-    /// embedded terminal screen, so authenticating works the way the agent documents it
-    /// instead of the way a settings form imagines it. nil when a key is the only way in.
+    /// The agent's OWN sign-in or setup command — a full-screen program the container hosts
+    /// on an embedded terminal screen, so it works the way the agent documents it instead of
+    /// the way a settings form imagines it. nil when a key is the only way in.
     let login: String?
+    /// What the row that starts it says: the agent's own word for it.
+    let loginTitle: String?
+    /// The file, under the shared home, that a finished sign-in/setup leaves behind — the
+    /// container's evidence that the agent can answer. nil when a saved key is the only test.
+    let configured: String?
+    /// What that file must SAY to count — any of these substrings. Empty means existing is
+    /// enough (claude writes its credential file only on success); hermes writes a default
+    /// config.yaml the moment its setup starts, and only a chosen provider or endpoint
+    /// (`provider:` / `base_url:` under `model:`) means the setup went through.
+    let configuredWhen: [String]
 
     /// Flags that make the agent's print mode STREAM its answer as JSON lines, so the chat can
     /// show (and speak) the first phrase while the rest is still arriving. nil when the agent
@@ -98,6 +108,9 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // the SHARED home (/home) — sign in once, every project has it. MEASURED rendering
         // and prompting on this engine.
         login: "claude setup-token",
+        loginTitle: "sign in",
+        configured: ".claude/.credentials.json",
+        configuredWhen: [],
         // MEASURED on 2.1.98: one `stream_event` line per text delta, then `assistant`, then a
         // `result` line carrying the whole answer. `--verbose` is required for stream-json.
         stream: "--output-format stream-json --verbose --include-partial-messages",
@@ -118,14 +131,21 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         name: "Hermes Agent",
         runtime: .python,
         install: "pip install hermes-agent==0.19.0",
-        // Hermes is a TUI, and a TUI is the gap this container does not host. It does not need
-        // one: `tui_gateway` is how Hermes already talks to front-ends that are not a terminal —
-        // the Telegram bot is one — speaking newline-delimited JSON over stdio,
-        // `{"id": …, "command": …}` in, events out. A protocol, not a screen.
-        launch: "python -m tui_gateway.entry",
+        // Its CLI. Unused for an embedded agent — the loop runs through the file bridge — and
+        // named truthfully rather than left pointing at an internal gateway it once launched.
+        launch: "hermes",
         executable: "hermes",
         endpointVariable: nil,
-        login: nil,
+        // `hermes setup`, exactly — the wizard itself, on the terminal screen inside the
+        // container, now that WASI programs can read what a person types. Its own sections,
+        // its own defaults, its own files in ~/.hermes (the shared home). No curses on this
+        // Python, so hermes's numbered-menu fallbacks render; no network from this Python
+        // yet, so the Nous Portal login inside it cannot complete — bring-your-own-key
+        // providers and custom endpoints do.
+        login: "python -m hermes_cli.main setup",
+        loginTitle: "set up",
+        configured: ".hermes/config.yaml",
+        configuredWhen: ["provider:", "base_url:"],
         stream: nil,
         // Embedded, per the user's architecture: the loop runs on the device's Python, and
         // Mouse is the scoped tool surface it drives — model calls on URLSession's real TLS
@@ -136,10 +156,9 @@ struct CodingAgent: Identifiable, Sendable, Hashable {
         // The key, not the address. Hermes requires bearer auth on every deployment including
         // the loopback bind, and `hermes gateway` serves 127.0.0.1:8642 by default — which the
         // simulator reaches — so the key is the one thing that cannot be defaulted.
-        // The embedded loop still needs a model. Any OpenAI-compatible endpoint works — the
-        // address field names it, this key authenticates it.
-        setting: Setting(name: "LLM_API_KEY", placeholder: "key for your model endpoint",
-                         secret: true, exported: false),
+        // No field of Mouse's: provider, endpoint, key and model are hermes's own config,
+        // written by its setup and read by its loop — the way `hermes chat` does it.
+        setting: nil,
         // MEASURED, not guessed: `pkg install python` lands CPython 3.14.6, and that wasi build
         // answers `python -m pip --version` with "No module named pip" and `ensurepip` with "No
         // module named ensurepip". There is no way to install a Python package on this device

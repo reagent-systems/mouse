@@ -206,6 +206,64 @@ final class NodeEngine: @unchecked Sendable {
     /// stdin has listeners on an attached TTY — the program is waiting on the keyboard,
     /// which keeps the event loop alive exactly like node's ref'd stdin.
     private var stdinActive = false
+
+    // MARK: - Interactive stdin for WASI programs
+    /// What a WASI program reads from fd 0. Fed from the main thread by `deliverInput`, drained
+    /// by the JS thread through `readStdin`, which BLOCKS until there is something — the
+    /// first time a program on this engine could wait for a person. Node programs never come
+    /// here (their stdin is an event stream on the JS thread), so the cooked-mode line
+    /// discipline — echo, backspace, Enter delivers the line, ^D ends input — applies only
+    /// once a WASI instance has declared itself the reader. It is what a TTY does for
+    /// `input()`; this Python has no termios, so cooked is the only mode it ever asks for.
+    private let stdinLock = NSLock()
+    private var stdinBytes: [UInt8] = []
+    private var stdinLine = ""
+    private var stdinClosed = false
+    private var wasiReads = false
+    private var rawStdin = false
+    private let stdinReady = DispatchSemaphore(value: 0)
+
+    private func feedStdin(_ text: String) {
+        stdinLock.lock(); defer { stdinLock.unlock() }
+        guard wasiReads, !stdinClosed else { return }
+        if rawStdin {
+            stdinBytes += Array(text.utf8)
+            stdinReady.signal()
+            return
+        }
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\r", "\n":
+                stdinLine.append("\n")
+                stdinBytes += Array(stdinLine.utf8)
+                stdinLine = ""
+                tty?.write("\r\n")
+                stdinReady.signal()
+            case "\u{7f}", "\u{8}":
+                if !stdinLine.isEmpty {
+                    stdinLine.removeLast()
+                    tty?.write("\u{8} \u{8}")
+                }
+            case "\u{4}":
+                if stdinLine.isEmpty { stdinClosed = true } else {
+                    stdinBytes += Array(stdinLine.utf8)
+                    stdinLine = ""
+                }
+                stdinReady.signal()
+            default:
+                stdinLine.unicodeScalars.append(scalar)
+                tty?.write(String(scalar))
+            }
+        }
+    }
+
+    /// No more will come: the reader sees EOF after what is buffered.
+    private func closeStdin() {
+        stdinLock.lock()
+        stdinClosed = true
+        stdinLock.unlock()
+        stdinReady.signal()
+    }
     /// The ESM entry's top-level await hasn't settled yet — the loop keeps driving.
     private var entryPending = false
 
@@ -282,6 +340,7 @@ final class NodeEngine: @unchecked Sendable {
 
     /// A keystroke from the host. Delivered to `process.stdin` handlers on the JS thread.
     func deliverInput(_ text: String) {
+        feedStdin(text)
         enqueueJob { [weak self] in
             guard let self, let context = self.context else { return }
             let function = context.objectForKeyedSubscript("__mouseDeliverInput")
@@ -294,10 +353,12 @@ final class NodeEngine: @unchecked Sendable {
     func terminate() {
         cancelled = true
         wakeup.signal()
+        closeStdin()
     }
 
     /// No more input is coming — the writing end of the pipe closed.
     func endInput() {
+        closeStdin()
         enqueueJob { [weak self] in
             guard let self, let context = self.context else { return }
             context.objectForKeyedSubscript("__mouseEndInput")?.call(withArguments: [])
@@ -318,6 +379,7 @@ final class NodeEngine: @unchecked Sendable {
     /// a program with none ends here. In raw mode the host sends the ^C byte through
     /// `deliverInput` instead — that is the terminal discipline real ttys follow.
     func interrupt() {
+        if wasiReads { closeStdin() }
         enqueueJob { [weak self] in
             guard let self, let context = self.context else { return }
             if context.objectForKeyedSubscript("__mouseSigint")?.call(withArguments: [])?.toBool() != true {
@@ -927,9 +989,41 @@ final class NodeEngine: @unchecked Sendable {
             if let tty = self.tty { tty.writeError(text) } else { self.err += text }
         }
         let setRawMode: @convention(block) (Bool) -> Void = { [weak self] raw in
-            self?.tty?.rawModeChanged(raw)
+            guard let self else { return }
+            self.stdinLock.lock(); self.rawStdin = raw; self.stdinLock.unlock()
+            self.tty?.rawModeChanged(raw)
         }
         expose("setRawMode", setRawMode)
+        // The WASI instance announces itself as fd 0's reader: from here on keystrokes are
+        // cooked into lines and echoed, the way a TTY treats a program that never set raw mode.
+        let wasiStdinBegin: @convention(block) () -> Void = { [weak self] in
+            guard let self else { return }
+            self.stdinLock.lock(); self.wasiReads = true; self.stdinLock.unlock()
+        }
+        expose("wasiStdinBegin", wasiStdinBegin)
+        // Called on the JS thread from the WASI shim's fd_read(0). Blocks for input, waking
+        // every quarter second to notice a kill; nil is EOF.
+        let readStdin: @convention(block) (Int) -> String? = { [weak self] limit in
+            guard let self else { return nil }
+            self.stdinLock.lock()
+            while true {
+                if !self.stdinBytes.isEmpty {
+                    let count = min(max(limit, 1), self.stdinBytes.count)
+                    let chunk = Array(self.stdinBytes.prefix(count))
+                    self.stdinBytes.removeFirst(count)
+                    self.stdinLock.unlock()
+                    return Data(chunk).base64EncodedString()
+                }
+                if self.stdinClosed || self.cancelled {
+                    self.stdinLock.unlock()
+                    return nil
+                }
+                self.stdinLock.unlock()
+                _ = self.stdinReady.wait(timeout: .now() + 0.25)
+                self.stdinLock.lock()
+            }
+        }
+        expose("readStdin", readStdin)
         let stdinActiveBlock: @convention(block) (Bool) -> Void = { [weak self] active in
             self?.stdinActive = active   // JS thread — same thread as the event loop
         }
@@ -2392,6 +2486,11 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(childEnvironment, forKeyedSubscript: "__env" as NSString)
         context.setObject(cwd, forKeyedSubscript: "__cwd" as NSString)
         context.setObject(stdin, forKeyedSubscript: "__stdin" as NSString)
+        stdinLock.lock()
+        stdinBytes = Array(stdin.utf8)
+        stdinLine = ""
+        stdinClosed = tty == nil
+        stdinLock.unlock()
         // Is the seeded text ALL the input there will ever be? Only the host knows. A terminal
         // can always deliver more, and a spawned CHILD's parent writes to its pipe later — the
         // first version of this inferred "no TTY means no writer" and broke every child that
@@ -7785,6 +7884,7 @@ final class NodeEngine: @unchecked Sendable {
               [0, { kind: 'stdin' }], [1, { kind: 'stdout' }], [2, { kind: 'stderr' }],
             ]);
             this._next = 3;
+            if (typeof bridge.wasiStdinBegin === 'function') bridge.wasiStdinBegin();
             for (const virtual of Object.keys(options.preopens || {})) {
               this._table.set(this._next++, { kind: 'preopen', name: virtual,
                                               real: String(options.preopens[virtual]) });
@@ -7958,6 +8058,25 @@ final class NodeEngine: @unchecked Sendable {
               fd_read(fd, iovsPointer, iovsCount, readPointer) {
                 const entry = fdOf(fd);
                 if (!entry) return E.badf;
+                if (entry.kind === 'stdin') {
+                  // Interactive: block on the host's line buffer (a screen-attached program
+                  // waits for the person); headless: the handed-in stdin, then EOF.
+                  const pieces = iovecs(iovsPointer, iovsCount);
+                  let wanted = 0;
+                  for (const piece of pieces) wanted += piece.length;
+                  const got = (wanted > 0 && typeof bridge.readStdin === 'function') ? bridge.readStdin(wanted) : null;
+                  if (got == null) { view().setUint32(readPointer, 0, true); return E.success; }
+                  const data = Buffer.from(got, 'base64');
+                  let offset = 0;
+                  for (const piece of pieces) {
+                    const count = Math.min(piece.length, data.length - offset);
+                    if (count <= 0) break;
+                    bytes().set(data.subarray(offset, offset + count), piece.pointer);
+                    offset += count;
+                  }
+                  view().setUint32(readPointer, offset, true);
+                  return E.success;
+                }
                 if (entry.kind !== 'file') { view().setUint32(readPointer, 0, true); return E.success; }
                 if (!capable(entry, RIGHT.fd_read)) return E.notcapable;
                 let read = 0;
@@ -8013,8 +8132,13 @@ final class NodeEngine: @unchecked Sendable {
                            : entry.kind === 'file' ? FILETYPE.regular : FILETYPE.character;
                 memory.setUint8(pointer, type);
                 memory.setUint16(pointer + 2, 0, true);
-                memory.setBigUint64(pointer + 8, RIGHTS_ALL, true);
-                memory.setBigUint64(pointer + 16, RIGHTS_ALL, true);
+                // wasi-libc's isatty(): a character device that CANNOT seek or tell. Granting
+                // every right to the standard streams made them "not a terminal" to every
+                // program that asked — python's input(), hermes's interactive check.
+                const stdio = entry.kind === 'stdin' || entry.kind === 'stdout' || entry.kind === 'stderr';
+                const rights = stdio ? (RIGHTS_ALL & ~(RIGHT.fd_seek | RIGHT.fd_tell)) : RIGHTS_ALL;
+                memory.setBigUint64(pointer + 8, rights, true);
+                memory.setBigUint64(pointer + 16, rights, true);
                 return E.success;
               },
               fd_fdstat_set_flags() { return E.success; },

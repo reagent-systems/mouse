@@ -297,6 +297,31 @@ the engine's stdin answers EOF immediately, so the phone does not pay it.
 Hermes's ~4-minute per-step import bill is the remaining latency wall, untouched
 here.
 
+## HERMES SETUP: `hermes setup` itself, inside the chat container
+
+Decided by the user: the agent's OWN wizard, rendered in the container — not a
+Mouse form, not a patch of its prompt functions. What it took (Aug 22): (1) WASI
+interactive stdin in NodeEngine — `readStdin` blocks the JS thread on a native
+line buffer fed by `deliverInput`; cooked-mode discipline (echo/backspace/Enter/^D)
+applies once a WASI instance declares itself the reader (`wasiStdinBegin`), so
+node programs are untouched; `terminate`/`interrupt`/`endInput` close it (EOF
+→ python's input() raises EOFError → hermes's prompts exit); (2) isatty: stdio
+fdstat rights minus fd_seek|fd_tell; (3) shims `ctypes` (+`ctypes.util`) and
+`fcntl`, laid before a setup as before a turn; (4) Python's HOME=/home
+(Runtimes.json) so ~/.hermes is app-wide; (5) the Hermes catalog entry has no
+Mouse fields — `login: python -m hermes_cli.main setup`, `configured:
+.hermes/config.yaml` with `configuredWhen: ["provider:", "base_url:"]` (hermes
+writes a default config.yaml the moment setup starts); (6) the step driver
+builds the agent from `resolve_runtime_provider()` + config model default and
+carries `{base_url, api_key, api_mode, provider}` out of the capture; Swift's
+AgentAPI(baseURL:) calls it and the note names the host. Measured on the
+simulator end to end: wizard → "Ready to go!" → config.yaml → a turn answered
+by the configured endpoint. Known: prompt text echoed by getpass; the chat
+field must not autocapitalize while a program owns stdin (fixed); a URL chip
+may pick up hermes's "e.g." URLs. Next walls: network from Python (Nous
+Portal OAuth inside the wizard, live model lists) — an http bridge through
+Mouse, the way llm.complete is.
+
 ## SIGN-IN: claude's own prompts, inside the chat container
 
 The user goes through Claude Code's normal first-run auth in the container:

@@ -91,6 +91,24 @@ launches and is driven on the iPhone 16 Pro simulator
   tap on the orb while it speaks is a barge-in. Spoken turns only: a typed prompt stays silent.
   `verify/voice` gates the sentence-boundary and code-stripping rules headlessly; the audio
   path itself needs a device.
+- **Hermes's own `hermes setup` runs inside the Agent container, as itself.** The
+  Hermes `set up` row hosts `python -m hermes_cli.main setup` on the terminal grid:
+  its banner, its three setup modes, its 35-entry provider menu, its custom-endpoint
+  questions, terminal backend, messaging and tools checklists, through to "🚀 Ready
+  to go!" — answered from the chat field (type-ahead works: stdin is line-buffered),
+  writing hermes's own `/home/.hermes/config.yaml` (`model: {provider: custom,
+  base_url, api_key, default}`), app-wide. A turn then resolves its endpoint through
+  hermes's `resolve_runtime_provider()` and the `llm.complete → <host>` note names who
+  answered. What it took, all measured: WASI programs can now READ stdin — a native
+  line buffer the JS thread blocks on, fed by keystrokes, with a cooked-mode line
+  discipline (echo, backspace, Enter, ^D) since this Python has no termios; the
+  standard streams report as a tty (wasi-libc wants a character device WITHOUT
+  seek/tell rights — all-rights made `isatty()` false for every program that asked);
+  and two more wasi-gap shims, `ctypes` (hermes imports it unguarded for a process
+  title) and `fcntl` (its gateway status file locks). Gated: `verify/pystdin`. Known
+  limits, hermes's own words on screen: no curses (numbered menus), `getpass` echoes
+  (no termios), and no network from this Python yet, so the Nous Portal login inside
+  the wizard cannot complete — bring-your-own-key providers and custom endpoints do.
 - **Claude Code's own sign-in runs inside the Agent container.** The `sign
   in` row hosts `claude setup-token` — its real ink screen — on an embedded
   terminal grid: the OAuth URL renders, an `open claude.com` chip

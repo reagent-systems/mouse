@@ -33,6 +33,27 @@ struct AgentAPI: Sendable {
         self.model = model
     }
 
+    /// A FULL base URL, the way hermes's own provider resolution hands it over
+    /// (`https://openrouter.ai/api/v1`, `http://localhost:8080/v1`, …). `/chat/completions`
+    /// goes after it — after a `/v1` it already carries, or after a `/v1` this adds.
+    init?(baseURL: String, key: String, model: String) {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        let withScheme = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        guard let url = URL(string: withScheme), url.host != nil else { return nil }
+        self.baseURL = url
+        self.key = key
+        self.model = model
+    }
+
+    /// Where completions are asked for: `<base>/v1/chat/completions`, the `v1` present once.
+    var completions: URL {
+        let path = baseURL.path.hasSuffix("/") ? String(baseURL.path.dropLast()) : baseURL.path
+        return path.hasSuffix("/v1")
+            ? baseURL.appendingPathComponent("chat/completions")
+            : baseURL.appendingPathComponent("v1/chat/completions")
+    }
+
     enum Failure: Error, CustomStringConvertible {
         case http(Int, String)
         case malformed(String)
@@ -52,7 +73,7 @@ struct AgentAPI: Sendable {
     /// One turn. The whole conversation goes up each time, which is what the endpoint expects —
     /// it is stateless per request, like every OpenAI-shaped API.
     func complete(_ conversation: [(role: String, content: String)]) async throws -> String {
-        var request = URLRequest(url: baseURL.appendingPathComponent("v1/chat/completions"))
+        var request = URLRequest(url: completions)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")

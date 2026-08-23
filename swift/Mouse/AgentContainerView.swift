@@ -48,16 +48,15 @@ struct AgentContainerView: View {
             // empty meant it could never be reached once a key was saved — and a keychain entry
             // survives deleting the app, so "reinstall to fix it" does not work either. Submit an
             // address, even the default one, and the row goes.
-            if session.agent.embedded || session.agent.endpointVariable != nil, session.agent.blocked == nil,
+            if session.agent.endpointVariable != nil, session.agent.blocked == nil,
                !session.loggingIn, settings.address(for: session.agent).isEmpty {
                 addressField
             }
-            // Two ways in, both the agent's own: its sign-in flow, or its key. Either one
-            // satisfies `authenticated` and both rows go.
-            if let setting = session.agent.setting, session.agent.blocked == nil,
-               !session.loggingIn, !session.authenticated {
+            // The ways in, all the agent's own: its sign-in or setup flow, and/or its key.
+            // Any one satisfies `authenticated` and the rows go.
+            if session.agent.blocked == nil, !session.loggingIn, !session.authenticated {
                 if session.agent.login != nil { loginRow }
-                setup(setting)
+                if let setting = session.agent.setting { setup(setting) }
             }
             if let blocked = session.agent.blocked {
                 Text(blocked)
@@ -158,6 +157,10 @@ struct AgentContainerView: View {
                 .focused($inputFocused)
                 .submitLabel(.send)
                 .onSubmit(send)
+                // While a program owns the terminal the field is its stdin: a URL, a key, a
+                // menu number — sentence-casing and autocorrect would rewrite them.
+                .textInputAutocapitalization(session.loggingIn ? .never : .sentences)
+                .autocorrectionDisabled(session.loggingIn)
             // The orb IS the microphone. It already had a listening state and it already sits
             // where the reference puts it, so a separate glyph beside it was two things saying
             // one thing. Tapping starts dictation and the orb picks up; tapping again stops it.
@@ -182,7 +185,9 @@ struct AgentContainerView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(draft.isEmpty || session.working)
+            // A bare Enter is an answer to a program ("keep the default"), so the arrow stays
+            // live on an empty field while one is running.
+            .disabled((draft.isEmpty && !session.loggingIn) || session.working)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
@@ -271,7 +276,7 @@ struct AgentContainerView: View {
             Task { await session.login() }
         } label: {
             HStack(spacing: 8) {
-                Text("sign in")
+                Text(session.agent.loginTitle ?? "sign in")
                     .font(.custom(AppFont.asciiName, size: 12))
                 Spacer(minLength: 0)
             }
@@ -290,6 +295,11 @@ struct AgentContainerView: View {
     private var loginScreen: some View {
         if let terminal = session.terminal {
             VStack(alignment: .leading, spacing: 8) {
+                // The grid, whichever kind of program this is: one that draws a screen
+                // (claude's ink sign-in) and one that prints and asks (hermes's setup wizard)
+                // both land on it — a prompt with no newline yet is on the grid and in no
+                // transcript line, and the cooked-mode echo of what is being typed is there
+                // too. It scrolls the way a terminal does.
                 GeometryReader { geo in
                     TerminalScreenGrid(terminal: terminal)
                         .onAppear { applyGrid(geo.size, terminal: terminal) }

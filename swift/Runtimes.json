@@ -17,7 +17,7 @@
         "PYTHONHOME": "{root}/usr/local",
         "PYTHONPATH": "{root}/usr/local/lib/python3.12:{root}/site-packages",
         "PYTHONUNBUFFERED": "1",
-        "HOME": "/",
+        "HOME": "/home",
         "PYTHONPYCACHEPREFIX": "{root}/pycache"
       },
       "rewriteScriptPaths": true,
