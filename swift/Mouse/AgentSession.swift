@@ -29,14 +29,15 @@ final class AgentSession {
         didSet {
             guard agent.id != oldValue.id else { return }
             UserDefaults.standard.set(agent.id, forKey: Self.agentKey)
-            installed = nil
             exported = false
             homed = false
         }
     }
 
-    /// Nil until asked, then the answer to "is this agent's executable here".
-    private(set) var installed: Bool?
+    /// The id of the agent this session has installed, or nil. Keyed by agent, not a bare
+    /// flag: a turn snapshots its agent (see `send`), and a flag would let a switch mid-turn
+    /// mark the wrong one installed.
+    private var installedFor: String?
     /// Whether this session has already exported the agent's saved setting.
     private var exported = false
     /// Whether this session has already pointed the shell at the shared agent home.
@@ -70,7 +71,7 @@ final class AgentSession {
         guard terminal?.root != root else { return }
         terminal = TerminalSession(root: root)
         messages = []
-        installed = nil
+        installedFor = nil
         exported = false
         homed = false
     }
@@ -89,7 +90,7 @@ final class AgentSession {
     /// Point the session's shell at the shared home, once. Everything an agent keeps in
     /// $HOME — sign-in credential, config — lands in one place regardless of project; cwd
     /// stays the workspace, so the agent still works on THIS project.
-    private func pointAtSharedHome(_ terminal: TerminalSession) async {
+    private func pointAtSharedHome(_ agent: CodingAgent, _ terminal: TerminalSession) async {
         guard !homed, !agent.embedded else { return }
         _ = await run("export HOME=/home", on: terminal)
         homed = true
@@ -100,6 +101,11 @@ final class AgentSession {
     func send(_ text: String) async {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !working, !loggingIn else { return }
+        // The turn belongs to the agent it was sent to. This function suspends many times,
+        // and the picker stays live; reading `self.agent` at each step let a switch mid-turn
+        // finish a Claude turn with Hermes's install and launch lines — Hermes's launch is
+        // its TUI gateway, and the chat filled with its JSON-RPC. Measured, not imagined.
+        let agent = self.agent
         if let blocked = agent.blocked {
             problem = blocked
             return
@@ -123,11 +129,16 @@ final class AgentSession {
         // Embedded: the agent's loop runs as Python steps on THIS device, and Mouse executes
         // what each step asks for. Nothing leaves the phone except the model call.
         if agent.embedded {
-            await askEmbedded(prompt, terminal: terminal)
+            let started = Date()
+            await askEmbedded(prompt, agent: agent, terminal: terminal)
+            // Whole-answer only: the embedded loop's steps are file-bridged, so nothing of the
+            // answer exists before the last one. The number is the honest one — hermes's
+            // import bill per step is most of it.
+            latency = (firstWord: nil, whole: Date().timeIntervalSince(started))
             return
         }
 
-        await pointAtSharedHome(terminal)
+        await pointAtSharedHome(agent, terminal)
 
         // The saved setup, into the session's environment. Once per session: `export` persists
         // for the life of the shell, and repeating it would put the key in the transcript twice.
@@ -143,7 +154,7 @@ final class AgentSession {
             exported = true
         }
 
-        if installed != true {
+        if installedFor != agent.id {
             messages.append(Message(author: .note, text: agent.install))
             let install = await run(agent.install, on: terminal)
             guard install.ok else {
@@ -152,7 +163,7 @@ final class AgentSession {
                 problem = install.text.isEmpty ? "\(agent.name) did not install" : install.text
                 return
             }
-            installed = true
+            installedFor = agent.id
         }
 
         // The prompt is passed as ONE argument. Quoting it here rather than trusting the shell
@@ -223,10 +234,11 @@ final class AgentSession {
     /// Run the agent's own sign-in program on the terminal SCREEN, inside the container.
     /// Returns when the program exits; `authenticated` then says whether it took.
     func login() async {
+        let agent = self.agent   // same rule as `send`: the sign-in belongs to one agent
         guard let command = agent.login, let terminal, !working, !loggingIn else { return }
         problem = nil
-        await pointAtSharedHome(terminal)
-        if installed != true {
+        await pointAtSharedHome(agent, terminal)
+        if installedFor != agent.id {
             working = true
             messages.append(Message(author: .note, text: agent.install))
             let install = await run(agent.install, on: terminal)
@@ -235,7 +247,7 @@ final class AgentSession {
                 problem = install.text.isEmpty ? "\(agent.name) did not install" : install.text
                 return
             }
-            installed = true
+            installedFor = agent.id
         }
         loggingIn = true
         defer { loggingIn = false }
@@ -262,7 +274,7 @@ final class AgentSession {
     /// Python decides (answer, or a tool request) and exits, Swift executes the tool natively
     /// and reruns Python with the result. The model call is a tool like any other, on
     /// URLSession's TLS, because this Python has no ssl and never will.
-    private func askEmbedded(_ prompt: String, terminal: TerminalSession) async {
+    private func askEmbedded(_ prompt: String, agent: CodingAgent, terminal: TerminalSession) async {
         guard let api = AgentAPI(address: AgentSettings.shared.address(for: agent),
                                  key: AgentSettings.shared.value(for: agent)) else {
             problem = "that is not an address"
