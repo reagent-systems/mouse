@@ -107,7 +107,13 @@ launches and is driven on the iPhone 16 Pro simulator
   and two more wasi-gap shims, `ctypes` (hermes imports it unguarded for a process
   title) and `fcntl` (its gateway status file locks). Gated: `verify/pystdin`. The Terminal container's key row (up/down/left/right/
   esc/tab/canc) sits above the program here too, and the picker carries each agent's
-  `set up` / `sign in` so a setup can be re-run once it has gone through. Known
+  `set up` / `sign in` so a setup can be re-run once it has gone through. When the
+  screen shows a numbered menu (or a [Y/n] question), the visible options are
+  mirrored as tappable chips in a rail under the key row — read from the grid, so
+  they are whatever the program presented; tapping one types that number and Enter,
+  the program's marked default renders brighter, and the chip matching the number
+  in the input field lights up. The rail's slot is fixed-height: it appearing and
+  vanishing must not resize the grid mid-program. Known
   limits, hermes's own words on screen: no curses (numbered menus), `getpass` echoes
   (no termios), and no network from this Python yet, so the Nous Portal login inside
   the wizard cannot complete — bring-your-own-key providers and custom endpoints do.

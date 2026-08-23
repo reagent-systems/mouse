@@ -299,6 +299,29 @@ struct AgentContainerView: View {
                 // esc, tab, canc. An agent's own wizard or menu wants the same keys here
                 // that it would want there.
                 TerminalKeyStrip(session: terminal)
+                // The program's own menu, mirrored: when the screen shows a numbered menu
+                // (or a [Y/n] question), each visible option becomes a chip that TYPES its
+                // number and Enter — the same answer, one tap instead of three. Read from
+                // the grid, so it is whatever the program actually presented, and gone the
+                // moment the program moves on. The chip matching what sits in the input
+                // field lights up, so the field and the menu agree before send.
+                // A fixed slot whether or not a menu is showing: the rail coming and going
+                // must not resize the grid mid-program — the reflow scrambled the very
+                // prompt row the rail is parsed from.
+                Group {
+                    if let menu = screenMenu(terminal) {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(menu.options) { option in
+                                    menuChip(option, terminal: terminal)
+                                }
+                            }
+                        }
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(height: 30)
                 // The grid, whichever kind of program this is: one that draws a screen
                 // (claude's ink sign-in) and one that prints and asks (hermes's setup wizard)
                 // both land on it — a prompt with no newline yet is on the grid and in no
@@ -357,6 +380,89 @@ struct AgentContainerView: View {
             return nil
         }
         return URL(string: String(joined[range]))
+    }
+
+    // MARK: - The program's menu, as chips
+
+    /// One choice a running program printed: its number (or y/n), what it says, whether the
+    /// program marked it as the default.
+    private struct ScreenMenuOption: Identifiable {
+        let id: String
+        /// What tapping TYPES — "2", "y", "n". The chip is an input method, nothing more.
+        let types: String
+        let label: String
+        let isDefault: Bool
+    }
+
+    private struct ScreenMenu {
+        let options: [ScreenMenuOption]
+    }
+
+    /// Read the visible screen for a menu awaiting an answer. A prompt is the last non-empty
+    /// row ending with `:`; `[Y/n]`/`[y/N]` becomes yes/no, and `(●) 12. Label` rows above a
+    /// choice prompt become numbered chips. Wrapped continuation rows do not match the option
+    /// shape and simply do not become chips — the full text is on the grid regardless.
+    private func screenMenu(_ terminal: TerminalSession) -> ScreenMenu? {
+        _ = terminal.screenGeneration
+        let screen = terminal.screen
+        var lastRow: String?
+        var lastIndex = -1
+        for row in stride(from: screen.rows - 1, through: 0, by: -1) {
+            let text = screen.text(row: row).trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty { lastRow = text; lastIndex = row; break }
+        }
+        guard let prompt = lastRow, prompt.hasSuffix(":") || prompt.hasSuffix(": ") else { return nil }
+        if prompt.contains("[Y/n]") || prompt.contains("[y/N]") {
+            let yesDefault = prompt.contains("[Y/n]")
+            return ScreenMenu(options: [
+                ScreenMenuOption(id: "y", types: "y", label: "yes", isDefault: yesDefault),
+                ScreenMenuOption(id: "n", types: "n", label: "no", isDefault: !yesDefault),
+            ])
+        }
+        // The default the prompt names ("Choice [default 6]:"), if it names one.
+        var promptDefault: Int?
+        if let range = prompt.range(of: #"\[default (\d+)\]"#, options: .regularExpression) {
+            promptDefault = Int(prompt[range].filter(\.isNumber))
+        }
+        var options: [ScreenMenuOption] = []
+        for row in 0..<lastIndex {
+            let text = screen.text(row: row)
+            guard let match = text.range(of: #"^\s*(?:\([●○xX ]\)|\[[xX ]\]|[●○])?\s*(\d{1,3})\.\s+\S"#,
+                                         options: .regularExpression) else { continue }
+            let matched = String(text[match])
+            let number = matched.filter(\.isNumber)
+            guard let value = Int(number) else { continue }
+            var label = String(text[match.upperBound...])
+            label = (matched.suffix(1) + label).trimmingCharacters(in: .whitespaces)
+            if label.count > 26 { label = String(label.prefix(25)) + "…" }
+            let marked = matched.contains("●") || matched.lowercased().contains("x")
+            options.append(ScreenMenuOption(id: "\(row)-\(value)", types: "\(value)",
+                                            label: "\(value) \(label)",
+                                            isDefault: marked || value == promptDefault))
+        }
+        // A menu, not a coincidence: one stray "1. " in prose is not a menu.
+        guard options.count >= 2 else { return nil }
+        return ScreenMenu(options: options)
+    }
+
+    private func menuChip(_ option: ScreenMenuOption, terminal: TerminalSession) -> some View {
+        let typed = draft.trimmingCharacters(in: .whitespaces)
+        let lit = typed == option.types && !typed.isEmpty
+        return Button {
+            draft = ""
+            _ = terminal.sendPaste(option.types)
+            _ = terminal.sendKey("\r")
+        } label: {
+            Text(option.label)
+                .font(.custom(AppFont.asciiName, size: 11))
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.white.opacity(lit ? 0.28 : option.isDefault ? 0.14 : 0.07),
+                            in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Picker and status
