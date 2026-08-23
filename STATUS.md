@@ -105,7 +105,9 @@ launches and is driven on the iPhone 16 Pro simulator
   standard streams report as a tty (wasi-libc wants a character device WITHOUT
   seek/tell rights — all-rights made `isatty()` false for every program that asked);
   and two more wasi-gap shims, `ctypes` (hermes imports it unguarded for a process
-  title) and `fcntl` (its gateway status file locks). Gated: `verify/pystdin`. Known
+  title) and `fcntl` (its gateway status file locks). Gated: `verify/pystdin`. The Terminal container's key row (up/down/left/right/
+  esc/tab/canc) sits above the program here too, and the picker carries each agent's
+  `set up` / `sign in` so a setup can be re-run once it has gone through. Known
   limits, hermes's own words on screen: no curses (numbered menus), `getpass` echoes
   (no termios), and no network from this Python yet, so the Nous Portal login inside
   the wizard cannot complete — bring-your-own-key providers and custom endpoints do.
