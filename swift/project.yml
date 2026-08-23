@@ -26,6 +26,10 @@ targets:
       path: Mouse/Info.plist
       properties:
         UIAppFonts: [IBMPlexMono-Bold.ttf]
+        # The Agent container's microphone. Both are required before iOS will let the app
+        # record or recognise; recognition is on device, so nothing spoken leaves the phone.
+        NSMicrophoneUsageDescription: Dictating prompts to the coding agent.
+        NSSpeechRecognitionUsageDescription: Turning dictated prompts into text, on this device.
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.reagentsystems.mouse.swift
       # Keep in step with kotlin/app/build.gradle.kts versionName (see RELEASING.md).

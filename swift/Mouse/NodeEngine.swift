@@ -57,6 +57,18 @@ final class NodeEngine: @unchecked Sendable {
     private var tty: TTY?
     private let queue = DispatchQueue(label: "mouse.node", qos: .userInitiated)
     private var context: JSContext!
+    /// A hook run once, right after the JSContext exists — the extension point diagnostics
+    /// hang off. The Mac-side probes use it to arm a JSC job watchdog through dlsym'd private
+    /// API, which must never ship in the app; the app leaves both of these nil. The static
+    /// form exists because probes drive engines the SHELL creates, out of their reach.
+    var contextConfigurator: ((JSContext) -> Void)?
+    nonisolated(unsafe) static var globalContextConfigurator: ((NodeEngine, JSContext) -> Void)?
+    /// A live backtrace captured by such a diagnostic, surfaced into `err` when the run ends.
+    var watchdogBacktrace: String?
+    /// Every stdout write, AS IT HAPPENS, for a run without a TTY — the chat's way of showing
+    /// an answer while it is still arriving. `out` still accumulates; the host decides which
+    /// copy it wants. Called on the JS thread.
+    var liveStdout: (@Sendable (String) -> Void)?
     private var virtualMachine: JSVirtualMachine!
     /// `vm` contexts, each a separate global in the same virtual machine.
     private var vmContexts: [Int: JSContext] = [:]
@@ -99,6 +111,18 @@ final class NodeEngine: @unchecked Sendable {
     private let jobsLock = NSLock()
     private var jobs: [() -> Void] = []
     private var outstanding = 0
+    /// Why `outstanding` is what it is, by label — the interrupt report reads this, because
+    /// "1 host call in flight" cost a day and "1 http request in flight" costs a minute.
+    private var outstandingWhy: [String: Int] = [:]
+    private func hold(_ why: String) {
+        outstanding += 1
+        outstandingWhy[why, default: 0] += 1
+    }
+    private func release(_ why: String) {
+        outstanding -= 1
+        outstandingWhy[why, default: 0] -= 1
+        if outstandingWhy[why] == 0 { outstandingWhy.removeValue(forKey: why) }
+    }
     /// MessagePort deliveries. Node runs these in their OWN loop phase: after nextTick and the
     /// microtask queue, before immediates — verified against real node, including the case where
     /// the nextTick is queued AFTER the postMessage and still runs first. A microtask-based drain
@@ -143,7 +167,7 @@ final class NodeEngine: @unchecked Sendable {
         enqueueJob { [weak self] in
             guard let self, webSocketTasks[id] != nil else { return }
             webSocketTasks[id] = nil
-            outstanding -= 1
+            release("engine job")
         }
     }
     /// A forked child's message channel back to its parent. nil when there is none, which is
@@ -182,6 +206,64 @@ final class NodeEngine: @unchecked Sendable {
     /// stdin has listeners on an attached TTY — the program is waiting on the keyboard,
     /// which keeps the event loop alive exactly like node's ref'd stdin.
     private var stdinActive = false
+
+    // MARK: - Interactive stdin for WASI programs
+    /// What a WASI program reads from fd 0. Fed from the main thread by `deliverInput`, drained
+    /// by the JS thread through `readStdin`, which BLOCKS until there is something — the
+    /// first time a program on this engine could wait for a person. Node programs never come
+    /// here (their stdin is an event stream on the JS thread), so the cooked-mode line
+    /// discipline — echo, backspace, Enter delivers the line, ^D ends input — applies only
+    /// once a WASI instance has declared itself the reader. It is what a TTY does for
+    /// `input()`; this Python has no termios, so cooked is the only mode it ever asks for.
+    private let stdinLock = NSLock()
+    private var stdinBytes: [UInt8] = []
+    private var stdinLine = ""
+    private var stdinClosed = false
+    private var wasiReads = false
+    private var rawStdin = false
+    private let stdinReady = DispatchSemaphore(value: 0)
+
+    private func feedStdin(_ text: String) {
+        stdinLock.lock(); defer { stdinLock.unlock() }
+        guard wasiReads, !stdinClosed else { return }
+        if rawStdin {
+            stdinBytes += Array(text.utf8)
+            stdinReady.signal()
+            return
+        }
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\r", "\n":
+                stdinLine.append("\n")
+                stdinBytes += Array(stdinLine.utf8)
+                stdinLine = ""
+                tty?.write("\r\n")
+                stdinReady.signal()
+            case "\u{7f}", "\u{8}":
+                if !stdinLine.isEmpty {
+                    stdinLine.removeLast()
+                    tty?.write("\u{8} \u{8}")
+                }
+            case "\u{4}":
+                if stdinLine.isEmpty { stdinClosed = true } else {
+                    stdinBytes += Array(stdinLine.utf8)
+                    stdinLine = ""
+                }
+                stdinReady.signal()
+            default:
+                stdinLine.unicodeScalars.append(scalar)
+                tty?.write(String(scalar))
+            }
+        }
+    }
+
+    /// No more will come: the reader sees EOF after what is buffered.
+    private func closeStdin() {
+        stdinLock.lock()
+        stdinClosed = true
+        stdinLock.unlock()
+        stdinReady.signal()
+    }
     /// The ESM entry's top-level await hasn't settled yet — the loop keeps driving.
     private var entryPending = false
 
@@ -258,6 +340,7 @@ final class NodeEngine: @unchecked Sendable {
 
     /// A keystroke from the host. Delivered to `process.stdin` handlers on the JS thread.
     func deliverInput(_ text: String) {
+        feedStdin(text)
         enqueueJob { [weak self] in
             guard let self, let context = self.context else { return }
             let function = context.objectForKeyedSubscript("__mouseDeliverInput")
@@ -270,10 +353,12 @@ final class NodeEngine: @unchecked Sendable {
     func terminate() {
         cancelled = true
         wakeup.signal()
+        closeStdin()
     }
 
     /// No more input is coming — the writing end of the pipe closed.
     func endInput() {
+        closeStdin()
         enqueueJob { [weak self] in
             guard let self, let context = self.context else { return }
             context.objectForKeyedSubscript("__mouseEndInput")?.call(withArguments: [])
@@ -294,6 +379,7 @@ final class NodeEngine: @unchecked Sendable {
     /// a program with none ends here. In raw mode the host sends the ^C byte through
     /// `deliverInput` instead — that is the terminal discipline real ttys follow.
     func interrupt() {
+        if wasiReads { closeStdin() }
         enqueueJob { [weak self] in
             guard let self, let context = self.context else { return }
             if context.objectForKeyedSubscript("__mouseSigint")?.call(withArguments: [])?.toBool() != true {
@@ -335,6 +421,8 @@ final class NodeEngine: @unchecked Sendable {
         // sandbox possible at all.
         virtualMachine = JSVirtualMachine()!
         context = JSContext(virtualMachine: virtualMachine)!
+        contextConfigurator?(context)
+        Self.globalContextConfigurator?(self, context)
         context.name = "mouse-node"
         var fatal: String? = nil
         var fatalValue: JSValue? = nil
@@ -480,6 +568,10 @@ final class NodeEngine: @unchecked Sendable {
         // process.exit(), or a fatal error. Anything it writes still belongs in the output.
         context.objectForKeyedSubscript("__mouseEmitExit")?.call(withArguments: [exitCode ?? 0])
 
+        if let trace = watchdogBacktrace {
+            err += "job watchdog: a single job overran and was terminated. Its live stack:\n"
+                + remapStack(trace) + "\n"
+        }
         return Result(out: out, err: err, status: exitCode ?? 0)
     }
 
@@ -667,7 +759,37 @@ final class NodeEngine: @unchecked Sendable {
 
     private func runEventLoop() {
         while exitCode == nil {
-            if cancelled { exitCode = 130; break }
+            if cancelled {
+                // An interrupt is the one moment the question "what was this waiting ON" has
+                // an answerable, useful answer — a run that had to be killed was waiting on
+                // SOMETHING, and the loop's own liveness accounting knows what. claude-code's
+                // silent hang burned days for want of this line.
+                let refed = timers.filter(\.refed)
+                var reasons: [String] = []
+                if !refed.isEmpty {
+                    let soonest = refed.map { $0.due.timeIntervalSinceNow }.min() ?? 0
+                    reasons.append("\(refed.count) timer\(refed.count == 1 ? "" : "s") (next in \(String(format: "%.1f", max(0, soonest)))s)")
+                }
+                if outstanding > 0 {
+                    let named = outstandingWhy.map { "\($0.value)× \($0.key)" }.sorted().joined(separator: ", ")
+                    reasons.append(named.isEmpty ? "\(outstanding) host calls in flight" : named)
+                }
+                if hasOpenHandles { reasons.append("open sockets/servers") }
+                if stdinActive { reasons.append("stdin listeners") }
+                if pendingLookups > 0 { reasons.append("\(pendingLookups) dns lookup\(pendingLookups == 1 ? "" : "s")") }
+                if !reasons.isEmpty {
+                    err += "interrupted while waiting on: " + reasons.joined(separator: ", ") + "\n"
+                } else {
+                    // Interrupted with NOTHING pending and the loop still alive: the program was
+                    // not waiting, it was RUNNING — a synchronous spin the quiescence checks
+                    // never got a chance to see. Saying so separates "stuck on IO" from "stuck
+                    // in a loop", which are different bugs in different places.
+                    err += "interrupted while busy: nothing pending — the program was computing "
+                        + "or spinning, not waiting\n"
+                }
+                exitCode = 130
+                break
+            }
             drainTicks()
 
             jobsLock.lock()
@@ -859,7 +981,7 @@ final class NodeEngine: @unchecked Sendable {
 
         let stdoutWrite: @convention(block) (String) -> Void = { [weak self] text in
             guard let self else { return }
-            if let tty = self.tty { tty.write(text) } else { self.out += text }
+            if let tty = self.tty { tty.write(text) } else { self.out += text; self.liveStdout?(text) }
         }
         let stderrWrite: @convention(block) (String) -> Void = { [weak self] text in
             guard let self else { return }
@@ -867,9 +989,41 @@ final class NodeEngine: @unchecked Sendable {
             if let tty = self.tty { tty.writeError(text) } else { self.err += text }
         }
         let setRawMode: @convention(block) (Bool) -> Void = { [weak self] raw in
-            self?.tty?.rawModeChanged(raw)
+            guard let self else { return }
+            self.stdinLock.lock(); self.rawStdin = raw; self.stdinLock.unlock()
+            self.tty?.rawModeChanged(raw)
         }
         expose("setRawMode", setRawMode)
+        // The WASI instance announces itself as fd 0's reader: from here on keystrokes are
+        // cooked into lines and echoed, the way a TTY treats a program that never set raw mode.
+        let wasiStdinBegin: @convention(block) () -> Void = { [weak self] in
+            guard let self else { return }
+            self.stdinLock.lock(); self.wasiReads = true; self.stdinLock.unlock()
+        }
+        expose("wasiStdinBegin", wasiStdinBegin)
+        // Called on the JS thread from the WASI shim's fd_read(0). Blocks for input, waking
+        // every quarter second to notice a kill; nil is EOF.
+        let readStdin: @convention(block) (Int) -> String? = { [weak self] limit in
+            guard let self else { return nil }
+            self.stdinLock.lock()
+            while true {
+                if !self.stdinBytes.isEmpty {
+                    let count = min(max(limit, 1), self.stdinBytes.count)
+                    let chunk = Array(self.stdinBytes.prefix(count))
+                    self.stdinBytes.removeFirst(count)
+                    self.stdinLock.unlock()
+                    return Data(chunk).base64EncodedString()
+                }
+                if self.stdinClosed || self.cancelled {
+                    self.stdinLock.unlock()
+                    return nil
+                }
+                self.stdinLock.unlock()
+                _ = self.stdinReady.wait(timeout: .now() + 0.25)
+                self.stdinLock.lock()
+            }
+        }
+        expose("readStdin", readStdin)
         let stdinActiveBlock: @convention(block) (Bool) -> Void = { [weak self] active in
             self?.stdinActive = active   // JS thread — same thread as the event loop
         }
@@ -1034,7 +1188,14 @@ final class NodeEngine: @unchecked Sendable {
         }
         let renamePath: @convention(block) (String, String) -> Bool = { [weak self] from, to in
             guard let self else { return false }
-            return (try? FileManager.default.moveItem(at: self.realURL(from), to: self.realURL(to))) != nil
+            // POSIX rename, not FileManager.moveItem: rename(2) REPLACES an existing
+            // destination atomically, which is the entire point of the tmp-then-rename pattern
+            // every tool's atomic config write uses. moveItem refuses when the destination
+            // exists, and swallowing that refusal left claude-code's .claude.json.tmp.* files
+            // stranded beside a config that never updated — with rc=0 and no output, because
+            // the CLI treats its own config write as best-effort.
+            let source = self.realURL(from), destination = self.realURL(to)
+            return rename(source.path, destination.path) == 0
         }
         // statfs(2) — free space and block counts. Build tools check available space before
         // writing large artifacts, and node exports it.
@@ -1153,17 +1314,17 @@ final class NodeEngine: @unchecked Sendable {
             guard let self else { return }
             if hold, !channelHoldsLoop {
                 channelHoldsLoop = true
-                outstanding += 1
+                self.hold("child ipc")
             } else if !hold, channelHoldsLoop {
                 channelHoldsLoop = false
-                outstanding -= 1
+                release("child ipc")
                 wakeup.signal()
             }
         }
         let ipcDisconnect: @convention(block) () -> Void = { [weak self] in
             guard let self, channelHoldsLoop else { return }
             channelHoldsLoop = false
-            outstanding -= 1
+            release("child ipc")
             wakeup.signal()
         }
         expose("ipcHold", ipcHold)
@@ -1191,7 +1352,7 @@ final class NodeEngine: @unchecked Sendable {
             let isEval = mode.hasPrefix("eval")
             let carried = Carried(trampolined(callback))
             let id = sockets.claimExternalID()
-            outstanding += 1
+            hold("spawned child")
             // `options.env` finally reaches the child. A caller that passes env expects exactly
             // it (node REPLACES the environment rather than merging), and the JS side is what
             // decides whether to inherit — same as node, where `{...process.env}` is the caller's
@@ -1254,7 +1415,7 @@ final class NodeEngine: @unchecked Sendable {
                         carried.value.call(withArguments: ["stderr", message])
                         carried.value.call(withArguments: ["exit", 1])
                         self.children[id] = nil
-                        if self.refedChildren.remove(id) != nil { self.outstanding -= 1 }
+                        if self.refedChildren.remove(id) != nil { self.release("child ref") }
                     }
                     return Int32(id)
                 }
@@ -1273,7 +1434,7 @@ final class NodeEngine: @unchecked Sendable {
                     self.children[id] = nil
                     // Only give back the handle if it is still held; an unref'd child already
                     // returned it.
-                    if self.refedChildren.remove(id) != nil { self.outstanding -= 1 }
+                    if self.refedChildren.remove(id) != nil { self.release("child ref") }
                 }
             }
             return Int32(id)
@@ -1304,17 +1465,17 @@ final class NodeEngine: @unchecked Sendable {
         // other handle here is owned by the host side (a socket, a child, a timer).
         let loopHold: @convention(block) (Bool) -> Void = { [weak self] hold in
             guard let self else { return }
-            outstanding += hold ? 1 : -1
+            if hold { self.hold("loop hold") } else { self.release("loop hold") }
         }
         expose("loopHold", loopHold)
         let spawnRef: @convention(block) (Int32, Bool) -> Void = { [weak self] id, refed in
             guard let self, children[Int(id)] != nil else { return }
             if refed, !refedChildren.contains(Int(id)) {
                 refedChildren.insert(Int(id))
-                outstanding += 1
+                hold("child ref")
             } else if !refed, refedChildren.contains(Int(id)) {
                 refedChildren.remove(Int(id))
-                outstanding -= 1
+                release("child ref")
             }
         }
         expose("spawnRef", spawnRef)
@@ -1335,11 +1496,11 @@ final class NodeEngine: @unchecked Sendable {
             request.httpMethod = method
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
-            self.outstanding += 1
+            self.hold("http request")
             let carried = Carried(trampolined(callback))
             URLSession.shared.dataTask(with: request) { data, response, error in
                 self.enqueueJob {
-                    self.outstanding -= 1
+                    self.release("http request")
                     if let error {
                         carried.value.call(withArguments: [["error": error.localizedDescription]])
                         return
@@ -1382,13 +1543,16 @@ final class NodeEngine: @unchecked Sendable {
             request.httpMethod = method
             for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
             if !bodyBase64.isEmpty { request.httpBody = Data(base64Encoded: bodyBase64) }
-            outstanding += 1
+            // The label carries the DESTINATION: "1× http stream" says a request is stuck,
+            // "http stream to api.anthropic.com" says which one.
+            let label = "http stream to \(url.host ?? urlText)"
+            hold(label)
             let collector = StreamCollector(
                 deliver: { [weak self] event, payload in
                     self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
                 },
                 finished: { [weak self] in
-                    self?.enqueueJob { self?.outstanding -= 1 }
+                    self?.enqueueJob { self?.release(label) }
                 })
             // A delegate session must be invalidated or it retains its delegate forever;
             // StreamCollector does that when the task completes.
@@ -1410,7 +1574,7 @@ final class NodeEngine: @unchecked Sendable {
                 self?.enqueueJob { carried.value.call(withArguments: [event, payload]) }
             }
             let id = sockets.claimExternalID()
-            outstanding += 1
+            hold("websocket")
             // `open` comes from the DELEGATE's handshake callback, not from a ping round-trip:
             // a ping races the first inbound frame, so the server's greeting could arrive
             // before the open event — node fires open first, always. The gate below also holds
@@ -1597,7 +1761,7 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [records ?? [], code ?? ""])
                 }
             }
-            outstanding += 1
+            hold("dns")
             pendingLookups += 1
         }
         let dnsReverse: @convention(block) (String, JSValue) -> Void = { [weak self] address, callback in
@@ -1608,7 +1772,7 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [names ?? [], code ?? ""])
                 }
             }
-            outstanding += 1
+            hold("dns")
             pendingLookups += 1
         }
         let dnsService: @convention(block) (String, Int32, JSValue) -> Void = { [weak self] address, port, callback in
@@ -1619,7 +1783,7 @@ final class NodeEngine: @unchecked Sendable {
                     carried.value.call(withArguments: [host ?? "", service ?? "", code ?? ""])
                 }
             }
-            outstanding += 1
+            hold("dns")
             pendingLookups += 1
         }
         // Every completion above releases the handle it took, so a program waiting only on a
@@ -1627,7 +1791,7 @@ final class NodeEngine: @unchecked Sendable {
         let dnsDone: @convention(block) () -> Void = { [weak self] in
             guard let self, pendingLookups > 0 else { return }
             pendingLookups -= 1
-            outstanding -= 1
+            release("dns")
         }
         expose("dnsResolve", dnsResolve)
         expose("dnsReverse", dnsReverse)
@@ -2322,6 +2486,11 @@ final class NodeEngine: @unchecked Sendable {
         context.setObject(childEnvironment, forKeyedSubscript: "__env" as NSString)
         context.setObject(cwd, forKeyedSubscript: "__cwd" as NSString)
         context.setObject(stdin, forKeyedSubscript: "__stdin" as NSString)
+        stdinLock.lock()
+        stdinBytes = Array(stdin.utf8)
+        stdinLine = ""
+        stdinClosed = tty == nil
+        stdinLock.unlock()
         // Is the seeded text ALL the input there will ever be? Only the host knows. A terminal
         // can always deliver more, and a spawned CHILD's parent writes to its pipe later — the
         // first version of this inferred "no TTY means no writer" and broke every child that
@@ -2576,7 +2745,7 @@ final class NodeEngine: @unchecked Sendable {
         "fs", "path", "os", "util", "events", "buffer", "tty", "assert", "url",
         "child_process", "http", "https", "net", "crypto", "stream", "zlib",
         "readline", "readline/promises", "string_decoder", "constants", "querystring",
-        "fs/promises", "stream/promises", "process", "module", "timers", "timers/promises",
+        "fs/promises", "stream/promises", "stream/consumers", "stream/web", "process", "module", "timers", "timers/promises",
         "path/posix", "path/win32", "http2", "tls", "dns", "worker_threads", "async_hooks",
         "v8", "vm", "perf_hooks", "inspector", "dgram", "cluster", "diagnostics_channel",
         "console", "util/types", "domain", "wasi",
@@ -3380,6 +3549,15 @@ final class NodeEngine: @unchecked Sendable {
     }
 
     static func transpileESM(_ source: String, liveBindings: Bool = true) -> String {
+        // Live-binding promotion runs regex shadow scans over the WHOLE source per imported
+        // name, and ICU's matcher is superlinear on patterns like `\([^()]*name[^()]*\)`
+        // against megabyte-long minified lines — claude-code 2.1.98 loads such a chunk on its
+        // authenticated path, and a `sample` mid-hang put 2331 of 2334 ticks inside
+        // RegexMatcher::find under transpileESM. A bundle that size is a build artifact, not a
+        // hand-written module whose `export let` needs live reads; the snapshot path is the
+        // one this engine used for its whole life before live bindings, and it is correct for
+        // everything a bundler emits. Vite's biggest real chunk (2.1 MB) stays promoted.
+        let liveBindings = liveBindings && source.utf16.count < 4_000_000
         var text = source
         // Emitted BEFORE the body: function declarations are hoisted, so a cycle reaching back
         // into this module finds them, and every export reads through a getter rather than
@@ -3889,6 +4067,17 @@ final class NodeEngine: @unchecked Sendable {
       'use strict';
       const bridge = __mouse;
       globalThis.global = globalThis;
+
+      // Explicit resource management (ES2026 `using`): this JSC does not define the well-known
+      // symbols yet, and bundles compiled against them (claude-code 2.x) throw "Object not
+      // disposable" from their own helpers when the symbol lookup comes back undefined. The
+      // engine already attaches [Symbol.dispose] to timers, so the polyfill must come FIRST.
+      if (!Symbol.dispose) {
+        Object.defineProperty(Symbol, 'dispose', { value: Symbol.for('nodejs.dispose') });
+      }
+      if (!Symbol.asyncDispose) {
+        Object.defineProperty(Symbol, 'asyncDispose', { value: Symbol.for('nodejs.asyncDispose') });
+      }
 
       // ---- Buffer (Uint8Array + encodings) ----
       function utf8Encode(str) {
@@ -7695,6 +7884,7 @@ final class NodeEngine: @unchecked Sendable {
               [0, { kind: 'stdin' }], [1, { kind: 'stdout' }], [2, { kind: 'stderr' }],
             ]);
             this._next = 3;
+            if (typeof bridge.wasiStdinBegin === 'function') bridge.wasiStdinBegin();
             for (const virtual of Object.keys(options.preopens || {})) {
               this._table.set(this._next++, { kind: 'preopen', name: virtual,
                                               real: String(options.preopens[virtual]) });
@@ -7868,6 +8058,25 @@ final class NodeEngine: @unchecked Sendable {
               fd_read(fd, iovsPointer, iovsCount, readPointer) {
                 const entry = fdOf(fd);
                 if (!entry) return E.badf;
+                if (entry.kind === 'stdin') {
+                  // Interactive: block on the host's line buffer (a screen-attached program
+                  // waits for the person); headless: the handed-in stdin, then EOF.
+                  const pieces = iovecs(iovsPointer, iovsCount);
+                  let wanted = 0;
+                  for (const piece of pieces) wanted += piece.length;
+                  const got = (wanted > 0 && typeof bridge.readStdin === 'function') ? bridge.readStdin(wanted) : null;
+                  if (got == null) { view().setUint32(readPointer, 0, true); return E.success; }
+                  const data = Buffer.from(got, 'base64');
+                  let offset = 0;
+                  for (const piece of pieces) {
+                    const count = Math.min(piece.length, data.length - offset);
+                    if (count <= 0) break;
+                    bytes().set(data.subarray(offset, offset + count), piece.pointer);
+                    offset += count;
+                  }
+                  view().setUint32(readPointer, offset, true);
+                  return E.success;
+                }
                 if (entry.kind !== 'file') { view().setUint32(readPointer, 0, true); return E.success; }
                 if (!capable(entry, RIGHT.fd_read)) return E.notcapable;
                 let read = 0;
@@ -7923,8 +8132,13 @@ final class NodeEngine: @unchecked Sendable {
                            : entry.kind === 'file' ? FILETYPE.regular : FILETYPE.character;
                 memory.setUint8(pointer, type);
                 memory.setUint16(pointer + 2, 0, true);
-                memory.setBigUint64(pointer + 8, RIGHTS_ALL, true);
-                memory.setBigUint64(pointer + 16, RIGHTS_ALL, true);
+                // wasi-libc's isatty(): a character device that CANNOT seek or tell. Granting
+                // every right to the standard streams made them "not a terminal" to every
+                // program that asked — python's input(), hermes's interactive check.
+                const stdio = entry.kind === 'stdin' || entry.kind === 'stdout' || entry.kind === 'stderr';
+                const rights = stdio ? (RIGHTS_ALL & ~(RIGHT.fd_seek | RIGHT.fd_tell)) : RIGHTS_ALL;
+                memory.setBigUint64(pointer + 8, rights, true);
+                memory.setBigUint64(pointer + 16, rights, true);
                 return E.success;
               },
               fd_fdstat_set_flags() { return E.success; },
@@ -8809,14 +9023,17 @@ final class NodeEngine: @unchecked Sendable {
           type: function(){ return 'Darwin'; },
           arch: function(){ return 'arm64'; },
           release: function(){ return '23.0.0'; },
-          homedir: function(){ return '/'; },
+          // Real node's rule: $HOME wins, and only then the platform account. The Agent
+          // container leans on this — it exports HOME=/home so every agent shares one home
+          // (credentials, config) while cwd stays the project.
+          homedir: function(){ return process.env.HOME || '/'; },
           tmpdir: function(){ return '/tmp'; },
           hostname: function(){ return 'mouse'; },
           cpus: function(){ return [{ model: 'Apple', speed: 0, times: {} }]; },
           totalmem: function(){ return 4 * 1024 * 1024 * 1024; },
           freemem: function(){ return 1024 * 1024 * 1024; },
           EOL: '\n',
-          userInfo: function(){ return { username: 'mouse', homedir: '/', shell: '/bin/msh' }; },
+          userInfo: function(){ return { username: 'mouse', homedir: process.env.HOME || '/', shell: '/bin/msh' }; },
           endianness: function(){ return 'LE'; },
           uptime: function(){ return Math.floor(Date.now() / 1000) % 86400; },
           loadavg: function(){ return [0, 0, 0]; },
@@ -11585,6 +11802,37 @@ final class NodeEngine: @unchecked Sendable {
         return Stream;
       };
       coreFactories['stream/promises'] = function() { return coreRequire('stream').promises; };
+      // node:stream/consumers — the five drain-it-all helpers. Accepts node streams and web
+      // ReadableStreams alike, because callers hand it whichever they have (claude-code does).
+      coreFactories['stream/consumers'] = function() {
+        async function collect(stream) {
+          const chunks = [];
+          if (stream && typeof stream.getReader === 'function') {
+            const reader = stream.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(Buffer.from(value));
+            }
+          } else {
+            for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+          }
+          return Buffer.concat(chunks);
+        }
+        return {
+          buffer: collect,
+          text: async function(stream) { return (await collect(stream)).toString('utf8'); },
+          json: async function(stream) { return JSON.parse((await collect(stream)).toString('utf8')); },
+          arrayBuffer: async function(stream) {
+            const buf = await collect(stream);
+            return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+          },
+          blob: async function(stream) {
+            const buf = await collect(stream);
+            return new Blob([buf]);
+          },
+        };
+      };
 
       coreFactories.constants = function() { return {}; };
       coreFactories.querystring = function() {
@@ -12029,11 +12277,16 @@ final class NodeEngine: @unchecked Sendable {
           },
           spawnSync: function(command, argv, options) {
             options = options || {};
-            // These cannot be honoured on the msh path — there is no live child to feed, kill or
-            // measure, because a synchronous run reports what the command PRODUCED. Saying so
-            // beats accepting them: an ignored `input` leaves a program waiting for output that
-            // depends on stdin it thinks it sent, and an ignored `timeout` never fires.
-            for (const unsupported of ['input', 'timeout', 'maxBuffer', 'killSignal']) {
+            // `input` cannot be honoured on the msh path — there is no live child to feed, and
+            // an ignored `input` leaves a program parsing output that depends on stdin it
+            // thinks it sent. The OTHER guard rails (`timeout`, `maxBuffer`, `killSignal`) are
+            // accepted and ignored now: a synchronous msh run has already COMPLETED by the
+            // time they could matter, so a timeout that never fires is the truth, not a lie —
+            // and refusing them killed real programs. claude-code 2.x probes ripgrep with
+            // spawnSync{timeout}, the refusal became an unhandled rejection, and the CLI died
+            // silently at startup. Guarding against a hang that cannot happen cost the whole
+            // program.
+            for (const unsupported of ['input']) {
               if (options[unsupported] !== undefined) {
                 throw Object.assign(
                   new Error("child_process.spawnSync's `" + unsupported + "` option is not " +

@@ -53,9 +53,12 @@ setvbuf(stdout, nil, _IONBF, 0)
         let attributes = try? manager.attributesOfItem(atPath: python.wasm.path)
         let size = (attributes?[.size] as? Int) ?? 0
         check(size > 20_000_000, "python.wasm is \(size) bytes, which is far too small to be CPython")
-        let encodings = python.directory.appendingPathComponent("lib/python3.14/encodings/__init__.py")
-        check(manager.fileExists(atPath: encodings.path),
-              "the standard library did not unpack — \(encodings.lastPathComponent) is missing")
+        // This build ships its standard library as python312.zip and imports it through
+        // zipimport — which is exactly why it compiles zlib in, and zlib is why the build was
+        // chosen. A loose encodings/ directory does not exist and should not be looked for.
+        let stdlib = python.directory.appendingPathComponent("usr/local/lib/python312.zip")
+        check(manager.fileExists(atPath: stdlib.path),
+              "the standard library did not unpack — python312.zip is missing")
     }
 
     let second = await msh("pkg install python")
@@ -68,7 +71,7 @@ setvbuf(stdout, nil, _IONBF, 0)
         .write(to: hello, atomically: true, encoding: .utf8)
     let ran = await msh("python hello.py")
     check(ran.contains("hello from python"), "`python hello.py` did not print what the script prints: [\(ran)]")
-    check(ran.contains("3.14.6"), "the interpreter did not report its version: [\(ran)]")
+    check(ran.contains("3.12.0"), "the interpreter did not report its version: [\(ran)]")
 
     // `-c`, the other form everyone uses.
     let inline = await msh("python -c 'print(6*7)'")
@@ -97,11 +100,11 @@ setvbuf(stdout, nil, _IONBF, 0)
 
     if problems.isEmpty {
         print("PKG PYTHON MATCH — the whole path works through msh: an uninstalled runtime "
-              + "refuses by naming its install command, `pkg install python` downloads 14 MB, "
+              + "refuses by naming its install command, `pkg install python` downloads 11 MB, "
               + "verifies it against a recorded hash, unpacks it with the zip reader written for "
               + "this (iOS has no unzip) and reports what it did; a second install notices the "
               + "first; `python hello.py`, `python -c` and a script reading a project file all "
-              + "run CPython 3.14.6 through the engine's WASI; a traceback reaches the terminal; "
+              + "run CPython 3.12.0 through the engine's WASI; a traceback reaches the terminal; "
               + "and `pkg remove` removes it")
     } else {
         for problem in problems { print("  \(problem)") }

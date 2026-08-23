@@ -372,7 +372,7 @@ extension ContainerType {
     /// are retired — Android's deck already ships only these five, and a snapshot that still
     /// carries a placeholder drops it at restore.
     static func catalog() -> [ContainerType] {
-        [gitHubKind, filesKind, viewerKind, graphKind, terminalKind].map { entry(kind: $0) }
+        [gitHubKind, filesKind, viewerKind, graphKind, terminalKind, agentKind].map { entry(kind: $0) }
     }
 
     /// Build an instance of a given catalog type — fresh by default, or with a persisted identity.
@@ -396,12 +396,18 @@ extension ContainerType {
     static let graphKind = 4
     /// Catalog kind 5 is the Terminal container: a native command dispatcher on the workspace.
     static let terminalKind = 5
+    /// Catalog kind 16 is the Agent container: a coding agent, voice or typed, on the workspace.
+    /// SIXTEEN, not six. Kinds 6–15 were the numbered placeholders this ring used to carry, and
+    /// a snapshot written before they retired can still hold one — reusing 6 would restore that
+    /// dead placeholder wearing the Agent's name, with its old title and colour. A kind number
+    /// is an identity in persisted data, so a retired one stays retired.
+    static let agentKind = 16
 
     /// Containers with real surfaces (they render their own content, terminal-styled black).
-    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind, graphKind, terminalKind]
+    static let realKinds: Set<Int> = [gitHubKind, filesKind, viewerKind, graphKind, terminalKind, agentKind]
     static let realTitles: [Int: String] = [
         gitHubKind: "GitHub", filesKind: "Files", viewerKind: "Viewer", graphKind: "Graph",
-        terminalKind: "Terminal",
+        terminalKind: "Terminal", agentKind: "Agent",
     ]
 
     static let swipePresetKind = 0

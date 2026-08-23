@@ -27,7 +27,7 @@ numbers some of the same ground differently; the mapping is noted per row.
 | **D** — web toolchain | tsc, bundlers, dev servers | **Largely done**, as a byproduct of G | tsc + `tsc --watch`, webpack, esbuild-wasm, vite dev (HMR) and vite build (rollup-wasm) all gated (`verify/esbuild`, `devserver`, `hmr`, `firstrun`). A real SvelteKit project runs `npm run dev` on the device: starts once, pre-bundles its 20 dependencies, and answers a curl from the Mac with HTTP 200 and the rendered 33 kB page. Remaining piece is the Preview surface (phase C) |
 | **B** — WebView JIT | Move JS/wasm execution into WKWebView for JIT speed | **Not started — optional** | Measured: everything runs interpreted; the JIT buys speed, not capability (system.md:2094). No longer a prerequisite for anything |
 | **C** — Preview container | In-app viewing surface for what dev servers serve; LAN hosting | **Not started** | The server half works (vite serves clients outside the app — gated in `verify/devserver`); no in-app viewer exists |
-| **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads the official CPython wasm32-wasi build, hash-checks it, unpacks it (zip reader written here — iOS has no `unzip`) and `python hello.py` runs CPython 3.14.6. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
+| **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads a CPython wasm32-wasi build (VMware Labs' 3.12.0, chosen because it compiles zlib in — the official 3.14 build does not, and no zlib kills `import openai` before any agent code runs), hash-checks it, unpacks it and `python hello.py` runs it. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
 
 ## On the device
 
@@ -51,8 +51,8 @@ launches and is driven on the iPhone 16 Pro simulator
   an opinion about how it prints was printing its raw fields instead.
   Gated in `verify/inspectopts` and `verify/nodeprint`.
 - **Python runs on the phone.** `pkg install python` prints `fetching
-  python 3.14.6 (14 MB)` / `installed python 3.14.6`; `python -c` prints
-  `python 3.14.6 on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
+  python … ` / `installed python`; `python -c` prints
+  its version `on wasi` and `{"squares": [0, 1, 4, 9, 16, 25]}`; and
   `python hello.py` prints what the script prints. Screenshots at 23:48 on
   2026-07-31.
 - **A node server runs on the phone and answers real requests from off the
@@ -70,17 +70,73 @@ launches and is driven on the iPhone 16 Pro simulator
   only while a program runs; tapping it sends the interrupt the program
   already knew how to handle. Verified: the server stopped, the prompt came
   back, and the port stopped answering.
-- **An agent CLI starts and renders its UI on the phone.** claude-code
-  1.0.128 installs through our own npm, reports `1.0.128 (Claude Code)`,
-  and its React/ink TUI draws its bordered `Welcome to Claude Code` frame
-  on the phase-T screen. Screenshot at 23:58.
+- **An agent CLI answers a prompt on the phone.** claude-code 2.1.98
+  installs through our own npm, runs `-p` to completion on the engine, and
+  its answer renders in the Agent container's exchange on the simulator
+  (screenshot Aug 14, against an Anthropic-shaped stand-in; a real key and
+  an empty address point the same path at api.anthropic.com). The 1.0.x
+  line that first rendered its TUI here is dead UPSTREAM — it awaits
+  statsig.anthropic.com, which no longer resolves — and hangs identically
+  on real node. 2.1.98 is the newest release that is JavaScript the whole
+  way down.
+- **The Agent container answers while the answer is still arriving, and speaks it.** A
+  top-level screenless Node run now streams stdout through the shell line by line
+  (`Context.liveOutput`; children spawned through the bridge still return theirs whole), and
+  Claude Code runs in `stream-json`: the agent message exists from the first delta and grows,
+  the `result` line replaces it with the whole. Measured on the simulator: **1.1 s to the first
+  word, 4.5 s to the whole** of a 29-word answer paced at 120 ms/word by the stand-in — the
+  status line shows both numbers after every turn. On-device speech reads each sentence the
+  moment it completes (`Speech`, AVSpeechSynthesizer; fenced and inline code stay on screen),
+  the microphone ends a turn on ~1.1 s of silence and reopens after the answer is spoken, and a
+  tap on the orb while it speaks is a barge-in. Spoken turns only: a typed prompt stays silent.
+  `verify/voice` gates the sentence-boundary and code-stripping rules headlessly; the audio
+  path itself needs a device.
+- **Hermes's own `hermes setup` runs inside the Agent container, as itself.** The
+  Hermes `set up` row hosts `python -m hermes_cli.main setup` on the terminal grid:
+  its banner, its three setup modes, its 35-entry provider menu, its custom-endpoint
+  questions, terminal backend, messaging and tools checklists, through to "🚀 Ready
+  to go!" — answered from the chat field (type-ahead works: stdin is line-buffered),
+  writing hermes's own `/home/.hermes/config.yaml` (`model: {provider: custom,
+  base_url, api_key, default}`), app-wide. A turn then resolves its endpoint through
+  hermes's `resolve_runtime_provider()` and the `llm.complete → <host>` note names who
+  answered. What it took, all measured: WASI programs can now READ stdin — a native
+  line buffer the JS thread blocks on, fed by keystrokes, with a cooked-mode line
+  discipline (echo, backspace, Enter, ^D) since this Python has no termios; the
+  standard streams report as a tty (wasi-libc wants a character device WITHOUT
+  seek/tell rights — all-rights made `isatty()` false for every program that asked);
+  and two more wasi-gap shims, `ctypes` (hermes imports it unguarded for a process
+  title) and `fcntl` (its gateway status file locks). Gated: `verify/pystdin`. The Terminal container's key row (up/down/left/right/
+  esc/tab/canc) sits above the program here too, and the picker carries each agent's
+  `set up` / `sign in` so a setup can be re-run once it has gone through. When the
+  screen shows a numbered menu (or a [Y/n] question), the visible options are
+  mirrored as tappable chips in a rail under the key row — read from the grid, so
+  they are whatever the program presented; tapping one types that number and Enter,
+  the program's marked default renders brighter, and the chip matching the number
+  in the input field lights up. The rail's slot is fixed-height: it appearing and
+  vanishing must not resize the grid mid-program. Known
+  limits, hermes's own words on screen: no curses (numbered menus), `getpass` echoes
+  (no termios), and no network from this Python yet, so the Nous Portal login inside
+  the wizard cannot complete — bring-your-own-key providers and custom endpoints do.
+- **Claude Code's own sign-in runs inside the Agent container.** The `sign
+  in` row hosts `claude setup-token` — its real ink screen — on an embedded
+  terminal grid: the OAuth URL renders, an `open claude.com` chip
+  reassembles it from the wrapped rows and opens Safari on Anthropic's
+  login page, the chat input feeds the program (bogus code → claude's own
+  "OAuth error: Invalid code", Enter → fresh retry), and `stop` reclaims
+  the terminal in one tap. A finished sign-in stores claude's credential in
+  the SHARED home — the container exports HOME=/home, a mount every shell
+  carries, so one sign-in covers every project while cwd stays the ring's
+  workspace — and both auth rows (sign-in and ANTHROPIC_API_KEY) disappear.
+  Verified on the simulator Aug 15: a sign-in run wrote its config only to
+  the shared home; the per-workspace copies kept the previous day's
+  timestamps.
 - **claude-code's CURRENT releases cannot run here, and that is a change in
   the package, not a regression in the engine.** `@anthropic-ai/claude-code`
   now ships `bin/claude.exe` — a per-platform NATIVE binary — with
   `cli-wrapper.cjs` as a fallback that spawns it. iOS will not execute
   unsigned native code, so this is the platform wall the wasm strategy
-  exists for, reached from a new direction. The JS-bundle versions (1.0.128
-  and its era) still run. Any claim here about "claude-code" means those.
+  exists for, reached from a new direction. The JS-bundle versions (through
+  2.1.9x) still run. Any claim here about "claude-code" means those.
 - **Interactive TUIs work.** `npx create-vite` walks its whole flow on the
   phone: text prompt, framework menu, variant menu, install confirmation —
   every transition painting live, colours intact, selections tracking.

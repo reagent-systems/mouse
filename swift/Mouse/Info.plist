@@ -18,6 +18,10 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Dictating prompts to the coding agent.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Turning dictated prompts into text, on this device.</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>IBMPlexMono-Bold.ttf</string>

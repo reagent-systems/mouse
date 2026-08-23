@@ -840,6 +840,9 @@ struct Panel: View {
                 } else if type.kind == ContainerType.terminalKind {
                     TerminalContainerView(deck: deck)
                         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                } else if type.kind == ContainerType.agentKind {
+                    AgentContainerView(deck: deck)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 } else if !type.usesGapLabel {
                     Text(type.displayTitle)
                         .font(type.isOnboardingPreset

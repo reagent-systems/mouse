@@ -396,7 +396,12 @@ enum PackageManager {
         /// `@rollup/wasm-node`. nil when the package is itself.
         var installedAs: String? = nil
         /// Whether this placement sits at the root of node_modules (its bins join .bin).
-        var atRoot: Bool { !path.dropFirst("node_modules/".count).contains("/") }
+        ///
+        /// The test is "no FURTHER node_modules", not "no slash". A scoped package lives at
+        /// `node_modules/@scope/name`, so the slash test called every one of them nested and
+        /// dropped its bins — `npm i -g @anthropic-ai/claude-code` reported "added 1 packages"
+        /// and left no `claude` command behind, and the same was true of every scoped CLI.
+        var atRoot: Bool { !path.dropFirst("node_modules/".count).contains("node_modules/") }
     }
 
     /// Packages whose npm release is a per-platform NATIVE binary, mapped to the WebAssembly

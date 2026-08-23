@@ -122,14 +122,17 @@ final class TerminalSession {
 
     /// Returns false when the input was refused (a command is already running) so the prompt
     /// field can keep its text.
+    /// `screenless`: the caller has no grid to give a full-screen program. The Agent container
+    /// is the case — it renders a conversation, not a terminal — and without this a print-mode
+    /// invocation like `claude -p` is handed the screen it never asked for and never returns.
     @discardableResult
-    func run(_ raw: String, hooks: Hooks = Hooks()) -> Bool {
+    func run(_ raw: String, hooks: Hooks = Hooks(), screenless: Bool = false) -> Bool {
         guard !isRunning, program == nil else { return false }
         let command = raw.trimmingCharacters(in: .whitespaces)
         append("\(prompt) \(command)", .command)
         guard !command.isEmpty else { return true }
         switch engine {
-        case .msh: runShell(command, hooks: hooks)
+        case .msh: runShell(command, hooks: hooks, screenless: screenless)
         case .js: runJavaScript(command)
         }
         return true
@@ -299,7 +302,15 @@ final class TerminalSession {
         screenGeneration += 1
     }
 
-    private func runShell(_ command: String, hooks: Hooks) {
+    private func runShell(_ command: String, hooks: Hooks, screenless: Bool = false) {
+        // No launcher means no screen to take: `runNode` sees `launchProgram == nil` and runs
+        // the bin the way that RETURNS its output, which is what a caller without a grid can
+        // actually use. Spelled out rather than inlined — a ternary over an optional closure
+        // gives the type checker nothing to work with.
+        var launcher: (@MainActor @Sendable (any TerminalProgram) -> Void)?
+        if !screenless {
+            launcher = { [weak self] program in self?.launch(program) ?? () }
+        }
         let context = MouseShell.Context(
             root: root,
             markModified: { hooks.markModified($0) },
@@ -312,7 +323,10 @@ final class TerminalSession {
             historyChanged: { hooks.historyChanged() },
             githubToken: { hooks.githubToken() },
             githubLogin: { hooks.githubLogin() },
-            launchProgram: { [weak self] program in self?.launch(program) }
+            launchProgram: launcher,
+            // No grid means no program can take the screen — so its output flows here, as
+            // it is produced, the way a terminal would have shown it.
+            liveOutput: screenless
         )
         isRunning = true
         runningTask = Task { @MainActor [weak self] in

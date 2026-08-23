@@ -44,6 +44,11 @@ final class MouseShell {
         /// Hand the terminal a full-screen interactive program (`less`, `top`). nil when the
         /// shell runs headless — those builtins then fall back to transcript behavior.
         var launchProgram: (@MainActor (TerminalProgram) -> Void)? = nil
+        /// A top-level Node bin with no screen to take streams its stdout through `emit` line
+        /// by line instead of returning it whole at exit. The Agent container's screenless runs
+        /// set this: an answer that arrives a phrase at a time is the difference between a
+        /// voice agent and a voicemail. Headless harnesses keep the default and read `out`.
+        var liveOutput = false
     }
 
     struct Output {
@@ -1238,6 +1243,7 @@ final class MouseShell {
         case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "pkg": return await pkgCmd(args, context: context)
+        case "pip", "pip3": return await pipCmd(args, context: context)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1310,7 +1316,41 @@ final class MouseShell {
     /// interpreters that canonicalize their load paths walk those ancestors, and a path that
     /// exists only as a mount prefix answers ENOENT.
     private var runtimeMounts: [(prefix: String, url: URL)] {
-        RuntimeStore.installedNames().isEmpty ? [] : [(prefix: "/usr", url: RuntimeStore.usr)]
+        // /home rides along unconditionally for the same reason /usr does: a stable
+        // filesystem shape. It backs the shared agent home (see RuntimeStore.home).
+        var mounts: [(prefix: String, url: URL)] = [(prefix: "/home", url: RuntimeStore.home)]
+        if !RuntimeStore.installedNames().isEmpty {
+            mounts.append((prefix: "/usr", url: RuntimeStore.usr))
+        }
+        return mounts
+    }
+
+    /// `pip install <name>[==version] …` — pure-Python wheels only, straight from PyPI into
+    /// the runtime's site-packages. See `Pip` for why that subset is the honest one here.
+    private func pipCmd(_ args: [String], context: Context) async -> IO {
+        guard args.first == "install", args.count >= 2 else {
+            return IO(err: "pip: usage: pip install <package>[==version] …\n", status: 2)
+        }
+        guard RuntimeStore.installed("python") != nil else {
+            return IO(err: "pip: python is not installed — `pkg install python`\n", status: 1)
+        }
+        // Notes cross from the installer's task to the shell's context through a stream —
+        // `Context` is actor-bound and must not be captured in a @Sendable closure.
+        let (stream, continuation) = AsyncStream.makeStream(of: String.self)
+        let specs = Array(args.dropFirst())
+        let installer = Task {
+            defer { continuation.finish() }
+            try await Pip.install(specs) { continuation.yield($0) }
+        }
+        for await line in stream {
+            context.emit(Output(text: line, isError: false))
+        }
+        do {
+            try await installer.value
+        } catch {
+            return IO(err: "\(error)\n", status: 1)
+        }
+        return IO()
     }
 
     private func pkgCmd(_ args: [String], context: Context) async -> IO {
@@ -1481,10 +1521,37 @@ final class MouseShell {
         nodeDepth += 1
         defer { nodeDepth -= 1 }
         let engine = NodeEngine(root: context.root, env: env, shell: bridge, mounts: runtimeMounts)
-        let result = await engine.run(source: source, path: path, argv: ["node"] + (isEval ? [] : [path]) + args,
-                                      cwd: engine.namedRoot + (cwd.isEmpty ? "" : "/" + cwd), stdin: stdin)
-        context.reloadTree()   // scripts write files
-        return IO(out: result.out, err: result.err, status: result.status)
+        let argv = ["node"] + (isEval ? [] : [path]) + args
+        let runCwd = engine.namedRoot + (cwd.isEmpty ? "" : "/" + cwd)
+        // Live only for the TOP-LEVEL screenless run: a child the program spawned through the
+        // bridge (interactive == false) must hand its output back to the parent, not the chat.
+        guard interactive, context.liveOutput else {
+            let result = await engine.run(source: source, path: path, argv: argv, cwd: runCwd, stdin: stdin)
+            context.reloadTree()   // scripts write files
+            return IO(out: result.out, err: result.err, status: result.status)
+        }
+        // Chunks cross from the JS thread through a stream — `Context` is actor-bound and must
+        // not be captured in a @Sendable closure (the pip installer's pattern). Whole lines go
+        // out as they complete; a trailing partial line follows at exit.
+        let (stream, continuation) = AsyncStream.makeStream(of: String.self)
+        engine.liveStdout = { continuation.yield($0) }
+        let runner = Task {
+            let result = await engine.run(source: source, path: path, argv: argv, cwd: runCwd, stdin: stdin)
+            continuation.finish()
+            return result
+        }
+        var pending = ""
+        for await chunk in stream {
+            pending += chunk
+            while let newline = pending.firstIndex(of: "\n") {
+                context.emit(Output(text: String(pending[..<newline]), isError: false))
+                pending = String(pending[pending.index(after: newline)...])
+            }
+        }
+        let result = await runner.value
+        if !pending.isEmpty { context.emit(Output(text: pending, isError: false)) }
+        context.reloadTree()
+        return IO(out: "", err: result.err, status: result.status)
     }
 
     // MARK: - npm / pnpm / npx
@@ -1724,7 +1791,7 @@ final class MouseShell {
     static let builtinNames: Set<String> = [
         "help", "clear", "pwd", "cd", "ls", "cat", "echo", "printf", "mkdir", "touch", "rm",
         "mv", "cp", "head", "tail", "wc", "sort", "uniq", "tr", "cut", "seq", "grep", "find",
-        "date", "whoami", "true", "false", "env", "export", "unset", "history", "which",
+        "date", "whoami", "true", "false", "env", "export", "unset", "history", "which", "pip",
         "basename", "dirname", "open", "sleep", "ping", "curl", "wget", "tee", "xargs",
         "rev", "tac", "nl", "base64", "md5sum", "md5", "sha256sum", "shasum", "sed", "diff",
         "git", "less", "more", "nano", "vi", "vim", "uname", "lsb_release", "df", "free",

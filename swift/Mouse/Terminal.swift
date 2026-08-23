@@ -148,8 +148,9 @@ enum TerminalCellMetrics {
 /// The SCREEN renderer: rows of styled cells while a program owns the terminal. Redraws are
 /// driven by `screenGeneration` (the grid itself is a Foundation engine, not observable).
 /// No gestures of its own — the gesture law: content gets taps and the keyboard, the shell
-/// keeps the drags.
-private struct TerminalScreenGrid: View {
+/// keeps the drags. Internal, not private: the Agent container embeds it when an agent's own
+/// sign-in flow (a full-screen program) has to run inside the chat.
+struct TerminalScreenGrid: View {
     let terminal: TerminalSession
 
     var body: some View {
@@ -457,7 +458,9 @@ private final class ProgramKeyTextField: UITextField {
 ///
 /// Same shape as the git module's toolbar — bare labels on their own row at the top of the
 /// container, not chips — so a container's commands read the same wherever they appear.
-private struct TerminalKeyStrip: View {
+/// Internal, not private: the Agent container shows the same row above an agent's own sign-in
+/// or setup program — the keys a menu or a wizard wants are the same keys wherever it runs.
+struct TerminalKeyStrip: View {
     let session: TerminalSession
 
     // Words, not arrow glyphs: the git module's row reads `commit sync branch merge refresh`,
