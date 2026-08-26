@@ -1156,16 +1156,44 @@
     setColor: (on) => { colorOn = !!on; colorBtn.classList.toggle('on', colorOn); },
   };
 
+  // Pre-baked OCR: the words/boxes for each embed image are computed offline and
+  // saved next to the image at assets/ocr/<name>.json, so the hero renders
+  // recognized text as glyphs without ever loading tesseract at runtime. Falls
+  // back to plain dithering if a file is missing.
+  function ocrUrlFor(url) {
+    const slash = url.lastIndexOf('/');
+    const dir = slash >= 0 ? url.slice(0, slash + 1) : '';
+    const base = (slash >= 0 ? url.slice(slash + 1) : url).replace(/\.[a-z0-9]+$/i, '');
+    return dir + 'ocr/' + base + '.json';
+  }
+  async function applyBakedOCR(i, url) {
+    try {
+      const res = await fetch(ocrUrlFor(url));
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!data || !data.words || !data.words.length) return false;
+      const sl = slots[i];
+      sl.words = data.words;
+      sl.advN = data.advN || 0;
+      const { dw } = fitBox(sl.img);
+      sl.forceCw = Math.max(3, Math.min(30, sl.advN * dw));
+      rebuild(i);
+      return true;
+    } catch (_) { return false; }
+  }
+
   // Auto-boot images when listed via ?imgs=a,b,c (comma-separated relative paths)
   const imgs = (params.get('imgs') || '').split(',').map(s => s.trim()).filter(Boolean);
   if (imgs.length) {
-    window.DitherBoids.loadUrls(imgs).then(() => {
-      // mild black point so white backdrops drop out of the flock
-      if (active >= 0) {
-        slots[active].bp = 0.08;
-        blackEl.value = '8';
-        schedule(false);
+    window.DitherBoids.loadUrls(imgs).then(async () => {
+      // mild black point so the screens' dark backdrops drop out of the flock
+      for (let i = 0; i < slots.length; i++) {
+        slots[i].bp = 0.08;
+        if (EMBED && imgs[i]) await applyBakedOCR(i, imgs[i]);
       }
+      blackEl.value = '8';
+      if (active >= 0) applyTargets(active);
+      try { parent && parent !== window && parent.postMessage({ type: 'mouse-dither-ready' }, '*'); } catch (_) { /* no parent */ }
     });
   }
 

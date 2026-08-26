@@ -44,6 +44,15 @@
       : setTimeout(load, 200);
     if (document.readyState === 'complete') idle();
     else window.addEventListener('load', idle, { once: true });
+
+    // Fade the hero up from black once the flock has formed. The dither posts
+    // 'mouse-dither-ready' when its first screen is applied; the load handler is
+    // a fallback so the hero never stays black if that signal is missed.
+    const reveal = () => frame.classList.add('is-loaded');
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'mouse-dither-ready') reveal();
+    });
+    frame.addEventListener('load', () => setTimeout(reveal, 1600), { once: true });
   }
 
   // Pause dither iframe work when the hero leaves the viewport.

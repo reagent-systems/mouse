@@ -206,7 +206,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   height: 100%;
   pointer-events: auto;
   z-index: 1;
+  opacity: 0;
+  transition: opacity 0.9s var(--ease);
 }
+
+/* Fades up from the black hero once the flock has formed (see main.js). */
+.hero-viz.is-loaded { opacity: 1; }
 
 .hero-fade {
   position: absolute;
