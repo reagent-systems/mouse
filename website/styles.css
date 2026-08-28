@@ -1,5 +1,11 @@
 /* Mouse marketing site — dark, terminal honesty, monochrome, IBM Plex Mono */
 
+/* Self-hosted so the font never render-blocks on a third-party request. */
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("assets/fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("assets/fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("assets/fonts/ibm-plex-mono-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 700; font-display: swap; src: url("assets/fonts/ibm-plex-mono-latin-700-normal.woff2") format("woff2"); }
+
 :root {
   --bg: #060608;
   --bg-2: #0b0b0f;
@@ -200,7 +206,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   height: 100%;
   pointer-events: auto;
   z-index: 1;
+  opacity: 0;
+  transition: opacity 0.9s var(--ease);
 }
+
+/* Fades up from the black hero once the flock has formed (see main.js). */
+.hero-viz.is-loaded { opacity: 1; }
 
 .hero-fade {
   position: absolute;

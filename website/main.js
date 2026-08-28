@@ -34,8 +34,28 @@
     reveals.forEach(show);
   }
 
-  // Pause dither iframe work when hero leaves the viewport
+  // Defer the heavy dither iframe until the page has loaded and gone idle, so
+  // its canvas simulation never blocks first paint or inflates blocking time.
   const frame = document.querySelector('.hero-viz');
+  if (frame && frame.dataset.src) {
+    const load = () => { if (!frame.src) frame.src = frame.dataset.src; };
+    const idle = () => ('requestIdleCallback' in window)
+      ? requestIdleCallback(load, { timeout: 1500 })
+      : setTimeout(load, 200);
+    if (document.readyState === 'complete') idle();
+    else window.addEventListener('load', idle, { once: true });
+
+    // Fade the hero up from black once the flock has formed. The dither posts
+    // 'mouse-dither-ready' when its first screen is applied; the load handler is
+    // a fallback so the hero never stays black if that signal is missed.
+    const reveal = () => frame.classList.add('is-loaded');
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'mouse-dither-ready') reveal();
+    });
+    frame.addEventListener('load', () => setTimeout(reveal, 1600), { once: true });
+  }
+
+  // Pause dither iframe work when the hero leaves the viewport.
   if (frame && 'IntersectionObserver' in window) {
     const freeze = new IntersectionObserver(([e]) => {
       try {
