@@ -26,3 +26,6 @@ node_modules/
 # and agent worktrees. afca53e removed the loop file from tracking once already.
 .claude/ralph-loop.local.md
 .claude/worktrees/
+
+# Lighthouse CI local reports
+.lighthouseci/
