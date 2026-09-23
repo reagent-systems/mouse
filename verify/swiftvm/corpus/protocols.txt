@@ -1,0 +1,16 @@
+circle with area 3.0
+rect with area 6.0
+9.0
+Hello from default HELLO
+25
+tick
+tick
+tick
+42
+true false HEY!
+6
+[v0.9, v1.0, v1.2] v1.2 true
+true ["v0.9", "v1.0", "v1.2"]
+true 1
+Book: Dune Optional(Dune)
+[A, B]

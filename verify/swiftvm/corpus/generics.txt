@@ -1,0 +1,19 @@
+right left
+9 pear nil
+a 1 b nil
+1 one
+2 3
+[1, 2]
+b
+1 8 (min: 1, max: 8)
+7 b 2 Outer(inner: main.Outer.Inner(v: 7), kind: main.Outer.Kind.b)
+Derived 1 x Base 2
+2.718 27
+true
+3.14|   42|007|ff
+50%
+apple: $1.50
+kiwi: $0.25
+15
+[16, 9, 4, 1]
+["x", "y"] [1, 2]

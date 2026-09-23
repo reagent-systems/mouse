@@ -1,0 +1,12 @@
+Rex says Woof
+Tom says Meow (indoors)
+Generic says ...
+["sit", "roll"]
+dog with 2 tricks
+a cat
+something else
+6 3 nil
+true false 70.0 2
+75.0 true
+Shape with area 9.0
+main.Dog

@@ -1,0 +1,12 @@
+Point(x: 11, y: 12) Point(x: 1, y: 2) false true
+Point(x: 10, y: 11) 265 Point(x: 0, y: 0)
+Point(x: 12, y: 14)
+40 Point(x: 5, y: 2)
+Point(x: 45, y: 48) Rect(origin: main.Point(x: 45, y: 48), width: 10, height: 4)
+46
+3 2 2 false
+212.0 100.0
+changed from 0 to 5
+changed from 5 to 6
+[[], ["ann", "ben"]]
+[0.0, 3.5, 0.0, 2.0] 3.5

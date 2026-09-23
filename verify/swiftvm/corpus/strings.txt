@@ -1,0 +1,30 @@
+12 false HELLO, SWIFT hello, swift
+true true true
+H t Optional("H")
+["Hello", "Swift"]
+Hello, World
+tfiwS ,olleH
+["a", "b", "c"] ["A", "B", "C"]
+h e y 
+["Hello", "Swift"]
+abcdefg 7
+==========
+Line one
+  indented
+Line "three"
+tab	here quote"s back\slash
+true true true
+palindrome
+hell wrld
+hel lo ello hel
+3 age
+["f", "i", "s", "t", "w"]
+The Quick Brown Fox
+123 abc
+The answer is 42, doubled 84, big
+nested inner 43
+3.0 7
+vowels: 7
+x 120
+true true
+padded|

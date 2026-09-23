@@ -1,0 +1,17 @@
+north south 4
+true true
+3 mars nil
+♥ clubs spades
+big success 42
+failed: oops
+14
+green
+yellow
+caution
+double digit
+on x axis
+diagonal 3
+vowel
+16
+[main.Coin.penny, main.Coin.nickel, main.Coin.dime]
+has 5

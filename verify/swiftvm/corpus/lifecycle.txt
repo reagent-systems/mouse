@@ -1,0 +1,10 @@
+["will 10->15", "did 10->15", "will 15->1", "did 15->1"]
+car on 4 wheels bike on 2 wheels truck on 18 wheels
+20.0 Optional(37.5) nil
+high mid low [main.Level.low, main.Level.mid, main.Level.high]
+Shape(3) [Shape(4)]
+[10, 2, 3]
+2 2
+[[0], [1]]
+[1, 2, 3] 3
+done
