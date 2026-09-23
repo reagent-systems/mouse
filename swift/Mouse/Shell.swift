@@ -1281,8 +1281,8 @@ final class MouseShell {
         }
         let here = context.root.appendingPathComponent(cwd)
         let command = args.first ?? ""
-        var files: [(name: String, source: String)]
-        var title: String
+        let files: [(name: String, source: String)]
+        let title: String
         switch command {
         case "run", "build":
             guard let project = SwiftProject.detect(root: context.root, directory: here) else {

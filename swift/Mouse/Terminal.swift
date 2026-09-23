@@ -98,7 +98,9 @@ struct TerminalContainerView: View {
                 }
                 .padding(16)
                 .contentShape(Rectangle())
-                .onTapGesture { promptFocused = true }
+                // A running Swift app's own controls take its taps (a TextField must keep the
+                // focus it was tapped into), so the prompt only claims taps when there is none.
+                .onTapGesture { if terminal.surface == nil { promptFocused = true } }
                 // While a program runs, taps in this container are PROGRAM INPUT (the key
                 // strip, the screen) and must not double as keyboard dismissal. The region
                 // follows the container's real frame, so an edge-preview terminal registers

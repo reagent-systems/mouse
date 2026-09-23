@@ -100,6 +100,21 @@ corpus against spec truths; `resolveTree` against real `pnpm install
 `install()` by running **real `node`** in the installed root and
 requiring the package — the layout is correct only if Node's own
 resolver agrees. Integrity (sha512/sha1) is checked before unpacking.
+The SWIFT VM (`SwiftLanguage.swift` → `SwiftBytecode.swift` → `SwiftVM.swift`,
+plus `SwiftRuntimeLibrary.swift` and `SwiftViewLibrary.swift`) is
+Foundation-only and verifies against **real `swiftc`**: every program in
+`verify/swiftvm/corpus` was compiled with `swiftc -module-name main` and its
+output recorded beside it; the VM must match byte for byte (module-qualified
+names inside collections, `Optional(…)`, Double formatting — all of it). Add a
+program by writing it, recording the real output, and running the gate; a
+corpus program must be valid Swift, so compile it before recording. The same
+harness drives a SwiftUI app headlessly (`SwiftAppHost`: render, tap by action
+id, render again), detection, the threaded runner with ^C, and a linear-time
+guard. **In-place mutation must switch on `value.kind`, never on the value**:
+`switch value { case .array(var items): … }` keeps a temporary reference to the
+payload alive through the case body, the buffer has two owners, and every
+append copies — 20k appends took 13 s before this was found. Take the payload
+out with `take…()` and put it back (see `walk`, `mutateBuiltin`).
 The NODE LAYER (`NodeEngine.swift`, needs `-lz` — its zlib module rides
 libz, and CryptoKit backs crypto) verifies against **real `node`**: the
 same fixture scripts run through both engines in twin directory trees,
@@ -752,6 +767,13 @@ it, and force-quit-relaunch to prove it.
 | `GitGraphView.swift` | The git module: commit-graph layout + rendering, history fetch, and `GitModuleToolbar` (`commit · sync · branch · merge · refresh` in the header) |
 | `GitHubAuth.swift` | Device Flow, Keychain, sign-in container |
 | `GitHubPush.swift` | Git Data API push (blobs → tree → commit → ref) |
+| `SwiftLanguage.swift` | The Swift language as the VM reads it: lexer, syntax tree, recursive-descent parser — pure |
+| `SwiftBytecode.swift` | Swift → bytecode compiler: name resolution, closures/captures, patterns, in-place mutation paths |
+| `SwiftVM.swift` | The bytecode VM: values, type metadata, calls, paths, optionals, errors |
+| `SwiftRuntimeLibrary.swift` | Swift standard-library surface for the VM: printing, equality, String/Array/Dictionary/Set, math |
+| `SwiftViewLibrary.swift` | SwiftUI as the VM sees it: view nodes, `SwiftAppHost` (render, @State store, actions) — Foundation-only |
+| `SwiftProject.swift` | Swift project detection, source collection, the VM thread (`SwiftRunner`), `swift run` as a `TerminalProgram` |
+| `SwiftAppSurface.swift` | Draws a running Swift app's rendered tree with real SwiftUI inside the Terminal container |
 | `Shell.swift` | `msh` — the from-scratch shell: AST evaluator (control flow, functions, pipelines, redirects), expansion (fields, globs, `${…}` ops, `$(…)`), ~60 built-ins incl. `git` and `sh`, and `ICMPPinger` (real ping) |
 | `ShellLanguage.swift` | The msh language: lexer, AST, recursive-descent parser, `$((…))` arithmetic — pure, no I/O, no state |
 | `PackageManager.swift` | Phase F: semver, npm registry client, tree resolver (classic hoisting), tarball installer (integrity-checked), `node_modules` manifest, and `TarGz` (moved from Workspace) |

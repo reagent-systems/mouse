@@ -28,6 +28,7 @@ numbers some of the same ground differently; the mapping is noted per row.
 | **B** — WebView JIT | Move JS/wasm execution into WKWebView for JIT speed | **Not started — optional** | Measured: everything runs interpreted; the JIT buys speed, not capability (system.md:2094). No longer a prerequisite for anything |
 | **C** — Preview container | In-app viewing surface for what dev servers serve; LAN hosting | **Not started** | The server half works (vite serves clients outside the app — gated in `verify/devserver`); no in-app viewer exists |
 | **E** — wasm runtime processes | Real processes: `$PATH`, executable bits, `ps`/`kill`/`&`, pipes between programs; other languages (Python first) as wasm32-wasi artifacts | **Runtime half done** | `pkg install python` downloads the official CPython wasm32-wasi build, hash-checks it, unpacks it (zip reader written here — iOS has no `unzip`) and `python hello.py` runs CPython 3.14.6. `swift/Mouse/Runtimes.swift` + mounts in `NodeEngine`. Gated: `verify/python`, `verify/pkgpython`. Written up in system.md §5b. Missing: `$PATH`, executable bits, background jobs (`&` is still refused by name in the lexer) |
+| **S** — Swift projects | `swift run` / `swift build` in a Swift project: Swift source compiled to bytecode and interpreted on the device; SwiftUI programs drawn natively in the Terminal container | **Headless done; not yet run on device** | `swift/Mouse/Swift*.swift`. Gated: `verify/swiftvm` — 13 programs byte-identical to real `swiftc` 6.1.2, trap and compile-error messages, a SwiftUI app driven headlessly (`@State`, `@Binding`, a rebuilt child keeping its own state), project detection, the threaded runner stopping on ^C, a linear-time guard. Proven able to fail (corrupted baseline; state store disabled). Built and run on Linux with swiftc 6.1.2 in Swift 6 mode, against a stub of `TerminalProgram` (its file needs JavaScriptCore); `xcodebuild`, the full `verify.sh` run, and a device run are still owed |
 
 ## On the device
 
@@ -138,6 +139,13 @@ commands.
   the user's.
 
 ## Open leads (tracked, unclaimed)
+
+- Phase S on the device: build with `xcodebuild`, run `swift run` in a package
+  and in a SwiftUI app, feel-test the app surface against the gesture law (a
+  `Slider`'s horizontal drag against the lane swipe is the case to check).
+  Language gaps known today: generic type names in `print` (`Pair<Int, String>`
+  prints as `Pair`), `lazy` initialisers that read `self`, and every framework
+  beyond Foundation's string/math surface and the modelled SwiftUI views.
 
 - vitest stops at its worker handshake (exit 13) — everything ruled out is
   recorded; wants a fresh session.

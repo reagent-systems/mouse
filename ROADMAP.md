@@ -91,6 +91,13 @@ Mac and signs the artifact on device. The plan's Phase 0 (a local artifact
 server) is the same server the dev-server engine and Preview container
 need, so it pays for itself three times.
 
+Swift *source* now runs on the phone without that loop: in a Swift project
+the terminal's `swift run` compiles to Mouse's own bytecode and interprets
+it (`Swift*.swift`), and a SwiftUI program draws with real SwiftUI in the
+Terminal container. It is a language subset with no native frameworks
+beyond the SwiftUI views it models — iteration, not shipping; the
+compile-and-sign plan above is still the path to an installed app.
+
 ### `flutterflow` — visual app building
 
 Compose real UI by direct manipulation, generate honest code into the
