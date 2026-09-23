@@ -54,6 +54,10 @@ final class TerminalSession {
     /// keystrokes repainted an invisible screen. Updated at launch, on the program's
     /// `modeChanged` call, and at exit.
     private(set) var programOnScreen = false
+    /// What the running program draws in place of the terminal (a Swift program's app), read
+    /// from the program at launch and on every `modeChanged` — the same observability rule as
+    /// `programOnScreen`.
+    private(set) var surface: AnyObject?
     /// Whether the current program ever used the ALTERNATE screen. An alt-screen program
     /// (less, vim) restores the normal screen on exit — nothing to keep. An inline TUI (ink)
     /// leaves its last frame ON the normal screen, and a real terminal keeps that frame in
@@ -210,6 +214,7 @@ final class TerminalSession {
         parser.feed("\u{1b}[?1049l\u{1b}[?25h\u{1b}[?1l\u{1b}[?2004l\u{1b}c")
         self.program = program
         programOnScreen = program.rendersScreen
+        surface = program.surface
         programUsedAltScreen = false
         screenGeneration += 1
         // Terminal query replies (DSR/DA/DECRQM) travel back to the program as keystrokes —
@@ -229,6 +234,7 @@ final class TerminalSession {
             modeChanged: { [weak self] in
                 guard let self, let program = self.program else { return }
                 self.programOnScreen = program.rendersScreen
+                self.surface = program.surface
                 self.screenGeneration += 1
             }
         ))
@@ -292,6 +298,7 @@ final class TerminalSession {
         }
         program = nil
         programOnScreen = false
+        surface = nil
         interruptedAt = nil
         parser.respond = nil
         // A crashed-out program must not strand the terminal on the alt screen.

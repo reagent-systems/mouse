@@ -142,6 +142,8 @@ enum SwiftRenderedValue: Sendable, Equatable {
     case bool(Bool)
     case name(String)
     case color(String)
+    /// An implicit member called with arguments: `.system(size: 30)`, `.degrees(45)`.
+    indirect case call(String, [SwiftRenderedValue], [String?])
 }
 
 // MARK: - The host
@@ -350,7 +352,7 @@ final class SwiftAppHost {
                 out.modifiers.append(SwiftRenderedModifier(name: "onDecrement", values: [], labels: [], action: register(dec)))
             }
         case "Color":
-            out.value = .color(try text(node.args.first) ?? "clear")
+            out.value = .color(colorName(node))
         case "RoundedRectangle":
             if let r = node.argument("cornerRadius"), let n = SwiftRuntime.number(r) { out.value = .number(n) }
         default:
@@ -368,6 +370,32 @@ final class SwiftAppHost {
         return [out]
     }
 
+    /// A modifier argument as plain data.
+    private func renderedValue(_ v: SwiftValue) -> SwiftRenderedValue {
+        switch v.dereferenced {
+        case .int(let i): return .number(Double(i))
+        case .double(let d): return .number(d)
+        case .string(let s): return .string(s)
+        case .bool(let b): return .bool(b)
+        case .unresolved(let u):
+            guard let args = u.args else { return .name(u.name) }
+            return .call(u.name, args.map(renderedValue), u.labels)
+        case .view(let n) where n.kind == "Color": return .color(colorName(n))
+        default: return .none
+        }
+    }
+
+    /// `Color.red` → "red"; `Color(red: 1, green: 0.5, blue: 0)` → "rgb:1,0.5,0,1".
+    private func colorName(_ node: SwiftViewNode) -> String {
+        if case .string(let name)? = node.args.first { return name }
+        let numbers = node.args.compactMap(SwiftRuntime.number)
+        if numbers.count >= 3 {
+            return "rgb:" + (numbers + (numbers.count == 3 ? [1] : [])).map { String($0) }.joined(separator: ",")
+        }
+        if let white = node.argument("white").flatMap(SwiftRuntime.number) { return "rgb:\(white),\(white),\(white),1" }
+        return "clear"
+    }
+
     private func renderedName(_ v: SwiftValue) -> String? {
         if case .unresolved(let u) = v.dereferenced { return u.name }
         return nil
@@ -381,8 +409,8 @@ final class SwiftAppHost {
             case .double(let d): rendered.values.append(.number(d))
             case .string(let s): rendered.values.append(.string(s))
             case .bool(let b): rendered.values.append(.bool(b))
-            case .unresolved(let u): rendered.values.append(.name(u.name))
-            case .view(let n) where n.kind == "Color": rendered.values.append(.color(try text(n.args.first) ?? "clear"))
+            case .unresolved: rendered.values.append(renderedValue(value))
+            case .view(let n) where n.kind == "Color": rendered.values.append(.color(colorName(n)))
             case .function:
                 if modifier.name == "onAppear" {
                     if !appeared.contains(path) {

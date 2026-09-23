@@ -1238,6 +1238,7 @@ final class MouseShell {
         case "npx": return await npxCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "node": return await nodeCmd(args, stdin: stdin, context: context, interactive: interactive)
         case "pkg": return await pkgCmd(args, context: context)
+        case "swift": return swiftCmd(args, context: context, interactive: interactive)
         case "kill", "killall":
             return IO(err: "\(name): no processes on iOS (any keypress stops a running command)", status: 1)
         case "ss", "netstat":
@@ -1267,6 +1268,58 @@ final class MouseShell {
             }
             return IO(err: "msh: command not found: \(name) (type help)", status: 127)
         }
+    }
+
+    // MARK: - swift (Swift projects, compiled to bytecode and run in the Swift VM)
+
+    /// `swift run`, `swift build`, `swift <file.swift>` — only inside a Swift project. The
+    /// compiler and VM are ours (`SwiftBytecode.swift`, `SwiftVM.swift`): iOS runs neither
+    /// swiftc nor anything it emits.
+    private func swiftCmd(_ args: [String], context: Context, interactive: Bool) -> IO {
+        if args.first == "--version" || args.first == "-version" {
+            return IO(out: "Mouse Swift VM 1.0\n")
+        }
+        let here = context.root.appendingPathComponent(cwd)
+        let command = args.first ?? ""
+        var files: [(name: String, source: String)]
+        var title: String
+        switch command {
+        case "run", "build":
+            guard let project = SwiftProject.detect(root: context.root, directory: here) else {
+                return IO(err: "swift: not a Swift project\n", status: 1)
+            }
+            do {
+                files = try project.sources(target: args.dropFirst().first { !$0.hasPrefix("-") })
+            } catch {
+                return IO(err: "swift \(command): \(error)\n", status: 1)
+            }
+            title = "swift run \(project.name)"
+            if command == "build" {
+                do {
+                    _ = try SwiftCompiler.compile(files: files)
+                    return IO(out: "Compiled \(project.name) (\(files.count) file\(files.count == 1 ? "" : "s"))\n")
+                } catch {
+                    return IO(err: "\(error)\n", status: 1)
+                }
+            }
+        case "":
+            return IO(err: "usage: swift run [target] | swift build | swift <file.swift>\n", status: 2)
+        default:
+            guard command.hasSuffix(".swift"), let resolved = resolve(command, context: context),
+                  let source = try? String(contentsOf: resolved.url, encoding: .utf8) else {
+                return IO(err: "swift: can't read \(command)\n", status: 1)
+            }
+            files = [("main.swift", source)]
+            title = "swift \(command)"
+        }
+        let program = SwiftRunProgram(title: title, files: files) { line, isError in
+            context.emit(Output(text: line, isError: isError))
+        }
+        guard interactive, let launch = context.launchProgram else {
+            return IO(err: "swift: runs only at the prompt\n", status: 1)
+        }
+        launch(program)
+        return IO()
     }
 
     // MARK: - node (the phase-G engine behind `node`, bins, and npx)
@@ -1730,7 +1783,7 @@ final class MouseShell {
         "git", "less", "more", "nano", "vi", "vim", "uname", "lsb_release", "df", "free",
         "uptime", "ps", "top", "htop", "ip", "ifconfig", "chmod", "chown", "passwd", "sudo",
         "apt", "apt-get", "dpkg", "brew", "kill", "killall", "ss", "netstat", "systemctl",
-        "service",
+        "service", "swift",
     ]
 
     // One command per line: the terminal wraps and scrolls vertically, so a single column
@@ -1806,6 +1859,7 @@ final class MouseShell {
       npm <install [pkg[@range]…] | ls>   (pnpm / yarn alias)
       npx <package>
       node <file> / node -e <code>
+      swift run [target] / swift build / swift <file.swift>
     language:
       if …; then …; elif …; else …; fi
       for NAME in …; do …; done

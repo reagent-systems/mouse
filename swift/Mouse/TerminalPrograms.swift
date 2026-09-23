@@ -112,6 +112,10 @@ protocol TerminalProgram: AnyObject {
     func input(_ text: String)
     /// The visible grid changed size (rotation): adopt it and repaint.
     func resize(rows: Int, columns: Int)
+    /// Something the terminal draws INSTEAD of the grid or the transcript while the program
+    /// runs — a Swift program's SwiftUI app (`SwiftAppSession`). Typed loosely so the terminal
+    /// layer does not depend on the Swift VM. Announce a change through `io.modeChanged`.
+    var surface: AnyObject? { get }
     /// The shell is taking the terminal back — stop, release everything, and exit. No veto:
     /// this is `canc` pressed twice, the phone's close button, for a program that ignored ^C.
     /// (`sv`'s closing screen kept a raw stdin listener alive after its work was done — the
@@ -121,6 +125,10 @@ protocol TerminalProgram: AnyObject {
 
 /// The kernel side of a running program: its stdout, its exit(2), and the screen geometry it
 /// was born with.
+extension TerminalProgram {
+    var surface: AnyObject? { nil }
+}
+
 struct TerminalProgramIO {
     let rows: Int
     let columns: Int

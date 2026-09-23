@@ -30,7 +30,8 @@ struct TerminalContainerView: View {
                         TerminalKeyStrip(session: terminal)
                     }
                     // Two modes, like a real terminal: the transcript (scrollback), or the
-                    // SCREEN while a full-screen program (less, top) owns it. The geometry
+                    // SCREEN while a full-screen program (less, top) owns it — plus a third
+                    // that no terminal has: a running Swift program's SwiftUI app. The geometry
                     // reader sizes the character grid either way, so a program is born at
                     // the size it will draw into.
                     GeometryReader { geo in
@@ -40,7 +41,10 @@ struct TerminalContainerView: View {
                             // plain object, observation never fires, and the view keeps
                             // showing the scrollback while the TUI draws on an invisible
                             // grid (the claude-code-drew-in-the-scrollback bug).
-                            if terminal.programOnScreen {
+                            if let app = terminal.surface as? SwiftAppSession {
+                                // A Swift program's app replaces the terminal until `canc`.
+                                SwiftAppSurface(app: app)
+                            } else if terminal.programOnScreen {
                                 TerminalScreenGrid(terminal: terminal)
                             } else {
                                 // Bottom-anchored like a chat: content sticks to the bottom
