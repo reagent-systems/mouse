@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0A6F9CDD9D58550755EB4B28 /* ForegroundView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */; };
+		0ADF657B710537CE106E859B /* SwiftProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = E888612842DC975770EADEE4 /* SwiftProject.swift */; };
 		0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */; };
 		13494FDD63F9B72CF5ADE9C0 /* GitRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A75575D9A3B5DE3BF7A0B2C0 /* GitRemote.swift */; };
 		2023624DA13C04BD2E402AF1 /* NodeScrypt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */; };
@@ -15,10 +16,12 @@
 		26A30C412C7EDEC903FAB619 /* NodeDNS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 933C6240D3EEE403A1818213 /* NodeDNS.swift */; };
 		2835B0449AF44C49E2FDA13B /* AsciiLogoBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */; };
 		2999E7E33AFEDC980ED858F8 /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00872DE418EF1E21957DA2B3 /* TerminalSession.swift */; };
+		2C10C2B208BEF506F7C72713 /* SwiftViewLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698A4AF783083F992BE85AB8 /* SwiftViewLibrary.swift */; };
 		2E7F41B7E5FCEFF2ECC7AA09 /* NodeBrotli.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA007916E1B80807354B7C21 /* NodeBrotli.swift */; };
 		2F0EE6F9105610221954933F /* TerminalWidth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95DA74F4F94E389C0F12E31 /* TerminalWidth.swift */; };
 		356A7B9FE48709698EEEF0FA /* AsciiArtLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */; };
 		3762A096CA885FBEA52CC4AD /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B23A8EB8050D0EFED1198A4 /* Workspace.swift */; };
+		37EBBD09E8EF5121EAC74479 /* SwiftAppSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97C0E03ED17EF4D683844761 /* SwiftAppSurface.swift */; };
 		3850D15015A8389199DB6D3F /* AsciiArtStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0114DFFF7C492C6DE1FE952 /* AsciiArtStyle.swift */; };
 		3C060871009B04B75DD57460 /* MouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F529B8B560B4DB034F9698 /* MouseApp.swift */; };
 		3CBA0D3FCBEAE0055B741849 /* NodeKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA049B76029F618EF94C1571 /* NodeKeys.swift */; };
@@ -28,11 +31,15 @@
 		4F544F15A1B0E044B5AEDDC0 /* PackageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A88D15C6B606882BE9F472E /* PackageManager.swift */; };
 		516851F9284F04C69F6B3DA1 /* Runtimes.json in Resources */ = {isa = PBXBuildFile; fileRef = C698F23621B02ACFD773CEFC /* Runtimes.json */; };
 		5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 525AB48D09A783EF07137189 /* TerminalScreen.swift */; };
+		53DAA4874C7E0B6CE7D403AD /* SwiftVM.swift in Sources */ = {isa = PBXBuildFile; fileRef = 925E820A8135916D06A5EF0A /* SwiftVM.swift */; };
 		5430CDE9E255DBF12E04A8E5 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */; };
 		5F08C64F05CA4FF19DDA911F /* CarouselDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */; };
 		5FBF4EB2A75F6E489D12C014 /* GitHubPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAE14386F75AAF0B835E324C /* GitHubPush.swift */; };
+		68D1C19F736531A594CB92A9 /* SwiftRuntimeLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = F159B74190D981E4F5C5609F /* SwiftRuntimeLibrary.swift */; };
+		6A32102F9D1EDECF960B665B /* SwiftLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34E6BE0866A48A5AB7F1E96B /* SwiftLanguage.swift */; };
 		6E38F06822105BFE7C367992 /* GitCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 179217813E4A44F9859669C5 /* GitCore.swift */; };
 		7200308360108CD7B01CC6A9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2B92464EFB49888F46248A5 /* Assets.xcassets */; };
+		742543A8C20C37475D7ADD5B /* SwiftBytecode.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF1E48FC7207E6C8DDF2F507 /* SwiftBytecode.swift */; };
 		8AD0462F79AD667DA80205E2 /* AsciiArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E73E50FC2D809F76902185C /* AsciiArt.swift */; };
 		8F0C87F3E43FA31B4B65A73F /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 503560AF5D76D20B38402E7F /* ContentView.swift */; };
 		95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */; };
@@ -58,6 +65,7 @@
 		18D9E4CB580ECCF3AC62E780 /* NodeScrypt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeScrypt.swift; sourceTree = "<group>"; };
 		21FD3889B912E90E5C1C09BF /* AsciiArtLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiArtLabel.swift; sourceTree = "<group>"; };
 		2D1234209A0254A06BB8E915 /* Terminal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Terminal.swift; sourceTree = "<group>"; };
+		34E6BE0866A48A5AB7F1E96B /* SwiftLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftLanguage.swift; sourceTree = "<group>"; };
 		38F529B8B560B4DB034F9698 /* MouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseApp.swift; sourceTree = "<group>"; };
 		3A88D15C6B606882BE9F472E /* PackageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageManager.swift; sourceTree = "<group>"; };
 		503560AF5D76D20B38402E7F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -65,9 +73,12 @@
 		5A7FDD7DE14447F992EB32D3 /* Shell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Shell.swift; sourceTree = "<group>"; };
 		5B23A8EB8050D0EFED1198A4 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		5CB3CB2A63A95F423462137F /* AsciiLogoBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsciiLogoBackground.swift; sourceTree = "<group>"; };
+		698A4AF783083F992BE85AB8 /* SwiftViewLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftViewLibrary.swift; sourceTree = "<group>"; };
 		7D58EFCD024FB4FFA0E73B4D /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		8EE8007D9DA67ECAD904DE3B /* ForegroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundView.swift; sourceTree = "<group>"; };
+		925E820A8135916D06A5EF0A /* SwiftVM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftVM.swift; sourceTree = "<group>"; };
 		933C6240D3EEE403A1818213 /* NodeDNS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeDNS.swift; sourceTree = "<group>"; };
+		97C0E03ED17EF4D683844761 /* SwiftAppSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftAppSurface.swift; sourceTree = "<group>"; };
 		98C60EC69E3F855F129D64D0 /* IBMPlexMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Bold.ttf"; sourceTree = "<group>"; };
 		9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPrograms.swift; sourceTree = "<group>"; };
 		A61DF9311DFBF5412D0FE960 /* CarouselDeck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarouselDeck.swift; sourceTree = "<group>"; };
@@ -81,9 +92,12 @@
 		C698F23621B02ACFD773CEFC /* Runtimes.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Runtimes.json; sourceTree = "<group>"; };
 		C6C7D80DCC2D8B70348B7B6E /* NodeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeEngine.swift; sourceTree = "<group>"; };
 		CAE14386F75AAF0B835E324C /* GitHubPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubPush.swift; sourceTree = "<group>"; };
+		DF1E48FC7207E6C8DDF2F507 /* SwiftBytecode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftBytecode.swift; sourceTree = "<group>"; };
 		E2B92464EFB49888F46248A5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E888612842DC975770EADEE4 /* SwiftProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftProject.swift; sourceTree = "<group>"; };
 		EA007916E1B80807354B7C21 /* NodeBrotli.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBrotli.swift; sourceTree = "<group>"; };
 		F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StripPersistence.swift; sourceTree = "<group>"; };
+		F159B74190D981E4F5C5609F /* SwiftRuntimeLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftRuntimeLibrary.swift; sourceTree = "<group>"; };
 		F5B299975B30C229DCCCB015 /* GitGraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitGraphView.swift; sourceTree = "<group>"; };
 		FB01C138F6E8F2292E1D3EC4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -121,6 +135,13 @@
 				5A7FDD7DE14447F992EB32D3 /* Shell.swift */,
 				080B55B70E27E9BD21FDF728 /* ShellLanguage.swift */,
 				F0800EDDCC9396803E8C7B94 /* StripPersistence.swift */,
+				97C0E03ED17EF4D683844761 /* SwiftAppSurface.swift */,
+				DF1E48FC7207E6C8DDF2F507 /* SwiftBytecode.swift */,
+				34E6BE0866A48A5AB7F1E96B /* SwiftLanguage.swift */,
+				E888612842DC975770EADEE4 /* SwiftProject.swift */,
+				F159B74190D981E4F5C5609F /* SwiftRuntimeLibrary.swift */,
+				698A4AF783083F992BE85AB8 /* SwiftViewLibrary.swift */,
+				925E820A8135916D06A5EF0A /* SwiftVM.swift */,
 				2D1234209A0254A06BB8E915 /* Terminal.swift */,
 				9FCD3BEDD150B2840E5F82B0 /* TerminalPrograms.swift */,
 				525AB48D09A783EF07137189 /* TerminalScreen.swift */,
@@ -254,6 +275,13 @@
 				A0BF04BC9035D20B399D75B7 /* Shell.swift in Sources */,
 				95EECE607920E991570AF1F7 /* ShellLanguage.swift in Sources */,
 				4298DF297174F68A93AFEFF2 /* StripPersistence.swift in Sources */,
+				37EBBD09E8EF5121EAC74479 /* SwiftAppSurface.swift in Sources */,
+				742543A8C20C37475D7ADD5B /* SwiftBytecode.swift in Sources */,
+				6A32102F9D1EDECF960B665B /* SwiftLanguage.swift in Sources */,
+				0ADF657B710537CE106E859B /* SwiftProject.swift in Sources */,
+				68D1C19F736531A594CB92A9 /* SwiftRuntimeLibrary.swift in Sources */,
+				53DAA4874C7E0B6CE7D403AD /* SwiftVM.swift in Sources */,
+				2C10C2B208BEF506F7C72713 /* SwiftViewLibrary.swift in Sources */,
 				A7CA8073A0F4F3C57BDAD7A7 /* Terminal.swift in Sources */,
 				0F61C34EFE589B98FD5218C1 /* TerminalPrograms.swift in Sources */,
 				5300617D815A8D12CAD0FD96 /* TerminalScreen.swift in Sources */,

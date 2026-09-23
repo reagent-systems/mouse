@@ -55,7 +55,7 @@ struct SwiftRenderedView: View {
             List { kids }
         case "Section":
             if let header = node.text {
-                Section(header: Text(header)) { kids }
+                Section { kids } header: { Text(header) }
             } else {
                 Section { kids }
             }
@@ -187,6 +187,7 @@ private struct SwiftRenderedTextField: View {
     }
 }
 
+@MainActor
 enum SwiftRenderedStyle {
     static func color(_ value: SwiftRenderedValue) -> Color? {
         guard case .color(let name) = value else {
